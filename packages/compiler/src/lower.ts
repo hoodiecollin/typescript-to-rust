@@ -11,16 +11,19 @@
 
 import { type ModuleAnalysis, SCRIPT_SCOPE, analyzeModule } from "./analysis";
 import type {
+  BlockStatement,
   CallExpression,
   Expression,
   FunctionDeclaration,
   Identifier,
+  IfStatement,
   Literal,
   MemberExpression,
   Program,
   Statement,
   TSType,
   VariableDeclaration,
+  WhileStatement,
 } from "./ast";
 import type {
   Borrow,
@@ -163,13 +166,66 @@ function lowerStatement(
         },
       ];
     case "IfStatement":
-    case "WhileStatement":
-      // Seam (series 006): the HIR + emitter render `if`/`while`, but lowering
-      // is not wired yet — swapped for real lowering at GREEN.
-      throw new UnsupportedError({ type: "control flow lowering pending" });
+      return [lowerIf(stmt as IfStatement, analysis, scope)];
+    case "WhileStatement": {
+      const w = stmt as WhileStatement;
+      return [
+        {
+          kind: "while",
+          cond: lowerExpr(w.test, analysis),
+          body: lowerBlock(w.body, analysis, scope),
+        },
+      ];
+    }
     default:
       throw new UnsupportedError(stmt);
   }
+}
+
+function lowerIf(
+  stmt: IfStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
+  return {
+    kind: "if",
+    cond: lowerExpr(stmt.test, analysis),
+    conseq: lowerBlock(stmt.consequent, analysis, scope),
+    alt: lowerAlternate(stmt.alternate, analysis, scope),
+  };
+}
+
+/**
+ * Lower an `else` branch: absent → `null`; an `else if` (the alternate is itself
+ * an `IfStatement`) → a one-element `[if]` the emitter renders as `else if …`;
+ * an `else { … }` block → its lowered statements.
+ */
+function lowerAlternate(
+  alt: Statement | null,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt[] | null {
+  if (!alt) return null;
+  if (alt.type === "IfStatement") {
+    return [lowerIf(alt as IfStatement, analysis, scope)];
+  }
+  return lowerBlock(alt, analysis, scope);
+}
+
+/**
+ * Lower a control-flow body — a `{ … }` block or a single bare statement. The
+ * scope key is unchanged: mutability is name-based and per-function, so a binding
+ * inside a block resolves under the enclosing function's scope (see analysis.ts).
+ */
+function lowerBlock(
+  body: Statement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt[] {
+  if (body.type === "BlockStatement") {
+    return lowerStatements((body as BlockStatement).body, analysis, scope);
+  }
+  return lowerStatement(body, analysis, scope);
 }
 
 function lowerVarDecl(

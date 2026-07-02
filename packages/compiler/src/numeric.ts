@@ -30,9 +30,28 @@ export function refineNumerics(module: HirModule): HirModule {
 }
 
 function refineBody(params: HirParam[], stmts: HirStmt[]): void {
-  const usize = computeUsizeNames(stmts);
-  detectConflicts(stmts, usize);
-  applyTypes(params, stmts, usize);
+  // Flatten control-flow bodies into one list of statement references so the
+  // name-based fixpoint reaches indices inside `if`/`while` blocks (the shared
+  // statement objects are mutated in place, so retyping still lands).
+  const all = flattenStmts(stmts);
+  const usize = computeUsizeNames(all);
+  detectConflicts(all, usize);
+  applyTypes(params, all, usize);
+}
+
+/** All statements, descending into `if`/`while` bodies (references preserved). */
+function flattenStmts(stmts: HirStmt[]): HirStmt[] {
+  const out: HirStmt[] = [];
+  for (const stmt of stmts) {
+    out.push(stmt);
+    if (stmt.kind === "if") {
+      out.push(...flattenStmts(stmt.conseq));
+      if (stmt.alt) out.push(...flattenStmts(stmt.alt));
+    } else if (stmt.kind === "while") {
+      out.push(...flattenStmts(stmt.body));
+    }
+  }
+  return out;
 }
 
 // ── Fixpoint: which binding names must be `usize` ─────────────────────────────
@@ -155,6 +174,12 @@ function eachStmtExpr(stmt: HirStmt, fn: (e: HirExpr) => void): void {
       break;
     case "expr":
       eachExpr(stmt.expr, fn);
+      break;
+    // `if`/`while` bodies are visited via `flattenStmts`; here we only surface
+    // the condition expression (an index may sit in it, e.g. `while (arr[i])`).
+    case "if":
+    case "while":
+      eachExpr(stmt.cond, fn);
       break;
   }
 }

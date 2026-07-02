@@ -84,7 +84,7 @@ function emitStmt(stmt: HirStmt): string {
     case "expr":
       return `${emitExpr(stmt.expr)};`;
     case "if": {
-      const head = `if ${emitExpr(stmt.cond)} ${block(stmt.then)}`;
+      const head = `if ${emitExpr(stmt.cond)} ${block(stmt.conseq)}`;
       if (stmt.alt === null) return head;
       // An `else if` chain: a lone `if` alternate renders as `else if …`,
       // never the un-idiomatic `else { if … }`.

@@ -157,8 +157,10 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
       `    return "zero";`,
       `  }`,
       `}`,
+      // `0 - 3` (not the literal `-3`): unary minus is a separate, unshipped
+      // gap — keep this differential focused on control flow, in-dialect.
       `console.log(check(5));`,
-      `console.log(check(-3));`,
+      `console.log(check(0 - 3));`,
       `console.log(check(0));`,
     ].join("\n");
 

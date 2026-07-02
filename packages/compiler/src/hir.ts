@@ -89,10 +89,11 @@ export type HirStmt =
   | { kind: "return"; value: HirExpr | null }
   | { kind: "expr"; expr: HirExpr }
   /**
-   * `if cond { then } [else …]`. `alt` is `null` for a bare `if`, a one-element
-   * `[{kind:"if"…}]` for an `else if` chain, or the else block's statements.
+   * `if cond { conseq } [else …]`. `alt` is `null` for a bare `if`, a
+   * one-element `[{kind:"if"…}]` for an `else if` chain, or the else block's
+   * statements. (`conseq`, not `then`, to avoid thenable confusion.)
    */
-  | { kind: "if"; cond: HirExpr; then: HirStmt[]; alt: HirStmt[] | null }
+  | { kind: "if"; cond: HirExpr; conseq: HirStmt[]; alt: HirStmt[] | null }
   | { kind: "while"; cond: HirExpr; body: HirStmt[] };
 
 // ── Items & module ───────────────────────────────────────────────────────────
