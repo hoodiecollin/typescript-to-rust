@@ -33,6 +33,7 @@ import type {
   RustType,
 } from "./hir";
 import { refineNumerics } from "./numeric";
+import { refineStrings } from "./strings";
 
 export class UnsupportedError extends Error {
   constructor(
@@ -73,8 +74,9 @@ export function lower(program: Program): HirModule {
     main = lowerStatements(script, analysis, SCRIPT_SCOPE);
   }
 
-  // Final gate step: refine `number` → `usize` where indexing demands it.
-  return refineNumerics({ items, main });
+  // Final gate steps: refine `number` → `usize` where indexing demands it, then
+  // read-only `string` params (`&String`) → the idiomatic `&str`.
+  return refineStrings(refineNumerics({ items, main }));
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────

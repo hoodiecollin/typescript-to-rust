@@ -32,6 +32,8 @@ export type RustType =
   | { kind: "f64" }
   | { kind: "usize" }
   | { kind: "String" }
+  /** The unsized string slice `str` — only ever valid behind a `ref` (`&str`). */
+  | { kind: "str" }
   | { kind: "bool" }
   | { kind: "unit" }
   | { kind: "vec"; elem: RustType }

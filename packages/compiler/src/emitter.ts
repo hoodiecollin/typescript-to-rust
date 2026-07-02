@@ -162,6 +162,8 @@ function emitType(ty: RustType): string {
       return "usize";
     case "String":
       return "String";
+    case "str":
+      return "str";
     case "bool":
       return "bool";
     case "unit":
