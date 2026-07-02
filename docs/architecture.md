@@ -129,10 +129,20 @@ rejects nothing, so every dialect decision has exactly one home.
    (`total + val`, `f64 + &f64`, compiles via std ref-arithmetic). Block bodies
    thread the enclosing function's scope key — mutability is name-based and
    per-function, so a block-local binding still resolves there (no per-block scope
-   yet). Numeric inference flattens control-flow, block, and `forIn` bodies so
-   index refinement reaches inside them. `switch` and `break`/`continue` are not
-   yet lowered (each its own series); the `for`-desugar is sound only without
-   `continue` (which would skip the appended `update`).
+   yet). `switch` lowers to a `match` with **guarded wildcard** arms
+   (`_ if disc == case => …`, `default` → `_ =>`, `lowerSwitch`) — Rust forbids
+   `f64` literal patterns, so the discriminant is compared in a guard; cases must
+   terminate (a trailing `break` is the case terminator and is stripped, no
+   fall-through), and a synthetic `_ => {}` is appended when there is no
+   `default`. `break`/`continue` lower to Rust `break;`/`continue;`. Numeric
+   inference flattens control-flow, block, `forIn`, and `match` bodies so index
+   refinement reaches inside them.
+
+   The `for`-desugar is sound with `break` (it exits the `while`, as the `for`
+   would) but **not** with `continue` (which would skip the appended `update`);
+   `lowerFor` therefore rejects an *own* `continue` (`hasOwnContinue`, stopping at
+   nested loops). Control flow is otherwise complete — all five `02_control_flow`
+   fixtures compile and behave.
 
 ## Known limitations (tracked, not hidden)
 
@@ -146,13 +156,17 @@ rejects nothing, so every dialect decision has exactly one home.
   compiles), and now descends into `if`/`while`/`block` bodies. `i64` counters are
   not yet done — `while`/`for` counters stay `f64` (they compile and print
   identically to JS).
-- Control flow implements `if`/`else`/`while`/`for`/`for…of`. C-style `for`
-  desugars to a `while` (general, not the idiomatic `for i in a..b` range — a
-  deferred optimization — and unsound with `continue`). `for…of` iterates arrays
-  by reference (`.iter()`, element `&T`); destructuring bindings, non-array
-  iterables, and owned/`&mut` elements are deferred and (for destructuring) throw
-  `UnsupportedError`. `switch → match`, `break`/`continue`, and negative literals
-  (`-3`, a `UnaryExpression`) are unshipped and throw `UnsupportedError`.
+- Control flow is complete (`if`/`else`/`while`/`for`/`for…of`/`switch`/`break`/
+  `continue`), with these documented refinements deferred: C-style `for` desugars
+  to a `while` (not the idiomatic `for i in a..b` range) and rejects an own
+  `continue` (needs a labeled-block desugar); `switch` emits guarded-wildcard
+  `match` arms (not literal/or-patterns), rejects fall-through and empty/stacked
+  cases; `for…of` iterates arrays by reference (element `&T` — fine for
+  arithmetic, but `&f64 == f64` has no impl, so by-value comparison, destructuring,
+  non-array iterables, and owned/`&mut` elements are deferred); labeled
+  `break`/`continue` and negative literals (`-3`, a `UnaryExpression`) are
+  unshipped. Deferred and rejected constructs throw `UnsupportedError` (fail-loud),
+  or fail the cargo oracle where a `&T` element reaches an unsupported use.
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization
