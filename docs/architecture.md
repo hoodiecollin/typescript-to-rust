@@ -144,6 +144,23 @@ rejects nothing, so every dialect decision has exactly one home.
    nested loops). Control flow is otherwise complete — all five `02_control_flow`
    fixtures compile and behave.
 
+6. **Records lower to `HashMap`, interpreted from the binding type.** An object
+   literal is ambiguous in isolation (a `Record` map vs an `interface` struct), so
+   it is lowered **contextually**: `lowerVarDecl` reads the binding's resolved
+   `RustType`, and only when it is a `hashmap` (`Record<string, V>` →
+   `{ kind: "hashmap"; key; value }`) does the literal become a `hashmap` HirExpr
+   (`lowerHashMapLiteral`) → `HashMap::from([(k, v), …])` (empty → `HashMap::new()`,
+   which needs the binding's annotation to infer `K,V`). A bare object literal
+   reaching `lowerExpr` throws `UnsupportedError` (struct literals are a later
+   series). A keyed lookup `map["a"]` reuses the `index` HIR node; the emitter's
+   `emitIndex` renders a **string** index as a bare `&str` (`map["a"]`) — Rust's
+   `HashMap: Index<&Q> where K: Borrow<Q>` wants `&str`, and a `Copy` value copies
+   out of the returned place — mirroring the bare-integer case for `usize` `Vec`
+   indices. `emitModule` prepends `use std::collections::HashMap;` when a generic
+   deep-scan finds any `kind: "hashmap"` node (the emitter is the sole producer, so
+   this is exact). Only `string` keys map soundly — `f64` (a `number` key) is
+   neither `Hash` nor `Eq` — so a non-`string` `Record` key is rejected in lowering.
+
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
@@ -167,6 +184,13 @@ rejects nothing, so every dialect decision has exactly one home.
   `break`/`continue` and negative literals (`-3`, a `UnaryExpression`) are
   unshipped. Deferred and rejected constructs throw `UnsupportedError` (fail-loud),
   or fail the cargo oracle where a `&T` element reaches an unsupported use.
+- Records lower to `HashMap<String, V>` for the **construct-and-look-up** shape
+  (type, object-literal `HashMap::from`, string-literal keyed read). Deferred:
+  `interface`/object → `struct` literals (the next data-structure series — an
+  object literal only lowers in a record context today); non-`string` keys
+  (`f64` isn't `Hash`/`Eq`); variable/non-literal keys (need `map[&k]` and care
+  with the numeric pass, which seeds every index position as `usize`); map
+  mutation, `.get`/`.has`/`.delete`, and iteration; the `Map`/`Set` classes.
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization

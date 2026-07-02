@@ -91,7 +91,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 | `string`              | `String`, or `&str` for read-only params | Read-only string params refine to `&str` (`strings.ts`); owned params stay `String`, mutated stay `&mut String`. |
 | `boolean`             | `bool`                        | |
 | `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
-| `Record<string, T>`   | `HashMap<String, T>`          | |
+| `Record<string, T>`   | `HashMap<String, T>`          | Done: type + literal construction (`HashMap::from`) + string-literal lookup (`lower.ts`). String keys only (`f64` isn't `Hash`/`Eq`); mutation/methods/variable keys deferred. |
 | `interface` / object  | `struct`                      | closed, statically-known shapes only. |
 | `class`               | `struct` + `impl`             | no inheritance; shared-mutable instances need the `Rc<RefCell>` fallback. |
 | `throw` / `try`       | `Result<T, E>` + `?`          | **not** `panic!` — `panic!` changes catch semantics. A return-type rewrite. |
@@ -147,6 +147,18 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   C-`for` (rejected — needs a labeled-block desugar); for…of element ergonomics
   (`&T` binding — fine for arithmetic, not by-value comparison; destructuring /
   owned / `&mut` elements); labeled and stacked jumps; `i64` counters.
+- **Data structures — records → `HashMap`** (`src/hir.ts`, `src/lower.ts`,
+  `src/emitter.ts`): `04_data_structures/02_records` compiles **and** behaves.
+  `Record<string, V>` → a `hashmap` `RustType` (`HashMap<String, V>`); a
+  record-typed object literal → `HashMap::from([(k, v), …])` (empty → `::new()`),
+  interpreted **contextually** from the binding's annotation (`lowerVarDecl` +
+  `lowerHashMapLiteral`); a string-literal lookup `map["a"]` emits a bare `&str`
+  index (not `.to_string()` — `HashMap: Index<&Q>`). A module using a map gets
+  `use std::collections::HashMap;` prepended. A bare/struct-typed object literal
+  is fail-loud (`UnsupportedError`). **Deferred** (each its own future series):
+  `interface`/object → struct literals (series 011); non-`string` keys (`f64` is
+  not `Hash`/`Eq`); variable/non-literal keys (need `&k` + numeric-seeding care);
+  mutation / `.get` / `.has` / iteration / maps API; the `Map`/`Set` classes.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -161,8 +173,9 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       idiomatic `for i in a..b` ranges, for…of element ergonomics (owned/`&mut`,
       destructuring), and labeled/stacked jumps. All are optimizations or edge
       cases over today's correct, fail-loud lowerings — not blockers.
-- [ ] Data structures: records/`HashMap`, `interface`/struct literals.
-- [ ] `interface`/`class` → `struct`/`impl`.
+- [ ] Data structures (cont.): `interface`/object → `struct` literals
+      (`05_interfaces/01_basic`) — series 011. Records → `HashMap` are done.
+- [ ] `class` → `struct`/`impl` (no inheritance).
 - [ ] `throw`/`try` → **`Result<T,E>` + `?`** (decided; not `panic!`).
 - [ ] `async`/`await` — emit `async fn` + `#[tokio::main]` (runtime already wired).
 
