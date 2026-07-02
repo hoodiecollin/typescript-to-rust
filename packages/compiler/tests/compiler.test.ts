@@ -31,6 +31,7 @@ const SUPPORTED = new Set([
   "02_control_flow/02_while_loop",
   "02_control_flow/03_for_loop",
   "02_control_flow/04_for_of_loop",
+  "02_control_flow/05_switch",
   "03_functions/01_basic",
   "04_data_structures/01_arrays",
   "04_data_structures/03_variable_index",
@@ -202,6 +203,113 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("10");
+  });
+
+  test("a switch classifies each case identically (→ match)", async () => {
+    const ts = [
+      `function classify(x: number): string {`,
+      `  switch (x) {`,
+      `    case 1: return "one";`,
+      `    case 2: return "two";`,
+      `    default: return "other";`,
+      `  }`,
+      `}`,
+      `console.log(classify(1));`,
+      `console.log(classify(2));`,
+      `console.log(classify(9));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("one\ntwo\nother");
+  });
+
+  test("a while loop `break`s early at the same point", async () => {
+    const ts = [
+      `function firstFive(): number {`,
+      `  let i: number = 0;`,
+      `  while (i < 100) {`,
+      `    if (i === 5) { break; }`,
+      `    i = i + 1;`,
+      `  }`,
+      `  return i;`,
+      `}`,
+      `console.log(firstFive());`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("5");
+  });
+
+  test("a while loop `continue`s over one value identically", async () => {
+    const ts = [
+      `function sumSkip3(): number {`,
+      `  let i: number = 0;`,
+      `  let sum: number = 0;`,
+      `  while (i < 5) {`,
+      `    i = i + 1;`,
+      `    if (i === 3) { continue; }`,
+      `    sum = sum + i;`,
+      `  }`,
+      `  return sum;`,
+      `}`,
+      `console.log(sumSkip3());`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("12");
+  });
+
+  test("a for…of loop `continue`s over one element identically", async () => {
+    const ts = [
+      `function sumSkip2(arr: Array<number>): number {`,
+      `  let total: number = 0;`,
+      `  for (const v of arr) {`,
+      `    if (v === 2) { continue; }`,
+      `    total = total + v;`,
+      `  }`,
+      `  return total;`,
+      `}`,
+      `console.log(sumSkip2([1, 2, 3]));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("4");
   });
 
   test("a for…of loop sums an array to the same value", async () => {
