@@ -183,6 +183,14 @@ function lowerStatement(
       return [lowerFor(stmt as ForStatement, analysis, scope)];
     case "ForOfStatement":
       return [lowerForOf(stmt as ForOfStatement, analysis, scope)];
+    case "SwitchStatement":
+    case "BreakStatement":
+    case "ContinueStatement":
+      // Seam (series 009): the HIR `match`/`break`/`continue` + emitter render
+      // these, but lowering is not wired yet — swapped in at GREEN.
+      throw new UnsupportedError({
+        type: "switch/break/continue lowering pending",
+      });
     default:
       throw new UnsupportedError(stmt);
   }

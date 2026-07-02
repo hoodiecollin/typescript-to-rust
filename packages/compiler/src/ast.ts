@@ -162,6 +162,29 @@ export interface ForOfStatement extends Span {
   body: Statement;
 }
 
+export interface SwitchCase extends Span {
+  type: "SwitchCase";
+  /** The `case` value, or `null` for `default`. */
+  test: Expression | null;
+  consequent: Statement[];
+}
+
+export interface SwitchStatement extends Span {
+  type: "SwitchStatement";
+  discriminant: Expression;
+  cases: SwitchCase[];
+}
+
+export interface BreakStatement extends Span {
+  type: "BreakStatement";
+  label: Identifier | null;
+}
+
+export interface ContinueStatement extends Span {
+  type: "ContinueStatement";
+  label: Identifier | null;
+}
+
 export type Statement =
   | VariableDeclaration
   | FunctionDeclaration
@@ -172,6 +195,9 @@ export type Statement =
   | WhileStatement
   | ForStatement
   | ForOfStatement
+  | SwitchStatement
+  | BreakStatement
+  | ContinueStatement
   | ({ type: string } & Span);
 
 export interface Program extends Span {

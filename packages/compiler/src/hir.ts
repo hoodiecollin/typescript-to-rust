@@ -105,7 +105,21 @@ export type HirStmt =
    * `for <pat> in <iter> { body }`. `iter` is the already-borrowing iterator
    * (lowering bakes in `.iter()`), so the emitter renders it verbatim.
    */
-  | { kind: "forIn"; pat: string; iter: HirExpr; body: HirStmt[] };
+  | { kind: "forIn"; pat: string; iter: HirExpr; body: HirStmt[] }
+  /**
+   * `match <disc> { arms }`. A `switch` lowers here with **guarded wildcard**
+   * arms (`_ if disc == case`) — Rust forbids `f64` literal patterns, so the
+   * discriminant is compared in a guard rather than matched as a literal.
+   */
+  | { kind: "match"; disc: HirExpr; arms: HirMatchArm[] }
+  | { kind: "break" }
+  | { kind: "continue" };
+
+/** One `match` arm. `guard` is `disc == case`; `null` is the wildcard `_`. */
+export interface HirMatchArm {
+  guard: HirExpr | null;
+  body: HirStmt[];
+}
 
 // ── Items & module ───────────────────────────────────────────────────────────
 

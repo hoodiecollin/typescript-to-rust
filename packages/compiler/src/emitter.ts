@@ -18,6 +18,7 @@ import type {
   HirArg,
   HirExpr,
   HirFn,
+  HirMatchArm,
   HirModule,
   HirStmt,
   RustType,
@@ -101,7 +102,21 @@ function emitStmt(stmt: HirStmt): string {
       return block(stmt.body);
     case "forIn":
       return `for ${stmt.pat} in ${emitExpr(stmt.iter)} ${block(stmt.body)}`;
+    case "match": {
+      const arms = stmt.arms.map((arm) => indent(emitArm(arm))).join("\n");
+      return `match ${emitExpr(stmt.disc)} {\n${arms}\n}`;
+    }
+    case "break":
+      return "break;";
+    case "continue":
+      return "continue;";
   }
+}
+
+/** A `match` arm: `_ if <guard> => { … }`, or `_ => { … }` for the wildcard. */
+function emitArm(arm: HirMatchArm): string {
+  const head = arm.guard ? `_ if ${emitExpr(arm.guard)}` : "_";
+  return `${head} => ${block(arm.body)}`;
 }
 
 // ── Expressions ──────────────────────────────────────────────────────────────
