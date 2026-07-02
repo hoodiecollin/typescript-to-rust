@@ -12,6 +12,7 @@
 import { type ModuleAnalysis, SCRIPT_SCOPE, analyzeModule } from "./analysis";
 import type {
   BlockStatement,
+  BreakStatement,
   CallExpression,
   Expression,
   ForOfStatement,
@@ -23,6 +24,7 @@ import type {
   MemberExpression,
   Program,
   Statement,
+  SwitchStatement,
   TSType,
   VariableDeclaration,
   WhileStatement,
@@ -32,6 +34,7 @@ import type {
   HirArg,
   HirExpr,
   HirFn,
+  HirMatchArm,
   HirModule,
   HirParam,
   HirStmt,
@@ -184,13 +187,17 @@ function lowerStatement(
     case "ForOfStatement":
       return [lowerForOf(stmt as ForOfStatement, analysis, scope)];
     case "SwitchStatement":
-    case "BreakStatement":
+      return [lowerSwitch(stmt as SwitchStatement, analysis, scope)];
+    case "BreakStatement": {
+      if ((stmt as BreakStatement).label) {
+        throw new UnsupportedError({ type: "labeled break" });
+      }
+      return [{ kind: "break" }];
+    }
     case "ContinueStatement":
-      // Seam (series 009): the HIR `match`/`break`/`continue` + emitter render
-      // these, but lowering is not wired yet — swapped in at GREEN.
-      throw new UnsupportedError({
-        type: "switch/break/continue lowering pending",
-      });
+      // Seam (series 009, GREEN step 2): swapped for real lowering + the
+      // C-`for` `continue` guard next.
+      throw new UnsupportedError({ type: "continue lowering pending" });
     default:
       throw new UnsupportedError(stmt);
   }
@@ -282,6 +289,73 @@ function lowerForOf(
     iter,
     body: lowerBlock(stmt.body, analysis, scope),
   };
+}
+
+/**
+ * Lower `switch (disc) { … }` to a `match` with **guarded wildcard** arms —
+ * `case v:` → `_ if disc == v => { … }`, `default:` → `_ => { … }` (emitted
+ * last). Rust forbids `f64` literal patterns, so the discriminant is compared in
+ * a guard. Rust `match` has no fall-through: each case must terminate with
+ * `break` (stripped — it is the case terminator) or `return`; a non-terminating
+ * non-final case, or an empty/stacked case, throws. A synthetic `_ => {}` is
+ * appended when there is no `default`, so the match is exhaustive.
+ */
+function lowerSwitch(
+  stmt: SwitchStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
+  const disc = lowerExpr(stmt.discriminant, analysis);
+  const arms: HirMatchArm[] = [];
+  let defaultArm: HirMatchArm | null = null;
+
+  stmt.cases.forEach((c, i) => {
+    const body = lowerSwitchCaseBody(
+      c.consequent,
+      i === stmt.cases.length - 1,
+      analysis,
+      scope,
+    );
+    if (c.test === null) {
+      defaultArm = { guard: null, body };
+    } else {
+      const guard: HirExpr = {
+        kind: "binary",
+        op: "==",
+        left: disc,
+        right: lowerExpr(c.test, analysis),
+      };
+      arms.push({ guard, body });
+    }
+  });
+
+  // `default` last; else a catch-all so the `match` is exhaustive.
+  arms.push(defaultArm ?? { guard: null, body: [] });
+  return { kind: "match", disc, arms };
+}
+
+/** Lower a case body, enforcing the terminator rule and stripping a trailing `break`. */
+function lowerSwitchCaseBody(
+  consequent: Statement[],
+  isLast: boolean,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt[] {
+  const body = lowerStatements(consequent, analysis, scope);
+  if (body.length === 0) {
+    throw new UnsupportedError({
+      type: "empty/stacked switch case (fall-through not supported)",
+    });
+  }
+  const last = body[body.length - 1];
+  if (last?.kind === "break") return body.slice(0, -1);
+  if (last?.kind === "return") return body;
+  if (!isLast) {
+    throw new UnsupportedError({
+      type: "switch case falls through (needs break or return)",
+    });
+  }
+  return body;
 }
 
 /**

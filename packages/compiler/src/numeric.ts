@@ -53,6 +53,8 @@ function flattenStmts(stmts: HirStmt[]): HirStmt[] {
       stmt.kind === "forIn"
     ) {
       out.push(...flattenStmts(stmt.body));
+    } else if (stmt.kind === "match") {
+      for (const arm of stmt.arms) out.push(...flattenStmts(arm.body));
     }
   }
   return out;
@@ -189,7 +191,13 @@ function eachStmtExpr(stmt: HirStmt, fn: (e: HirExpr) => void): void {
     case "forIn":
       eachExpr(stmt.iter, fn);
       break;
+    case "match":
+      eachExpr(stmt.disc, fn);
+      for (const arm of stmt.arms) if (arm.guard) eachExpr(arm.guard, fn);
+      break;
     case "block":
+    case "break":
+    case "continue":
       break;
   }
 }
