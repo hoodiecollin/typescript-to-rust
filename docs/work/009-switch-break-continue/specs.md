@@ -78,4 +78,8 @@ function matchNum(x: number): string {
 - **Tier 2 (BEHAVES) — while + continue:** a loop that `continue`s on `i === 3`
   while summing `1..=5` → `12`.
 
-- **Tier 2 (BEHAVES) — for…of + continue:** sum `[1,2,3]` skipping `2` → `4`.
+- **Tier 2 (BEHAVES) — for…of + continue:** sum `[1,2,3]` keeping only the first
+  two elements (skip by a local counter, `count > 2` → `continue`) → `3`.
+  (Skipping compares a local `f64`, not the element: a `for…of` element binds as
+  `&T` and `&f64 == f64` has no impl — a deferred for…of ergonomics gap,
+  orthogonal to `continue`.)

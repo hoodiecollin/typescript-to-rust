@@ -14,6 +14,7 @@ import type {
   BlockStatement,
   BreakStatement,
   CallExpression,
+  ContinueStatement,
   Expression,
   ForOfStatement,
   ForStatement,
@@ -194,10 +195,12 @@ function lowerStatement(
       }
       return [{ kind: "break" }];
     }
-    case "ContinueStatement":
-      // Seam (series 009, GREEN step 2): swapped for real lowering + the
-      // C-`for` `continue` guard next.
-      throw new UnsupportedError({ type: "continue lowering pending" });
+    case "ContinueStatement": {
+      if ((stmt as ContinueStatement).label) {
+        throw new UnsupportedError({ type: "labeled continue" });
+      }
+      return [{ kind: "continue" }];
+    }
     default:
       throw new UnsupportedError(stmt);
   }
@@ -234,16 +237,58 @@ function lowerAlternate(
 }
 
 /**
+ * Does `node` contain a `continue` that targets *this* loop — i.e. one not
+ * nested inside another loop (which owns its own `continue`)? Used to reject an
+ * unsound `continue` in the C-`for` desugar. A `switch`/`if`/block is transparent
+ * to `continue`; a nested `while`/`for`/`for…of` is a barrier.
+ */
+function hasOwnContinue(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasOwnContinue);
+  if (!isAstNode(node)) return false;
+  if (node.type === "ContinueStatement") return true;
+  if (
+    node.type === "WhileStatement" ||
+    node.type === "ForStatement" ||
+    node.type === "ForOfStatement"
+  ) {
+    return false;
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    if (hasOwnContinue((node as Record<string, unknown>)[key])) return true;
+  }
+  return false;
+}
+
+function isAstNode(x: unknown): x is { type: string } {
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    typeof (x as { type?: unknown }).type === "string"
+  );
+}
+
+/**
  * Desugar a C-style `for (init; test; update) body` into a scoped `while`:
  * `{ init; while (test) { …body; update; } }`. The wrapping `block` contains the
  * loop variable's scope; the `update` runs as the loop body's last statement.
- * (Sound only without `continue`, which is not in the dialect yet — see design.)
+ *
+ * A `continue` in the body would jump to the `while` condition and **skip** the
+ * appended `update` — a semantic change — so an *own* `continue` (not inside a
+ * nested loop) is rejected. `break` is sound (it exits the `while`, exactly as
+ * the `for` would). The labeled-block fix is a deferred series (see design 009).
  */
 function lowerFor(
   stmt: ForStatement,
   analysis: ModuleAnalysis,
   scope: string,
 ): HirStmt {
+  if (hasOwnContinue(stmt.body)) {
+    throw new UnsupportedError({
+      type: "continue inside a C-style for (unsound while-desugar — deferred)",
+    });
+  }
+
   const init: HirStmt[] = stmt.init
     ? stmt.init.type === "VariableDeclaration"
       ? lowerVarDecl(stmt.init as VariableDeclaration, analysis, scope)
