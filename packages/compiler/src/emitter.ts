@@ -99,6 +99,8 @@ function emitStmt(stmt: HirStmt): string {
     case "block":
       // A bare scope-containing block; no trailing `;` as a statement.
       return block(stmt.body);
+    case "forIn":
+      return `for ${stmt.pat} in ${emitExpr(stmt.iter)} ${block(stmt.body)}`;
   }
 }
 

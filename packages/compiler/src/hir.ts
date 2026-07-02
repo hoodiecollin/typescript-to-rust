@@ -100,7 +100,12 @@ export type HirStmt =
    * `for` desugar wraps its `init` + `while` in one so the loop variable's scope
    * is contained (see lower.ts).
    */
-  | { kind: "block"; body: HirStmt[] };
+  | { kind: "block"; body: HirStmt[] }
+  /**
+   * `for <pat> in <iter> { body }`. `iter` is the already-borrowing iterator
+   * (lowering bakes in `.iter()`), so the emitter renders it verbatim.
+   */
+  | { kind: "forIn"; pat: string; iter: HirExpr; body: HirStmt[] };
 
 // ── Items & module ───────────────────────────────────────────────────────────
 

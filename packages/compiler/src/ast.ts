@@ -154,6 +154,14 @@ export interface ForStatement extends Span {
   body: Statement;
 }
 
+export interface ForOfStatement extends Span {
+  type: "ForOfStatement";
+  /** `const val` / `let val` — a single-identifier binding in the dialect. */
+  left: VariableDeclaration;
+  right: Expression;
+  body: Statement;
+}
+
 export type Statement =
   | VariableDeclaration
   | FunctionDeclaration
@@ -163,6 +171,7 @@ export type Statement =
   | IfStatement
   | WhileStatement
   | ForStatement
+  | ForOfStatement
   | ({ type: string } & Span);
 
 export interface Program extends Span {

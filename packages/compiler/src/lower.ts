@@ -180,6 +180,10 @@ function lowerStatement(
     }
     case "ForStatement":
       return [lowerFor(stmt as ForStatement, analysis, scope)];
+    case "ForOfStatement":
+      // Seam (series 008): the HIR `forIn` + emitter render `for … in …`, but
+      // for-of lowering is not wired yet — swapped for `lowerForOf` at GREEN.
+      throw new UnsupportedError({ type: "for-of lowering pending" });
     default:
       throw new UnsupportedError(stmt);
   }
