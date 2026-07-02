@@ -120,12 +120,16 @@ rejects nothing, so every dialect decision has exactly one home.
    and `while` are HIR `if`/`while` nodes carrying nested `HirStmt[]` bodies. A
    single `block()` emitter helper renders those bodies (shared with function
    bodies); an `if` alternate that is a lone `if` prints as `else if …`, never
-   `else { if … }`. Block bodies thread the enclosing function's scope key —
+   `else { if … }`. C-style `for` has no Rust equivalent, so `lowerFor` desugars
+   `for (init; test; update) body` into a scope-containing `block` (a bare
+   `{ … }` HIR statement) wrapping `init` and a `while (test)` whose body ends
+   with `update`. Block bodies thread the enclosing function's scope key —
    mutability is name-based and per-function, so a block-local binding still
    resolves there (no per-block scope yet). Numeric inference flattens
-   control-flow bodies so index refinement reaches inside `if`/`while`. C-`for`,
+   control-flow and block bodies so index refinement reaches inside them.
    `for…of`, `switch`, and `break`/`continue` are not yet lowered (each its own
-   series).
+   series); the `for`-desugar is sound only without `continue` (which would skip
+   the appended `update`).
 
 ## Known limitations (tracked, not hidden)
 
@@ -136,13 +140,14 @@ rejects nothing, so every dialect decision has exactly one home.
   scopes — mutability/ownership stay name-based per function, so nested-scope
   *shadowing* is still unhandled and gets its own series.)
 - Numeric inference refines `number → usize` for array indices (variable indexing
-  compiles), and now descends into `if`/`while` bodies. `i64` counters and
-  `for`-loop counters (the latter also needs the deferred C-`for` lowering) are
-  not yet done — `while` counters currently stay `f64` (they compile and print
+  compiles), and now descends into `if`/`while`/`block` bodies. `i64` counters are
+  not yet done — `while`/`for` counters stay `f64` (they compile and print
   identically to JS).
-- Control flow implements `if`/`else`/`while` only; C-`for`, `for…of`,
-  `switch → match`, `break`/`continue`, and negative literals (`-3`, a
-  `UnaryExpression`) are unshipped and throw `UnsupportedError`.
+- Control flow implements `if`/`else`/`while`/`for`; C-style `for` desugars to a
+  `while` (general, not the idiomatic `for i in a..b` range — a deferred
+  optimization — and unsound with `continue`). `for…of`, `switch → match`,
+  `break`/`continue`, and negative literals (`-3`, a `UnaryExpression`) are
+  unshipped and throw `UnsupportedError`.
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization
