@@ -87,7 +87,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 | TypeScript            | Rust (today)                  | Notes |
 |-----------------------|-------------------------------|-------|
 | `number`              | `f64`, or `usize` for indices | Numeric inference (`numeric.ts`) refines index-reached values to `usize` so `Vec` indexing compiles; `i64` counters are a planned addition. |
-| `string`              | `String` (owned)              | `&str` where ownership analysis proves read-only borrow suffices. |
+| `string`              | `String`, or `&str` for read-only params | Read-only string params refine to `&str` (`strings.ts`); owned params stay `String`, mutated stay `&mut String`. |
 | `boolean`             | `bool`                        | |
 | `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
 | `Record<string, T>`   | `HashMap<String, T>`          | |
@@ -124,10 +124,16 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   initializers and integer arithmetic and failing loud on an int/float conflict.
   Unblocks variable array indexing (`arr[i]`, `arr[i + 1]`). `i64` counters
   deferred to the control-flow slice.
+- **String-borrow inference** (`src/strings.ts`): a post-lowering HIR→HIR pass
+  refining a read-only `string` parameter's `&String` into the idiomatic `&str`.
+  Owned params stay `String`, mutated stay `&mut String`; call sites are unchanged
+  (`&String` coerces to `&str`).
 
 **Next** (order reflects decisions made 2026-07-01)
-- [ ] Generalize ownership: inter-procedural moves (value passed/returned/stored),
-      `&str` for read-only string params, nested scopes.
+- [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
+      `.clone()`, move-through-store) and nested-scope shadowing (blocked on
+      control flow — no block scopes exist yet). Read-only-string `&str` params
+      are done (`strings.ts`).
 - [ ] Dialect validator pass (reject out-of-subset input; enforce [dialect.md](./dialect.md)).
 - [ ] Control flow: `if`/`else`, `while`, `for`, `for…of`, `switch → match`.
 - [ ] Data structures: records/`HashMap`, `interface`/struct literals.

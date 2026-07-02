@@ -15,6 +15,7 @@ Implementation details and decisions that aren't obvious from the code.
 │   ├── src/hir.ts                 # typed IR (Rust's shape) between AST and Rust
 │   ├── src/lower.ts               # AST → HIR: the single dialect gate
 │   ├── src/numeric.ts             # HIR → HIR: refine number → usize for indices
+│   ├── src/strings.ts             # HIR → HIR: refine read-only &String → &str
 │   ├── src/emitter.ts             # HIR → Rust module string (pure, total)
 │   ├── src/harness/               # the verification oracle (cargo + rustfmt)
 │   ├── .scratch/                  # persistent crate the harness compiles into
@@ -102,13 +103,23 @@ rejects nothing, so every dialect decision has exactly one home.
    when a value is forced to be both `usize` and float. `i64` for integer-only
    counters is a documented future addition to the same pass.
 
+4. **String-borrow refinement.** A second post-lowering HIR→HIR pass
+   (`strings.ts`) refines a read-only string parameter's `&String` into the
+   idiomatic `&str` (a new `RustType` `{ kind: "str" }`, only ever behind a
+   `ref`). Mutable `&mut String` and owned `String` params are left alone. Call
+   sites are unchanged — `&String` coerces to `&str` — so only signatures move.
+
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
-  shadowing, no inter-procedural moves through returns/stores). Documented and
-  enforced by the dialect, not silently widened.
+  shadowing, no inter-procedural moves through returns/stores). A use-after-move
+  falls to the cargo oracle. Documented and enforced by the dialect, not silently
+  widened. (Nested-scope shadowing is blocked on control-flow lowering — no block
+  scopes exist yet — and gets its own series then.)
 - Numeric inference refines `number → usize` for array indices (variable indexing
   compiles); `i64` counters and `for`-loop counters (which also need control-flow
   lowering) are not yet done.
-- `string → String` everywhere (owned); `&str` borrows await a read-only-string
-  generalization of the ownership pass.
+- `string → String` for owned/mutated bindings; a read-only string **parameter**
+  refines to `&str` (`strings.ts`). `&str` in return position and struct fields
+  awaits a lifetime story, and the bare-literal call-site optimization
+  (`greet("x")` still allocates via coercion) is a documented follow-up.
