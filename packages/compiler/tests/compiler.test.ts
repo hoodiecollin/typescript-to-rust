@@ -33,6 +33,7 @@ const SUPPORTED = new Set([
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
   "10_ownership/03_move",
+  "10_ownership/04_str_borrow",
 ]);
 
 function listFixtures(dir: string): string[] {
@@ -119,5 +120,27 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("20");
+  });
+
+  test("a read-only string param is borrowed and prints the same (&str)", async () => {
+    const ts = [
+      `function greet(name: string): void {`,
+      `  console.log(name);`,
+      `}`,
+      `const person: string = "Ada";`,
+      `greet(person);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("Ada");
   });
 });
