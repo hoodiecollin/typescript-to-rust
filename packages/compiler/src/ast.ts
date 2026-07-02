@@ -131,12 +131,28 @@ export interface ExpressionStatement extends Span {
   expression: Expression;
 }
 
+export interface IfStatement extends Span {
+  type: "IfStatement";
+  test: Expression;
+  consequent: Statement;
+  /** `else` branch: a block, another `IfStatement` (`else if`), or null. */
+  alternate: Statement | null;
+}
+
+export interface WhileStatement extends Span {
+  type: "WhileStatement";
+  test: Expression;
+  body: Statement;
+}
+
 export type Statement =
   | VariableDeclaration
   | FunctionDeclaration
   | BlockStatement
   | ReturnStatement
   | ExpressionStatement
+  | IfStatement
+  | WhileStatement
   | ({ type: string } & Span);
 
 export interface Program extends Span {

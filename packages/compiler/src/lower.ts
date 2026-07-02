@@ -162,6 +162,11 @@ function lowerStatement(
           ),
         },
       ];
+    case "IfStatement":
+    case "WhileStatement":
+      // Seam (series 006): the HIR + emitter render `if`/`while`, but lowering
+      // is not wired yet — swapped for real lowering at GREEN.
+      throw new UnsupportedError({ type: "control flow lowering pending" });
     default:
       throw new UnsupportedError(stmt);
   }

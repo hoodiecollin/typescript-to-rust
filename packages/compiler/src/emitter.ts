@@ -61,11 +61,13 @@ function emitFn(fn: HirFn): string {
     .map((p) => `${p.name}: ${emitType(p.ty)}`)
     .join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
-  const body =
-    fn.body.length === 0
-      ? "{\n}"
-      : `{\n${fn.body.map((s) => indent(emitStmt(s))).join("\n")}\n}`;
-  return `${asyncKw}fn ${fn.name}(${params})${ret} ${body}`;
+  return `${asyncKw}fn ${fn.name}(${params})${ret} ${block(fn.body)}`;
+}
+
+/** Render a braced, indented statement block (`{\n …\n}`, or `{\n}` if empty). */
+function block(stmts: HirStmt[]): string {
+  if (stmts.length === 0) return "{\n}";
+  return `{\n${stmts.map((s) => indent(emitStmt(s))).join("\n")}\n}`;
 }
 
 // ── Statements ───────────────────────────────────────────────────────────────
@@ -81,6 +83,19 @@ function emitStmt(stmt: HirStmt): string {
       return stmt.value ? `return ${emitExpr(stmt.value)};` : "return;";
     case "expr":
       return `${emitExpr(stmt.expr)};`;
+    case "if": {
+      const head = `if ${emitExpr(stmt.cond)} ${block(stmt.then)}`;
+      if (stmt.alt === null) return head;
+      // An `else if` chain: a lone `if` alternate renders as `else if …`,
+      // never the un-idiomatic `else { if … }`.
+      const [only] = stmt.alt;
+      if (stmt.alt.length === 1 && only?.kind === "if") {
+        return `${head} else ${emitStmt(only)}`;
+      }
+      return `${head} else ${block(stmt.alt)}`;
+    }
+    case "while":
+      return `while ${emitExpr(stmt.cond)} ${block(stmt.body)}`;
   }
 }
 

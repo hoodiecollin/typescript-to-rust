@@ -87,7 +87,13 @@ export type HirStmt =
       init: HirExpr;
     }
   | { kind: "return"; value: HirExpr | null }
-  | { kind: "expr"; expr: HirExpr };
+  | { kind: "expr"; expr: HirExpr }
+  /**
+   * `if cond { then } [else …]`. `alt` is `null` for a bare `if`, a one-element
+   * `[{kind:"if"…}]` for an `else if` chain, or the else block's statements.
+   */
+  | { kind: "if"; cond: HirExpr; then: HirStmt[]; alt: HirStmt[] | null }
+  | { kind: "while"; cond: HirExpr; body: HirStmt[] };
 
 // ── Items & module ───────────────────────────────────────────────────────────
 
