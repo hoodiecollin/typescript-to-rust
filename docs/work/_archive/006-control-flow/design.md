@@ -112,6 +112,9 @@ unaffected.
   ownership series (still blocked until block scopes are modelled as real scopes,
   which this slice does not do).
 - **No `break`/`continue`, no C-`for`/`for…of`/`switch`** — deferred as above.
+- **Negative literals** (`-3`) are a `UnaryExpression`, still unlowered — an
+  independent expression gap surfaced (not introduced) here; the differential
+  spec uses `0 - 3` to stay in-dialect. Its own future slice.
 
 ## Verification
 

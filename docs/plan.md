@@ -124,7 +124,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `number → usize` where array indexing demands it, propagating usize-ness through
   initializers and integer arithmetic and failing loud on an int/float conflict.
   Unblocks variable array indexing (`arr[i]`, `arr[i + 1]`). `i64` counters
-  deferred to the control-flow slice.
+  remain a separate numeric slice.
 - **String-borrow inference** (`src/strings.ts`): a post-lowering HIR→HIR pass
   refining a read-only `string` parameter's `&String` into the idiomatic `&str`.
   Owned params stay `String`, mutated stay `&mut String`; call sites are unchanged
@@ -133,6 +133,12 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `lower()`. Rejects `any`/`unknown` with a `DialectError` — "forbidden input, fix
   it" — now distinct from `UnsupportedError` ("in the dialect, not yet built").
   Other forbidden categories and the annotation requirement are future slices.
+- **Control flow — `if`/`while`** (`src/hir.ts`, `src/lower.ts`, `src/emitter.ts`):
+  `if`/`else if`/`else` and `while` lower to HIR `if`/`while` nodes with real block
+  bodies; the emitter renders idiomatic `else if` chains. Numeric inference now
+  descends into control-flow bodies. Fixtures `01_if_else` + `02_while_loop`
+  compile **and** behave (differential). C-`for`/`for…of`/`switch`,
+  `break`/`continue`, and `i64` counters remain their own slices.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -142,7 +148,10 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - [ ] Extend the dialect validator (`validate.ts` exists; rejects `any`/`unknown`):
       missing-annotation enforcement (with the trivial-literal exception), class
       `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
-- [ ] Control flow: `if`/`else`, `while`, `for`, `for…of`, `switch → match`.
+- [ ] Control flow (cont.): C-style `for`, `for…of`, `switch → match`, and
+      `break`/`continue`. `if`/`else`/`while` shipped (`src/lower.ts`); each
+      remaining construct is its own slice (for → desugaring/range; for…of →
+      iterator borrows; switch → match arms + fall-through rejection).
 - [ ] Data structures: records/`HashMap`, `interface`/struct literals.
 - [ ] `interface`/`class` → `struct`/`impl`.
 - [ ] `throw`/`try` → **`Result<T,E>` + `?`** (decided; not `panic!`).

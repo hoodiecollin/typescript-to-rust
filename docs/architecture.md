@@ -116,16 +116,33 @@ rejects nothing, so every dialect decision has exactly one home.
    `ref`). Mutable `&mut String` and owned `String` params are left alone. Call
    sites are unchanged — `&String` coerces to `&str` — so only signatures move.
 
+5. **Control flow lowers to block-bodied HIR statements.** `if`/`else if`/`else`
+   and `while` are HIR `if`/`while` nodes carrying nested `HirStmt[]` bodies. A
+   single `block()` emitter helper renders those bodies (shared with function
+   bodies); an `if` alternate that is a lone `if` prints as `else if …`, never
+   `else { if … }`. Block bodies thread the enclosing function's scope key —
+   mutability is name-based and per-function, so a block-local binding still
+   resolves there (no per-block scope yet). Numeric inference flattens
+   control-flow bodies so index refinement reaches inside `if`/`while`. C-`for`,
+   `for…of`, `switch`, and `break`/`continue` are not yet lowered (each its own
+   series).
+
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
   shadowing, no inter-procedural moves through returns/stores). A use-after-move
   falls to the cargo oracle. Documented and enforced by the dialect, not silently
-  widened. (Nested-scope shadowing is blocked on control-flow lowering — no block
-  scopes exist yet — and gets its own series then.)
+  widened. (Block bodies now exist for `if`/`while`, but they are **not** separate
+  scopes — mutability/ownership stay name-based per function, so nested-scope
+  *shadowing* is still unhandled and gets its own series.)
 - Numeric inference refines `number → usize` for array indices (variable indexing
-  compiles); `i64` counters and `for`-loop counters (which also need control-flow
-  lowering) are not yet done.
+  compiles), and now descends into `if`/`while` bodies. `i64` counters and
+  `for`-loop counters (the latter also needs the deferred C-`for` lowering) are
+  not yet done — `while` counters currently stay `f64` (they compile and print
+  identically to JS).
+- Control flow implements `if`/`else`/`while` only; C-`for`, `for…of`,
+  `switch → match`, `break`/`continue`, and negative literals (`-3`, a
+  `UnaryExpression`) are unshipped and throw `UnsupportedError`.
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization

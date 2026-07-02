@@ -45,10 +45,12 @@ RED against the lowering seam. IDs are referenced from the test files.
     else { return "zero"; }
   }
   console.log(check(5));
-  console.log(check(-3));
+  console.log(check(0 - 3));
   console.log(check(0));
   ```
   → Rust stdout equals the TS stdout (`positive` / `negative` / `zero`).
+  (`0 - 3`, not the literal `-3`: unary minus is a separate unshipped gap, kept
+  out of this control-flow slice.)
 
 - **Tier 2 (BEHAVES) — while:** a counting loop
   ```ts
