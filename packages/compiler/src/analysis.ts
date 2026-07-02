@@ -59,8 +59,10 @@ export interface ModuleAnalysis {
   fns: Map<string, FnInfo>;
   /** scope key → set of binding names that must be `mut` */
   mut: Map<string, Set<string>>;
-  /** names of declared `interface`s — resolved to nominal `struct` types */
+  /** names of declared `interface`s/`class`es — resolved to nominal `struct` types */
   structs: Set<string>;
+  /** names of class methods that mutate `this` (→ a `&mut self` receiver) */
+  mutatingMethods: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -169,7 +171,11 @@ function analyzeFunction(fn: FunctionDeclaration): FnInfo {
 
 // ── Local mutability ─────────────────────────────────────────────────────────
 
-function mutableBindings(body: unknown, fns: Map<string, FnInfo>): Set<string> {
+function mutableBindings(
+  body: unknown,
+  fns: Map<string, FnInfo>,
+  mutatingMethods: Set<string>,
+): Set<string> {
   const mut = new Set<string>();
   walk(body, (n) => {
     const assigned = assignmentTarget(n);
@@ -177,6 +183,17 @@ function mutableBindings(body: unknown, fns: Map<string, FnInfo>): Set<string> {
 
     const mutating = isMutatingMethodCall(n);
     if (mutating) mut.add(mutating.object);
+
+    // A call to a self-mutating class method (`c.increment()`) needs `mut c`.
+    if (
+      n.type === "CallExpression" &&
+      isNode(n.callee) &&
+      n.callee.type === "MemberExpression"
+    ) {
+      const recv = identName((n.callee as AnyNode).object);
+      const method = identName((n.callee as AnyNode).property);
+      if (recv && method && mutatingMethods.has(method)) mut.add(recv);
+    }
 
     // Args passed at a `&mut` position must be `mut` locals.
     if (
@@ -195,6 +212,48 @@ function mutableBindings(body: unknown, fns: Map<string, FnInfo>): Set<string> {
     }
   });
   return mut;
+}
+
+/** Does a body assign to a `this.<field>` (marking a method self-mutating)? */
+function mutatesThis(body: unknown): boolean {
+  let mutates = false;
+  walk(body, (n) => {
+    if (n.type !== "AssignmentExpression") return;
+    const left = n.left;
+    if (
+      isNode(left) &&
+      left.type === "MemberExpression" &&
+      isNode((left as AnyNode).object) &&
+      ((left as AnyNode).object as AnyNode).type === "ThisExpression"
+    ) {
+      mutates = true;
+    }
+  });
+  return mutates;
+}
+
+/** Every method of a `class` declaration, with its class name. */
+function classMethods(
+  program: Program,
+): { className: string; name: string; body: unknown }[] {
+  const out: { className: string; name: string; body: unknown }[] = [];
+  for (const stmt of program.body) {
+    if (stmt.type !== "ClassDeclaration") continue;
+    const decl = stmt as unknown as {
+      id?: { name?: string };
+      body?: { body?: AnyNode[] };
+    };
+    const className = decl.id?.name;
+    if (!className) continue;
+    for (const m of decl.body?.body ?? []) {
+      if (m.type === "MethodDefinition") {
+        const name = identName((m as AnyNode).key);
+        const value = (m as AnyNode).value;
+        if (name) out.push({ className, name, body: value });
+      }
+    }
+  }
+  return out;
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -218,20 +277,37 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     else script.push(stmt);
   }
 
+  // Self-mutating methods (→ `&mut self`, and `mut` for their call-site receiver).
+  const methods = classMethods(program);
+  const mutatingMethods = new Set<string>();
+  for (const m of methods) if (mutatesThis(m.body)) mutatingMethods.add(m.name);
+
   const mut = new Map<string, Set<string>>();
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
-    if (named) mut.set(named.name, mutableBindings(named.fn.body, fns));
+    if (named)
+      mut.set(named.name, mutableBindings(named.fn.body, fns, mutatingMethods));
   }
-  mut.set(SCRIPT_SCOPE, mutableBindings(script, fns));
+  mut.set(SCRIPT_SCOPE, mutableBindings(script, fns, mutatingMethods));
+  // Each class method is its own mutability scope (`ClassName.method`).
+  for (const m of methods) {
+    mut.set(
+      `${m.className}.${m.name}`,
+      mutableBindings(m.body, fns, mutatingMethods),
+    );
+  }
 
+  // Declared nominal types: interfaces and classes both resolve to a `struct`.
   const structs = new Set<string>();
   for (const stmt of program.body) {
-    if (stmt.type === "TSInterfaceDeclaration") {
+    if (
+      stmt.type === "TSInterfaceDeclaration" ||
+      stmt.type === "ClassDeclaration"
+    ) {
       const id = (stmt as { id?: { name?: string } }).id;
       if (id?.name) structs.add(id.name);
     }
   }
 
-  return { fns, mut, structs };
+  return { fns, mut, structs, mutatingMethods };
 }

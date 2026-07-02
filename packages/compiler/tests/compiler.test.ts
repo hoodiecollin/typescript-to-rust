@@ -37,6 +37,7 @@ const SUPPORTED = new Set([
   "04_data_structures/02_records",
   "04_data_structures/03_variable_index",
   "05_interfaces/01_basic",
+  "06_classes/01_basic",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
   "10_ownership/03_move",
@@ -385,6 +386,32 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("10");
+  });
+
+  test("a class constructs, mutates via a method, and reads the same field", async () => {
+    const ts = [
+      `class Counter {`,
+      `  count: number;`,
+      `  constructor(start: number) { this.count = start; }`,
+      `  increment(): void { this.count = this.count + 1; }`,
+      `}`,
+      `const c: Counter = new Counter(1);`,
+      `c.increment();`,
+      `c.increment();`,
+      `console.log(c.count);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("3");
   });
 
   test("a C-style for loop sums to the same value", async () => {

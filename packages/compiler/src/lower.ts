@@ -11,20 +11,27 @@
 
 import { type ModuleAnalysis, SCRIPT_SCOPE, analyzeModule } from "./analysis";
 import type {
+  AssignmentExpression,
   BlockStatement,
   BreakStatement,
   CallExpression,
+  ClassDeclaration,
   ContinueStatement,
   Expression,
+  ExpressionStatement,
   ForOfStatement,
   ForStatement,
   FunctionDeclaration,
+  FunctionExpression,
   Identifier,
   IfStatement,
   Literal,
   MemberExpression,
+  MethodDefinition,
+  NewExpression,
   ObjectExpression,
   Program,
+  PropertyDefinition,
   Statement,
   SwitchStatement,
   TSInterfaceDeclaration,
@@ -36,6 +43,7 @@ import type {
   Borrow,
   HirArg,
   HirExpr,
+  HirClass,
   HirFn,
   HirItem,
   HirMatchArm,
@@ -44,6 +52,7 @@ import type {
   HirStmt,
   HirStruct,
   RustType,
+  SelfRecv,
 } from "./hir";
 import { refineNumerics } from "./numeric";
 import { refineStrings } from "./strings";
@@ -80,10 +89,7 @@ export function lower(program: Program): HirModule {
     } else if (stmt.type === "TSInterfaceDeclaration") {
       items.push(lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs));
     } else if (stmt.type === "ClassDeclaration") {
-      // SEAM (series 012): the HIR/emitter shape exists; real lowering pending.
-      throw new UnsupportedError({
-        type: "class → struct/impl lowering pending",
-      });
+      items.push(lowerClass(stmt as ClassDeclaration, analysis));
     } else {
       script.push(stmt);
     }
@@ -158,6 +164,175 @@ function lowerInterface(
     return { name: m.key.name, ty: lowerType(m.typeAnnotation.typeAnnotation, structs) };
   });
   return { kind: "struct", name: decl.id.name, fields };
+}
+
+/**
+ * Lower a `class` to a `HirClass` (a `struct` + `impl`). Fields come from
+ * `PropertyDefinition`s; the constructor becomes an associated `new`; each method
+ * becomes an `fn` with a `self` receiver. Inheritance (`extends`/`implements`),
+ * statics, accessors, and a missing constructor are rejected — each a later
+ * series. Fields are collected first so a method or the constructor may reference
+ * a field declared after it.
+ */
+function lowerClass(decl: ClassDeclaration, analysis: ModuleAnalysis): HirClass {
+  if (!decl.id) throw new UnsupportedError({ type: "anonymous class" });
+  if (decl.superClass || (decl.implements && decl.implements.length > 0)) {
+    throw new UnsupportedError({
+      type: "class inheritance (extends/implements)",
+    });
+  }
+  const name = decl.id.name;
+  const structs = analysis.structs;
+
+  const fields = decl.body.body
+    .filter((m): m is PropertyDefinition => m.type === "PropertyDefinition")
+    .map((f) => {
+      if (f.static || f.computed) {
+        throw new UnsupportedError({ type: "static/computed class field" });
+      }
+      if (!f.typeAnnotation) {
+        throw new UnsupportedError({
+          type: `class field '${f.key.name}' without a type`,
+        });
+      }
+      return { name: f.key.name, ty: lowerType(f.typeAnnotation.typeAnnotation, structs) };
+    });
+
+  let ctor: HirFn | null = null;
+  const methods: HirFn[] = [];
+  for (const member of decl.body.body) {
+    if (member.type !== "MethodDefinition") continue;
+    if (member.static || member.computed) {
+      throw new UnsupportedError({ type: "static/computed class method" });
+    }
+    if (member.kind === "constructor") {
+      ctor = lowerConstructor(member.value, name, fields, analysis);
+    } else if (member.kind === "method") {
+      methods.push(lowerMethod(member, name, analysis));
+    } else {
+      throw new UnsupportedError({ type: `class ${member.kind} accessor` });
+    }
+  }
+  if (!ctor) {
+    throw new UnsupportedError({ type: "class without an explicit constructor" });
+  }
+  return { kind: "class", name, fields, ctor, methods };
+}
+
+/**
+ * Lower a `constructor(params) { this.f = e; … }` to an associated
+ * `fn new(params) -> Name` returning a struct literal. The body must be a
+ * sequence of `this.<field> = <expr>;` assignments covering exactly the declared
+ * fields (a Rust struct literal is total) — anything else throws. Params are
+ * taken by value (moved into the fields).
+ */
+function lowerConstructor(
+  fn: FunctionExpression,
+  className: string,
+  fields: { name: string; ty: RustType }[],
+  analysis: ModuleAnalysis,
+): HirFn {
+  const structs = analysis.structs;
+  const params = fn.params.map((p) => lowerParam(p, undefined, structs));
+  if (!fn.body) {
+    throw new UnsupportedError({ type: "constructor without a body" });
+  }
+  const assigned = new Map<string, HirExpr>();
+  for (const stmt of fn.body.body) {
+    const init = constructorFieldInit(stmt, analysis);
+    if (!init) {
+      throw new UnsupportedError({
+        type: "constructor body beyond `this.field = expr` initialization",
+      });
+    }
+    assigned.set(init.field, init.value);
+  }
+  if (assigned.size !== fields.length) {
+    throw new UnsupportedError({
+      type: "constructor must initialize exactly the declared fields",
+    });
+  }
+  const litFields = fields.map((f) => {
+    const value = assigned.get(f.name);
+    if (!value) {
+      throw new UnsupportedError({
+        type: `constructor does not initialize field '${f.name}'`,
+      });
+    }
+    return { name: f.name, value };
+  });
+  const structLit: HirExpr = { kind: "structLit", name: className, fields: litFields };
+  return {
+    kind: "fn",
+    name: "new",
+    isAsync: false,
+    params,
+    ret: { kind: "struct", name: className },
+    body: [{ kind: "return", value: structLit }],
+  };
+}
+
+/** A constructor statement `this.<field> = <expr>;`, or null if it is anything else. */
+function constructorFieldInit(
+  stmt: Statement,
+  analysis: ModuleAnalysis,
+): { field: string; value: HirExpr } | null {
+  if (stmt.type !== "ExpressionStatement") return null;
+  const e = (stmt as ExpressionStatement).expression;
+  if (e.type !== "AssignmentExpression") return null;
+  const assign = e as AssignmentExpression;
+  if (assign.operator !== "=") return null;
+  const left = assign.left;
+  if (left.type !== "MemberExpression") return null;
+  const m = left as MemberExpression;
+  if (m.computed || m.object.type !== "ThisExpression") return null;
+  if (m.property.type !== "Identifier") return null;
+  return {
+    field: (m.property as Identifier).name,
+    value: lowerExpr(assign.right, analysis),
+  };
+}
+
+/**
+ * Lower a class method to an `fn` with a `self` receiver. The receiver is
+ * `&mut self` when the body assigns a `this.<field>`, else `&self`. Params are
+ * taken by value (method-param borrow inference is deferred). `this` lowers to
+ * the `self` identifier (see `lowerExpr`), so `this.x` becomes `self.x`.
+ */
+function lowerMethod(
+  member: MethodDefinition,
+  className: string,
+  analysis: ModuleAnalysis,
+): HirFn {
+  const fn = member.value;
+  const name = member.key.name;
+  const structs = analysis.structs;
+  const params = fn.params.map((p) => lowerParam(p, undefined, structs));
+  const ret = fn.returnType
+    ? lowerType(fn.returnType.typeAnnotation, structs)
+    : UNIT;
+  if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
+  const body = lowerStatements(fn.body.body, analysis, `${className}.${name}`);
+  const recv: SelfRecv = astAssignsThis(fn.body) ? "refMut" : "ref";
+  return { kind: "fn", name, isAsync: fn.async, params, ret, body, recv };
+}
+
+/** Does an AST subtree assign to a `this.<field>` (→ a `&mut self` receiver)? */
+function astAssignsThis(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(astAssignsThis);
+  if (!isAstNode(node)) return false;
+  if (node.type === "AssignmentExpression") {
+    const left = (node as Record<string, unknown>).left;
+    if (isAstNode(left) && left.type === "MemberExpression") {
+      const object = (left as Record<string, unknown>).object;
+      if (isAstNode(object) && object.type === "ThisExpression") return true;
+    }
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    if (astAssignsThis((node as Record<string, unknown>)[key])) return true;
+  }
+  return false;
 }
 
 function lowerParam(
@@ -600,6 +775,11 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       return lowerCall(expr as CallExpression, analysis);
     case "MemberExpression":
       return lowerMember(expr as MemberExpression, analysis);
+    case "ThisExpression":
+      // `this` is the method's `self` receiver; `this.x` reuses the `field` node.
+      return { kind: "ident", name: "self" };
+    case "NewExpression":
+      return lowerNew(expr as NewExpression, analysis);
     case "ObjectExpression":
       // An object literal only lowers contextually, in a record-typed binding
       // (see lowerVarDecl). Bare/struct-typed literals await series 011.
@@ -670,6 +850,19 @@ function lowerCall(call: CallExpression, analysis: ModuleAnalysis): HirExpr {
   }
 
   throw new UnsupportedError(call);
+}
+
+/** `new C(args)` → `C::new(args)`. Constructor params are owned (args by value). */
+function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
+  if (expr.callee.type !== "Identifier") {
+    throw new UnsupportedError({ type: "new with a non-identifier callee" });
+  }
+  const className = (expr.callee as Identifier).name;
+  const args: HirArg[] = expr.arguments.map((a) => ({
+    borrow: "owned",
+    expr: lowerExpr(a, analysis),
+  }));
+  return { kind: "call", callee: `${className}::new`, args };
 }
 
 function lowerMember(
