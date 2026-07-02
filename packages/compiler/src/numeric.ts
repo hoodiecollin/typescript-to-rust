@@ -24,7 +24,9 @@ import { UnsupportedError } from "./lower";
 const ARITHMETIC = new Set(["+", "-", "*", "/", "%"]);
 
 export function refineNumerics(module: HirModule): HirModule {
-  for (const fn of module.items) refineBody(fn.params, fn.body);
+  for (const item of module.items) {
+    if (item.kind === "fn") refineBody(item.params, item.body);
+  }
   refineBody([], module.main);
   return module;
 }
@@ -240,6 +242,9 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
         eachExpr(entry.key, fn);
         eachExpr(entry.value, fn);
       }
+      break;
+    case "structLit":
+      for (const field of e.fields) eachExpr(field.value, fn);
       break;
     // Leaves carry no nested expressions:
     case "number":

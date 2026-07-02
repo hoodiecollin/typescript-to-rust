@@ -39,6 +39,8 @@ export type RustType =
   | { kind: "vec"; elem: RustType }
   /** `Record<string, V>` → `HashMap<String, V>`; `key` is always `String` today. */
   | { kind: "hashmap"; key: RustType; value: RustType }
+  /** A named `struct` (from an `interface`); rendered as the bare name. */
+  | { kind: "struct"; name: string }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -78,7 +80,13 @@ export type HirExpr =
   /** array literal → `vec![...]`. */
   | { kind: "array"; elements: HirExpr[] }
   /** record object literal → `HashMap::from([(k, v), …])` (or `HashMap::new()`). */
-  | { kind: "hashmap"; entries: { key: HirExpr; value: HirExpr }[] };
+  | { kind: "hashmap"; entries: { key: HirExpr; value: HirExpr }[] }
+  /** struct object literal → `Name { field: value, … }`. */
+  | {
+      kind: "structLit";
+      name: string;
+      fields: { name: string; value: HirExpr }[];
+    };
 
 // ── Statements ───────────────────────────────────────────────────────────────
 
@@ -143,6 +151,16 @@ export interface HirFn {
   body: HirStmt[];
 }
 
+/** A `struct` item lowered from an `interface` — a closed, named data shape. */
+export interface HirStruct {
+  kind: "struct";
+  name: string;
+  fields: { name: string; ty: RustType }[];
+}
+
+/** A top-level Rust item: a function or a struct definition. */
+export type HirItem = HirFn | HirStruct;
+
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level
  * *statements* become the body of a generated `fn main()` (`main`, empty when
@@ -150,6 +168,6 @@ export interface HirFn {
  * lowering, so those two never conflict here.
  */
 export interface HirModule {
-  items: HirFn[];
+  items: HirItem[];
   main: HirStmt[];
 }

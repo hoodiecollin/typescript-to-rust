@@ -17,8 +17,9 @@
 import type { HirModule, HirParam } from "./hir";
 
 export function refineStrings(module: HirModule): HirModule {
-  for (const fn of module.items) {
-    for (const param of fn.params) refineParam(param);
+  for (const item of module.items) {
+    if (item.kind !== "fn") continue;
+    for (const param of item.params) refineParam(param);
   }
   return module;
 }

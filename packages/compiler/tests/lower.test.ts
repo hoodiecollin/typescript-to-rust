@@ -18,7 +18,7 @@ function hir(src: string): HirModule {
 /** First item, asserted to be a function. */
 function firstFn(m: HirModule): HirFn {
   const fn = m.items[0];
-  if (!fn) throw new Error("expected an item");
+  if (!fn || fn.kind !== "fn") throw new Error("expected a function item");
   return fn;
 }
 

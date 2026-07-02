@@ -26,7 +26,9 @@ function refined(src: string): HirModule {
 
 /** The type of function `index`'s parameter `param`. */
 function paramTy(m: HirModule, index: number, param: number): RustType {
-  const p = m.items[index]?.params[param];
+  const item = m.items[index];
+  if (!item || item.kind !== "fn") throw new Error("expected a function item");
+  const p = item.params[param];
   if (!p) throw new Error("expected a function parameter");
   return p.ty;
 }

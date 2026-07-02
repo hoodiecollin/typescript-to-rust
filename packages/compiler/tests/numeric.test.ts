@@ -33,6 +33,13 @@ function letStmt(stmt: HirStmt | undefined): Let {
   return stmt;
 }
 
+/** The body of the module's `i`-th item, asserted to be a function. */
+function fnBody(m: HirModule, i: number): HirStmt[] {
+  const item = m.items[i];
+  if (!item || item.kind !== "fn") throw new Error("expected a function item");
+  return item.body;
+}
+
 const USIZE = { kind: "usize" } as const;
 
 /** `arr` declaration + the given trailing statements, as a script. */
@@ -93,7 +100,7 @@ describe("numeric inference: usize typing", () => {
       `function f(arr: Array<number>): number { const i: number = 0; return arr[i]; }\n` +
         `const i: number = 0;`,
     );
-    const fnBodyLet = letStmt(m.items[0]?.body[0]);
+    const fnBodyLet = letStmt(fnBody(m, 0)[0]);
     expect(fnBodyLet.ty).toEqual(USIZE);
     // A same-named binding in another scope (main) is untouched.
     expect(letStmt(m.main[0]).ty).toEqual({ kind: "f64" });

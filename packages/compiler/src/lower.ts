@@ -74,6 +74,11 @@ export function lower(program: Program): HirModule {
   for (const stmt of program.body) {
     if (stmt.type === "FunctionDeclaration") {
       items.push(lowerFunction(stmt as FunctionDeclaration, analysis));
+    } else if (stmt.type === "TSInterfaceDeclaration") {
+      // SEAM (series 011): the HIR/emitter shape exists; real lowering pending.
+      throw new UnsupportedError({
+        type: "interface → struct lowering pending",
+      });
     } else {
       script.push(stmt);
     }

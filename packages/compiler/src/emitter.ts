@@ -18,9 +18,11 @@ import type {
   HirArg,
   HirExpr,
   HirFn,
+  HirItem,
   HirMatchArm,
   HirModule,
   HirStmt,
+  HirStruct,
   RustType,
 } from "./hir";
 import { DialectError, UnsupportedError, lower } from "./lower";
@@ -46,7 +48,7 @@ export function emit(program: Program): string {
 
 /** Emit a complete Rust module from already-lowered HIR. */
 export function emitModule(mod: HirModule): string {
-  const parts = mod.items.map(emitFn);
+  const parts = mod.items.map(emitItem);
   if (mod.main.length > 0) {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
     parts.push(`fn main() {\n${body}\n}`);
@@ -71,6 +73,24 @@ function usesHashMap(node: unknown): boolean {
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────
+
+function emitItem(item: HirItem): string {
+  switch (item.kind) {
+    case "fn":
+      return emitFn(item);
+    case "struct":
+      return emitStruct(item);
+  }
+}
+
+/** `struct Name {\n    field: Ty,\n …\n}` (or `Name {}` when field-less). */
+function emitStruct(s: HirStruct): string {
+  if (s.fields.length === 0) return `struct ${s.name} {}`;
+  const fields = s.fields
+    .map((f) => indent(`${f.name}: ${emitType(f.ty)},`))
+    .join("\n");
+  return `struct ${s.name} {\n${fields}\n}`;
+}
 
 function emitFn(fn: HirFn): string {
   const asyncKw = fn.isAsync ? "async " : "";
@@ -171,6 +191,13 @@ function emitExpr(expr: HirExpr): string {
         .join(", ");
       return `HashMap::from([${entries}])`;
     }
+    case "structLit": {
+      if (expr.fields.length === 0) return `${expr.name} {}`;
+      const fields = expr.fields
+        .map((f) => `${f.name}: ${emitExpr(f.value)}`)
+        .join(", ");
+      return `${expr.name} { ${fields} }`;
+    }
     case "call":
       return `${expr.callee}(${expr.args.map(emitArg).join(", ")})`;
     case "println": {
@@ -233,6 +260,8 @@ function emitType(ty: RustType): string {
       return `Vec<${emitType(ty.elem)}>`;
     case "hashmap":
       return `HashMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
+    case "struct":
+      return ty.name;
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
   }
