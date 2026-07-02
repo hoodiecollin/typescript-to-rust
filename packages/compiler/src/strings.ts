@@ -18,8 +18,12 @@ import type { HirModule, HirParam } from "./hir";
 
 export function refineStrings(module: HirModule): HirModule {
   for (const item of module.items) {
-    if (item.kind !== "fn") continue;
-    for (const param of item.params) refineParam(param);
+    if (item.kind === "fn") {
+      for (const param of item.params) refineParam(param);
+    } else if (item.kind === "class") {
+      if (item.ctor) for (const p of item.ctor.params) refineParam(p);
+      for (const m of item.methods) for (const p of m.params) refineParam(p);
+    }
   }
   return module;
 }

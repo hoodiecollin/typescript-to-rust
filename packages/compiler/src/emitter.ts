@@ -16,6 +16,7 @@
 import type { Program } from "./ast";
 import type {
   HirArg,
+  HirClass,
   HirExpr,
   HirFn,
   HirItem,
@@ -80,7 +81,17 @@ function emitItem(item: HirItem): string {
       return emitFn(item);
     case "struct":
       return emitStruct(item);
+    case "class":
+      return emitClass(item);
   }
+}
+
+/** A `class` → its `struct` definition followed by an `impl` block. */
+function emitClass(c: HirClass): string {
+  const struct = emitStruct({ kind: "struct", name: c.name, fields: c.fields });
+  const fns = [c.ctor, ...c.methods].filter((f): f is HirFn => f !== null);
+  const body = fns.map((f) => indent(emitFn(f))).join("\n");
+  return `${struct}\n\nimpl ${c.name} {\n${body}\n}`;
 }
 
 /** `struct Name {\n    field: Ty,\n …\n}` (or `Name {}` when field-less). */
@@ -94,9 +105,10 @@ function emitStruct(s: HirStruct): string {
 
 function emitFn(fn: HirFn): string {
   const asyncKw = fn.isAsync ? "async " : "";
-  const params = fn.params
-    .map((p) => `${p.name}: ${emitType(p.ty)}`)
-    .join(", ");
+  // A method's `self` receiver leads the parameter list; free/associated fns omit it.
+  const self = fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
+  const rest = fn.params.map((p) => `${p.name}: ${emitType(p.ty)}`);
+  const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
   return `${asyncKw}fn ${fn.name}(${params})${ret} ${block(fn.body)}`;
 }

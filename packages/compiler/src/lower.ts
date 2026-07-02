@@ -79,6 +79,11 @@ export function lower(program: Program): HirModule {
       items.push(lowerFunction(stmt as FunctionDeclaration, analysis));
     } else if (stmt.type === "TSInterfaceDeclaration") {
       items.push(lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs));
+    } else if (stmt.type === "ClassDeclaration") {
+      // SEAM (series 012): the HIR/emitter shape exists; real lowering pending.
+      throw new UnsupportedError({
+        type: "class → struct/impl lowering pending",
+      });
     } else {
       script.push(stmt);
     }

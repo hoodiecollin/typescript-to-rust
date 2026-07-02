@@ -83,6 +83,16 @@ export interface ArrayExpression extends Span {
   elements: Expression[];
 }
 
+export interface ThisExpression extends Span {
+  type: "ThisExpression";
+}
+
+export interface NewExpression extends Span {
+  type: "NewExpression";
+  callee: Expression;
+  arguments: Expression[];
+}
+
 /** One `key: value` pair of an object literal. `kind` is `"init"` in the dialect. */
 export interface Property extends Span {
   type: "Property";
@@ -107,6 +117,8 @@ export type Expression =
   | MemberExpression
   | ArrayExpression
   | ObjectExpression
+  | ThisExpression
+  | NewExpression
   | ({ type: string } & Span);
 
 // ── Statements ──────────────────────────────────────────────────────────────
@@ -213,6 +225,47 @@ export interface TSInterfaceDeclaration extends Span {
   extends: unknown[];
 }
 
+/** A class method's function value (`constructor`/method body). */
+export interface FunctionExpression extends Span {
+  type: "FunctionExpression";
+  async: boolean;
+  params: Identifier[];
+  returnType?: TSTypeAnnotation | null;
+  body: BlockStatement | null;
+}
+
+/** A class field: `name: T;` (with an optional initializer we don't yet use). */
+export interface PropertyDefinition extends Span {
+  type: "PropertyDefinition";
+  key: Identifier;
+  typeAnnotation?: TSTypeAnnotation | null;
+  value: Expression | null;
+  computed: boolean;
+  static: boolean;
+}
+
+export interface MethodDefinition extends Span {
+  type: "MethodDefinition";
+  key: Identifier;
+  value: FunctionExpression;
+  kind: "constructor" | "method" | "get" | "set";
+  computed: boolean;
+  static: boolean;
+}
+
+export interface ClassBody extends Span {
+  type: "ClassBody";
+  body: (PropertyDefinition | MethodDefinition)[];
+}
+
+export interface ClassDeclaration extends Span {
+  type: "ClassDeclaration";
+  id: Identifier | null;
+  superClass: Expression | null;
+  implements: unknown[];
+  body: ClassBody;
+}
+
 export interface BreakStatement extends Span {
   type: "BreakStatement";
   label: Identifier | null;
@@ -237,6 +290,7 @@ export type Statement =
   | BreakStatement
   | ContinueStatement
   | TSInterfaceDeclaration
+  | ClassDeclaration
   | ({ type: string } & Span);
 
 export interface Program extends Span {

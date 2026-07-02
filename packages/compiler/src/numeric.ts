@@ -25,7 +25,12 @@ const ARITHMETIC = new Set(["+", "-", "*", "/", "%"]);
 
 export function refineNumerics(module: HirModule): HirModule {
   for (const item of module.items) {
-    if (item.kind === "fn") refineBody(item.params, item.body);
+    if (item.kind === "fn") {
+      refineBody(item.params, item.body);
+    } else if (item.kind === "class") {
+      if (item.ctor) refineBody(item.ctor.params, item.ctor.body);
+      for (const m of item.methods) refineBody(m.params, m.body);
+    }
   }
   refineBody([], module.main);
   return module;

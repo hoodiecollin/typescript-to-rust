@@ -141,6 +141,9 @@ export interface HirParam {
   ty: RustType;
 }
 
+/** A method's `self` receiver: `&self` (`ref`) or `&mut self` (`refMut`). */
+export type SelfRecv = "ref" | "refMut";
+
 export interface HirFn {
   kind: "fn";
   name: string;
@@ -149,6 +152,8 @@ export interface HirFn {
   /** `unit` for a `void`/unannotated function. */
   ret: RustType;
   body: HirStmt[];
+  /** A `self` receiver when this is a class method; unset for free/associated fns. */
+  recv?: SelfRecv;
 }
 
 /** A `struct` item lowered from an `interface` — a closed, named data shape. */
@@ -158,8 +163,21 @@ export interface HirStruct {
   fields: { name: string; ty: RustType }[];
 }
 
-/** A top-level Rust item: a function or a struct definition. */
-export type HirItem = HirFn | HirStruct;
+/**
+ * A `class` — emitted as a `struct` (its `fields`) plus an `impl` holding the
+ * associated constructor (`ctor`, a `new` with no receiver) and `methods` (each
+ * carrying a `self` receiver).
+ */
+export interface HirClass {
+  kind: "class";
+  name: string;
+  fields: { name: string; ty: RustType }[];
+  ctor: HirFn | null;
+  methods: HirFn[];
+}
+
+/** A top-level Rust item: a function, a struct, or a class (struct + impl). */
+export type HirItem = HirFn | HirStruct | HirClass;
 
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level
