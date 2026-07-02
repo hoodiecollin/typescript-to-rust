@@ -47,7 +47,11 @@ function flattenStmts(stmts: HirStmt[]): HirStmt[] {
     if (stmt.kind === "if") {
       out.push(...flattenStmts(stmt.conseq));
       if (stmt.alt) out.push(...flattenStmts(stmt.alt));
-    } else if (stmt.kind === "while" || stmt.kind === "block") {
+    } else if (
+      stmt.kind === "while" ||
+      stmt.kind === "block" ||
+      stmt.kind === "forIn"
+    ) {
       out.push(...flattenStmts(stmt.body));
     }
   }
@@ -175,11 +179,17 @@ function eachStmtExpr(stmt: HirStmt, fn: (e: HirExpr) => void): void {
     case "expr":
       eachExpr(stmt.expr, fn);
       break;
-    // `if`/`while` bodies are visited via `flattenStmts`; here we only surface
-    // the condition expression (an index may sit in it, e.g. `while (arr[i])`).
+    // `if`/`while`/`forIn`/`block` bodies are visited via `flattenStmts`; here we
+    // only surface the direct condition/iterable expression (an index may sit in
+    // it, e.g. `while (arr[i])` or `for x of arr[i]`).
     case "if":
     case "while":
       eachExpr(stmt.cond, fn);
+      break;
+    case "forIn":
+      eachExpr(stmt.iter, fn);
+      break;
+    case "block":
       break;
   }
 }

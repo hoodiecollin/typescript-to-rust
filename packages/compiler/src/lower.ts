@@ -14,6 +14,7 @@ import type {
   BlockStatement,
   CallExpression,
   Expression,
+  ForOfStatement,
   ForStatement,
   FunctionDeclaration,
   Identifier,
@@ -181,9 +182,7 @@ function lowerStatement(
     case "ForStatement":
       return [lowerFor(stmt as ForStatement, analysis, scope)];
     case "ForOfStatement":
-      // Seam (series 008): the HIR `forIn` + emitter render `for … in …`, but
-      // for-of lowering is not wired yet — swapped for `lowerForOf` at GREEN.
-      throw new UnsupportedError({ type: "for-of lowering pending" });
+      return [lowerForOf(stmt as ForOfStatement, analysis, scope)];
     default:
       throw new UnsupportedError(stmt);
   }
@@ -246,6 +245,35 @@ function lowerFor(
     : { kind: "bool", value: true };
 
   return { kind: "block", body: [...init, { kind: "while", cond, body }] };
+}
+
+/**
+ * Lower `for (const val of arr) body` to `for val in arr.iter() { body }`.
+ * `.iter()` iterates by reference — sound whether the iterable is owned or
+ * borrowed, never consuming it — so the loop binding is `&T`. Only a single
+ * identifier binding is supported; destructuring throws (see design 008).
+ */
+function lowerForOf(
+  stmt: ForOfStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
+  const decl = stmt.left.declarations[0];
+  if (!decl || stmt.left.declarations.length !== 1) {
+    throw new UnsupportedError({ type: "for-of with a non-single binding" });
+  }
+  const iter: HirExpr = {
+    kind: "method",
+    receiver: lowerExpr(stmt.right, analysis),
+    name: "iter",
+    args: [],
+  };
+  return {
+    kind: "forIn",
+    pat: decl.id.name,
+    iter,
+    body: lowerBlock(stmt.body, analysis, scope),
+  };
 }
 
 /**
