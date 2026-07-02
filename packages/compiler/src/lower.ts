@@ -595,6 +595,10 @@ function lowerType(ty: TSType): RustType {
         if (!inner) throw new UnsupportedError(ty);
         return { kind: "vec", elem: lowerType(inner) };
       }
+      if (ref.typeName.name === "Record") {
+        // SEAM (series 010): the HIR/emitter shape exists; real lowering pending.
+        throw new UnsupportedError({ type: "Record → HashMap lowering pending" });
+      }
       throw new UnsupportedError(ty);
     }
     default:

@@ -51,7 +51,23 @@ export function emitModule(mod: HirModule): string {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
     parts.push(`fn main() {\n${body}\n}`);
   }
-  return `${parts.join("\n\n")}\n`;
+  const prelude = usesHashMap(mod) ? "use std::collections::HashMap;\n\n" : "";
+  return `${prelude}${parts.join("\n\n")}\n`;
+}
+
+/**
+ * Does the module use a `HashMap` anywhere (a `hashmap` `RustType` or `HirExpr`)?
+ * A generic deep-scan — every HIR node is a plain object tagged with `kind`, so
+ * finding any `kind: "hashmap"` tells us to prepend the std import. The emitter is
+ * the sole producer of `HashMap`, so this is exact.
+ */
+function usesHashMap(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(usesHashMap);
+  if (node !== null && typeof node === "object") {
+    if ((node as { kind?: string }).kind === "hashmap") return true;
+    return Object.values(node).some(usesHashMap);
+  }
+  return false;
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────
@@ -148,6 +164,13 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.target)} ${expr.op} ${emitExpr(expr.value)}`;
     case "array":
       return `vec![${expr.elements.map(emitExpr).join(", ")}]`;
+    case "hashmap": {
+      if (expr.entries.length === 0) return "HashMap::new()";
+      const entries = expr.entries
+        .map((e) => `(${emitExpr(e.key)}, ${emitExpr(e.value)})`)
+        .join(", ");
+      return `HashMap::from([${entries}])`;
+    }
     case "call":
       return `${expr.callee}(${expr.args.map(emitArg).join(", ")})`;
     case "println": {
@@ -176,14 +199,17 @@ function emitArg(arg: HirArg): string {
 }
 
 /**
- * A Rust index is always `usize`. A literal integer index is unambiguously so
- * and must skip the `f64` `.0` suffix. (Variable indices need the numeric-
- * inference pass; `arr[i]` with `i: f64` will not compile — the correct RED.)
+ * The index inside `obj[...]`. A `Vec` index is `usize`: a literal integer is
+ * unambiguously so and skips the `f64` `.0` suffix (variable indices need the
+ * numeric-inference pass). A `HashMap<String, _>` lookup wants `&str`, so a
+ * string-literal key renders bare (`map["a"]`), never `"a".to_string()`
+ * (`String` is not a valid index — `Index<&Q>` takes a borrow).
  */
 function emitIndex(index: HirExpr): string {
   if (index.kind === "number" && Number.isInteger(index.value)) {
     return `${index.value}`;
   }
+  if (index.kind === "string") return JSON.stringify(index.value);
   return emitExpr(index);
 }
 
@@ -205,6 +231,8 @@ function emitType(ty: RustType): string {
       return "()";
     case "vec":
       return `Vec<${emitType(ty.elem)}>`;
+    case "hashmap":
+      return `HashMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
   }

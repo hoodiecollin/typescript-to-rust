@@ -83,6 +83,21 @@ export interface ArrayExpression extends Span {
   elements: Expression[];
 }
 
+/** One `key: value` pair of an object literal. `kind` is `"init"` in the dialect. */
+export interface Property extends Span {
+  type: "Property";
+  key: Expression;
+  value: Expression;
+  computed: boolean;
+  shorthand: boolean;
+  kind: string;
+}
+
+export interface ObjectExpression extends Span {
+  type: "ObjectExpression";
+  properties: Property[];
+}
+
 export type Expression =
   | Identifier
   | Literal
@@ -91,6 +106,7 @@ export type Expression =
   | CallExpression
   | MemberExpression
   | ArrayExpression
+  | ObjectExpression
   | ({ type: string } & Span);
 
 // ── Statements ──────────────────────────────────────────────────────────────

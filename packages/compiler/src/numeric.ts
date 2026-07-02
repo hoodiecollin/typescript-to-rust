@@ -235,6 +235,12 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
     case "array":
       for (const el of e.elements) eachExpr(el, fn);
       break;
+    case "hashmap":
+      for (const entry of e.entries) {
+        eachExpr(entry.key, fn);
+        eachExpr(entry.value, fn);
+      }
+      break;
     // Leaves carry no nested expressions:
     case "number":
     case "string":

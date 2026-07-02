@@ -37,6 +37,8 @@ export type RustType =
   | { kind: "bool" }
   | { kind: "unit" }
   | { kind: "vec"; elem: RustType }
+  /** `Record<string, V>` → `HashMap<String, V>`; `key` is always `String` today. */
+  | { kind: "hashmap"; key: RustType; value: RustType }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -74,7 +76,9 @@ export type HirExpr =
   /** `arr.length` → `arr.len()`. */
   | { kind: "len"; object: HirExpr }
   /** array literal → `vec![...]`. */
-  | { kind: "array"; elements: HirExpr[] };
+  | { kind: "array"; elements: HirExpr[] }
+  /** record object literal → `HashMap::from([(k, v), …])` (or `HashMap::new()`). */
+  | { kind: "hashmap"; entries: { key: HirExpr; value: HirExpr }[] };
 
 // ── Statements ───────────────────────────────────────────────────────────────
 
