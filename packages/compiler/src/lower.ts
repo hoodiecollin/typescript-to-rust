@@ -34,6 +34,9 @@ import type {
 } from "./hir";
 import { refineNumerics } from "./numeric";
 import { refineStrings } from "./strings";
+import { DialectError, validate } from "./validate";
+
+export { DialectError };
 
 export class UnsupportedError extends Error {
   constructor(
@@ -51,6 +54,9 @@ const UNIT: RustType = { kind: "unit" };
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
  */
 export function lower(program: Program): HirModule {
+  // Step 2: reject input forbidden by the dialect (`any`/`unknown`, …) — fail
+  // loud with `DialectError`, distinct from the "not yet implemented" gate below.
+  validate(program);
   const analysis = analyzeModule(program);
   const items: HirFn[] = [];
   const script: Statement[] = [];

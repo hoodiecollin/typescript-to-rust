@@ -22,9 +22,9 @@ import type {
   HirStmt,
   RustType,
 } from "./hir";
-import { UnsupportedError, lower } from "./lower";
+import { DialectError, UnsupportedError, lower } from "./lower";
 
-export { UnsupportedError };
+export { UnsupportedError, DialectError };
 
 const INDENT = "    ";
 
