@@ -266,6 +266,12 @@ export interface ClassDeclaration extends Span {
   body: ClassBody;
 }
 
+/** `throw <argument>;` — in the dialect, `argument` is `new Error(<message>)`. */
+export interface ThrowStatement extends Span {
+  type: "ThrowStatement";
+  argument: Expression;
+}
+
 export interface BreakStatement extends Span {
   type: "BreakStatement";
   label: Identifier | null;
@@ -289,6 +295,7 @@ export type Statement =
   | SwitchStatement
   | BreakStatement
   | ContinueStatement
+  | ThrowStatement
   | TSInterfaceDeclaration
   | ClassDeclaration
   | ({ type: string } & Span);

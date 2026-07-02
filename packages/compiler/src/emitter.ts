@@ -52,7 +52,10 @@ export function emitModule(mod: HirModule): string {
   const parts = mod.items.map(emitItem);
   if (mod.main.length > 0) {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
-    parts.push(`fn main() {\n${body}\n}`);
+    // A fallible script makes `main` return `Result<(), String>` (its trailing
+    // `Ok(())` is already in `mod.main`, added by lowering); else a bare `main`.
+    const ret = mod.mainRet ? ` -> ${emitType(mod.mainRet)}` : "";
+    parts.push(`fn main()${ret} {\n${body}\n}`);
   }
   const prelude = usesHashMap(mod) ? "use std::collections::HashMap;\n\n" : "";
   return `${prelude}${parts.join("\n\n")}\n`;
@@ -158,6 +161,9 @@ function emitStmt(stmt: HirStmt): string {
       return "break;";
     case "continue":
       return "continue;";
+    case "throw":
+      // A `throw` in the dialect is a propagated error: `return Err(msg);`.
+      return `return Err(${emitExpr(stmt.value)});`;
   }
 }
 
@@ -227,6 +233,10 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.object)}.${expr.name}`;
     case "index":
       return `${emitExpr(expr.object)}[${emitIndex(expr.index)}]`;
+    case "ok":
+      return expr.value ? `Ok(${emitExpr(expr.value)})` : "Ok(())";
+    case "try":
+      return `${emitExpr(expr.expr)}?`;
   }
 }
 
@@ -274,6 +284,8 @@ function emitType(ty: RustType): string {
       return `HashMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
     case "struct":
       return ty.name;
+    case "result":
+      return `Result<${emitType(ty.ok)}, ${emitType(ty.err)}>`;
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
   }

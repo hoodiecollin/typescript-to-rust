@@ -420,6 +420,10 @@ function lowerStatement(
       }
       return [{ kind: "continue" }];
     }
+    case "ThrowStatement":
+      // Scaffold seam (series 013): real `throw` → `return Err(...)` lowering,
+      // fallibility, and `?` propagation land in the GREEN step.
+      throw new UnsupportedError({ type: "throw → Result lowering pending" });
     default:
       throw new UnsupportedError(stmt);
   }

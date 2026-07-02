@@ -202,6 +202,9 @@ function eachStmtExpr(stmt: HirStmt, fn: (e: HirExpr) => void): void {
       eachExpr(stmt.disc, fn);
       for (const arm of stmt.arms) if (arm.guard) eachExpr(arm.guard, fn);
       break;
+    case "throw":
+      eachExpr(stmt.value, fn);
+      break;
     case "block":
     case "break":
     case "continue":
@@ -250,6 +253,12 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
       break;
     case "structLit":
       for (const field of e.fields) eachExpr(field.value, fn);
+      break;
+    case "ok":
+      if (e.value) eachExpr(e.value, fn);
+      break;
+    case "try":
+      eachExpr(e.expr, fn);
       break;
     // Leaves carry no nested expressions:
     case "number":

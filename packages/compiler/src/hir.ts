@@ -41,6 +41,8 @@ export type RustType =
   | { kind: "hashmap"; key: RustType; value: RustType }
   /** A named `struct` (from an `interface`); rendered as the bare name. */
   | { kind: "struct"; name: string }
+  /** A fallible function's return type: `Result<ok, err>` (`err` is `String` today). */
+  | { kind: "result"; ok: RustType; err: RustType }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -86,7 +88,11 @@ export type HirExpr =
       kind: "structLit";
       name: string;
       fields: { name: string; value: HirExpr }[];
-    };
+    }
+  /** `Ok(value)` — the success arm of a `Result`. `null` value ⇒ `Ok(())`. */
+  | { kind: "ok"; value: HirExpr | null }
+  /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */
+  | { kind: "try"; expr: HirExpr };
 
 // ── Statements ───────────────────────────────────────────────────────────────
 
@@ -125,7 +131,9 @@ export type HirStmt =
    */
   | { kind: "match"; disc: HirExpr; arms: HirMatchArm[] }
   | { kind: "break" }
-  | { kind: "continue" };
+  | { kind: "continue" }
+  /** `throw new Error(msg)` → `return Err(value);` (`value` is the message). */
+  | { kind: "throw"; value: HirExpr };
 
 /** One `match` arm. `guard` is `disc == case`; `null` is the wildcard `_`. */
 export interface HirMatchArm {
@@ -188,4 +196,10 @@ export type HirItem = HirFn | HirStruct | HirClass;
 export interface HirModule {
   items: HirItem[];
   main: HirStmt[];
+  /**
+   * The generated `fn main`'s return type. Absent ⇒ `()` (the common case). Set
+   * to `Result<(), String>` when the top-level script propagates a throwing call
+   * (or throws), so `main` can use `?` and end in `Ok(())`.
+   */
+  mainRet?: RustType;
 }
