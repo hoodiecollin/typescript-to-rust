@@ -29,6 +29,7 @@ const SUPPORTED = new Set([
   "01_variables/02_mutability",
   "03_functions/01_basic",
   "04_data_structures/01_arrays",
+  "04_data_structures/03_variable_index",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
   "10_ownership/03_move",
@@ -97,5 +98,26 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("5");
+  });
+
+  test("variable array indexing yields the same element (numeric inference)", async () => {
+    const ts = [
+      `const arr: Array<number> = [10, 20, 30];`,
+      `const i: number = 1;`,
+      `const x: number = arr[i];`,
+      `console.log(x);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("20");
   });
 });
