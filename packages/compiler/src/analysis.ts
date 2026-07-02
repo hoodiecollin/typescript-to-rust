@@ -63,6 +63,13 @@ export interface ModuleAnalysis {
   structs: Set<string>;
   /** names of class methods that mutate `this` (→ a `&mut self` receiver) */
   mutatingMethods: Set<string>;
+  /**
+   * Names of top-level functions that are *fallible* — they `throw` directly or
+   * (transitively) call a fallible function, so their return type wraps in
+   * `Result` and calls to them propagate with `?`. Includes the `SCRIPT_SCOPE`
+   * sentinel when the generated `main` is fallible.
+   */
+  fallible: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -256,6 +263,96 @@ function classMethods(
   return out;
 }
 
+// ── Fallibility (throw / Result propagation) ─────────────────────────────────
+
+/**
+ * Walk a subtree but stop at a nested function/class boundary — a `throw` or
+ * call inside a nested function belongs to *that* function's fallibility, not the
+ * enclosing one. (Nested functions are outside the dialect and fail loud in
+ * lowering; the barrier keeps this analysis honest regardless.)
+ */
+function walkOwn(node: unknown, visit: (n: AnyNode) => void): void {
+  if (Array.isArray(node)) {
+    for (const child of node) walkOwn(child, visit);
+    return;
+  }
+  if (!isNode(node)) return;
+  visit(node);
+  if (
+    node.type === "FunctionDeclaration" ||
+    node.type === "FunctionExpression" ||
+    node.type === "ArrowFunctionExpression" ||
+    node.type === "ClassDeclaration"
+  ) {
+    return;
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    walkOwn(node[key], visit);
+  }
+}
+
+/** Does this body `throw` at its own level (not inside a nested function)? */
+function bodyThrows(body: unknown): boolean {
+  let found = false;
+  walkOwn(body, (n) => {
+    if (n.type === "ThrowStatement") found = true;
+  });
+  return found;
+}
+
+/** The names this body calls directly (identifier callees, own level only). */
+function calledNames(body: unknown): Set<string> {
+  const names = new Set<string>();
+  walkOwn(body, (n) => {
+    if (n.type !== "CallExpression") return;
+    const callee = n.callee;
+    if (isNode(callee) && callee.type === "Identifier") {
+      names.add(callee.name as string);
+    }
+  });
+  return names;
+}
+
+/**
+ * Fixpoint over the top-level call graph: a function is fallible if it throws or
+ * calls a fallible function. The generated `main` (`SCRIPT_SCOPE`) is included so
+ * a script that propagates a throwing call returns `Result` too.
+ */
+function analyzeFallible(
+  program: Program,
+  script: Statement[],
+): Set<string> {
+  const throws = new Map<string, boolean>();
+  const calls = new Map<string, Set<string>>();
+
+  for (const stmt of program.body) {
+    const named = namedFunction(stmt);
+    if (!named) continue;
+    throws.set(named.name, bodyThrows(named.fn.body));
+    calls.set(named.name, calledNames(named.fn.body));
+  }
+  throws.set(SCRIPT_SCOPE, bodyThrows(script));
+  calls.set(SCRIPT_SCOPE, calledNames(script));
+
+  const fallible = new Set<string>();
+  for (const [name, t] of throws) if (t) fallible.add(name);
+  for (;;) {
+    let changed = false;
+    for (const [name, callees] of calls) {
+      if (fallible.has(name)) continue;
+      for (const c of callees) {
+        if (fallible.has(c)) {
+          fallible.add(name);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (!changed) return fallible;
+  }
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /** A top-level function declaration with a name, else null. */
@@ -309,5 +406,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     }
   }
 
-  return { fns, mut, structs, mutatingMethods };
+  const fallible = analyzeFallible(program, script);
+
+  return { fns, mut, structs, mutatingMethods, fallible };
 }

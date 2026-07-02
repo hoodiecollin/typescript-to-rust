@@ -38,6 +38,7 @@ const SUPPORTED = new Set([
   "04_data_structures/03_variable_index",
   "05_interfaces/01_basic",
   "06_classes/01_basic",
+  "08_errors/01_throw",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
   "10_ownership/03_move",
@@ -412,6 +413,37 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("3");
+  });
+
+  test("throwing functions propagate via `?` on the success path (→ Result)", async () => {
+    // Both throwing branches stay untaken, so the two runtimes agree; this
+    // exercises the return-type wrap, Err/Ok wrapping, the trailing Ok(()) (the
+    // void `announce` and `main`), and `?` propagation through `main`.
+    const ts = [
+      `function half(n: number): number {`,
+      `  if (n < 0) { throw new Error("negative"); }`,
+      `  return n / 2;`,
+      `}`,
+      `function announce(n: number): void {`,
+      `  if (n < 0) { throw new Error("negative n"); }`,
+      `  console.log(n);`,
+      `}`,
+      `announce(7);`,
+      `const x: number = half(10);`,
+      `console.log(x);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("7\n5");
   });
 
   test("a C-style for loop sums to the same value", async () => {

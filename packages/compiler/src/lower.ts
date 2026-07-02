@@ -34,6 +34,7 @@ import type {
   PropertyDefinition,
   Statement,
   SwitchStatement,
+  ThrowStatement,
   TSInterfaceDeclaration,
   TSType,
   VariableDeclaration,
@@ -70,6 +71,13 @@ export class UnsupportedError extends Error {
 }
 
 const UNIT: RustType = { kind: "unit" };
+/** The error type for every fallible function this slice: the `Error` message. */
+const ERR_STRING: RustType = { kind: "String" };
+
+/** Wrap an ok-type in the slice's `Result<ok, String>`. */
+function resultType(ok: RustType): RustType {
+  return { kind: "result", ok, err: ERR_STRING };
+}
 
 /**
  * Lower a whole program to HIR.
@@ -96,6 +104,7 @@ export function lower(program: Program): HirModule {
   }
 
   let main: HirStmt[] = [];
+  let mainRet: RustType | undefined;
   if (script.length > 0) {
     if (items.some((f) => f.kind === "fn" && f.name === "main")) {
       // No sound single lowering mixes script with a user-defined `main`.
@@ -104,11 +113,17 @@ export function lower(program: Program): HirModule {
       });
     }
     main = lowerStatements(script, analysis, SCRIPT_SCOPE);
+    // A script that propagates a throwing call (or throws) makes `main` fallible:
+    // `fn main() -> Result<(), String>`, returns wrapped in `Ok`, trailing `Ok(())`.
+    if (analysis.fallible.has(SCRIPT_SCOPE)) {
+      main = makeFallible(main, UNIT);
+      mainRet = resultType(UNIT);
+    }
   }
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`.
-  return refineStrings(refineNumerics({ items, main }));
+  return refineStrings(refineNumerics({ items, main, mainRet }));
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────
@@ -133,7 +148,125 @@ function lowerFunction(
   // The function name is its own scope key for mutability lookups.
   const body = lowerStatements(func.body.body, analysis, name);
 
+  // A fallible function (it throws, or calls something that throws) returns
+  // `Result<ret, String>`: wrap its returns in `Ok`, keep its `throw`s as
+  // `Err`. `async` + `Result` is deferred (the async runtime slice is separate).
+  if (analysis.fallible.has(name)) {
+    if (func.async) {
+      throw new UnsupportedError({
+        type: "async throwing function (async + Result deferred)",
+      });
+    }
+    return {
+      kind: "fn",
+      name,
+      isAsync: func.async,
+      params,
+      ret: resultType(ret),
+      body: makeFallible(body, ret),
+    };
+  }
+
   return { kind: "fn", name, isAsync: func.async, params, ret, body };
+}
+
+// ── Fallibility (throw / Result propagation) ─────────────────────────────────
+
+/**
+ * Lower `throw new Error(<message>)` to a `throw` HIR stmt (emitted as
+ * `return Err(<message>);`). Only that exact shape maps this slice: a bare value,
+ * a re-throw, an `Error` subclass, or a wrong argument count is fail-loud (each a
+ * later series). The message lowers as an expression, so a string literal becomes
+ * a `String` and `Err` carries it.
+ */
+function lowerThrow(stmt: ThrowStatement, analysis: ModuleAnalysis): HirStmt {
+  const arg = stmt.argument;
+  if (arg.type !== "NewExpression") {
+    throw new UnsupportedError({ type: "throw of a non-Error value" });
+  }
+  const nw = arg as NewExpression;
+  if (
+    nw.callee.type !== "Identifier" ||
+    (nw.callee as Identifier).name !== "Error"
+  ) {
+    throw new UnsupportedError({ type: "throw of a non-`new Error(...)` value" });
+  }
+  const [message] = nw.arguments;
+  if (nw.arguments.length !== 1 || !message) {
+    throw new UnsupportedError({
+      type: "throw new Error() must have exactly one message argument",
+    });
+  }
+  return { kind: "throw", value: lowerExpr(message, analysis) };
+}
+
+/**
+ * Rewrite a fallible function's body so every normal `return v` yields `Ok(v)`
+ * (and `return;` → `Ok(())`), leaving `throw`s to emit `Err`. A `void` body that
+ * can fall through the end gets a trailing `return Ok(());` — the non-throwing
+ * path must still produce `Ok`. `throw`s are untouched here (the emitter renders
+ * them as `return Err`).
+ */
+function makeFallible(stmts: HirStmt[], okTy: RustType): HirStmt[] {
+  const wrapped = stmts.map(wrapReturns);
+  if (okTy.kind === "unit" && !diverges(wrapped)) {
+    wrapped.push({ kind: "return", value: { kind: "ok", value: null } });
+  }
+  return wrapped;
+}
+
+/** Recursively wrap each `return v` in `Ok`, descending into control-flow bodies. */
+function wrapReturns(stmt: HirStmt): HirStmt {
+  switch (stmt.kind) {
+    case "return":
+      return { kind: "return", value: { kind: "ok", value: stmt.value } };
+    case "if":
+      return {
+        kind: "if",
+        cond: stmt.cond,
+        conseq: stmt.conseq.map(wrapReturns),
+        alt: stmt.alt ? stmt.alt.map(wrapReturns) : null,
+      };
+    case "while":
+      return { kind: "while", cond: stmt.cond, body: stmt.body.map(wrapReturns) };
+    case "block":
+      return { kind: "block", body: stmt.body.map(wrapReturns) };
+    case "forIn":
+      return { ...stmt, body: stmt.body.map(wrapReturns) };
+    case "match":
+      return {
+        kind: "match",
+        disc: stmt.disc,
+        arms: stmt.arms.map((a) => ({
+          guard: a.guard,
+          body: a.body.map(wrapReturns),
+        })),
+      };
+    default:
+      // `let`/`expr`/`throw`/`break`/`continue` carry no return to wrap.
+      return stmt;
+  }
+}
+
+/** Does a statement list definitely diverge (its last statement returns/throws)? */
+function diverges(stmts: HirStmt[]): boolean {
+  const last = stmts[stmts.length - 1];
+  if (!last) return false;
+  if (last.kind === "return" || last.kind === "throw") return true;
+  if (last.kind === "if" && last.alt) {
+    return diverges(last.conseq) && diverges(last.alt);
+  }
+  if (last.kind === "block") return diverges(last.body);
+  return false;
+}
+
+/** Does a lowered HIR subtree contain a `throw` stmt or a `try` (`?`) expr? */
+function hirHasThrowOrTry(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hirHasThrowOrTry);
+  if (node === null || typeof node !== "object") return false;
+  const kind = (node as { kind?: string }).kind;
+  if (kind === "throw" || kind === "try") return true;
+  return Object.values(node).some(hirHasThrowOrTry);
 }
 
 /**
@@ -215,6 +348,14 @@ function lowerClass(decl: ClassDeclaration, analysis: ModuleAnalysis): HirClass 
   }
   if (!ctor) {
     throw new UnsupportedError({ type: "class without an explicit constructor" });
+  }
+  // Throwing / error propagation inside a class is deferred (fallibility is
+  // analysed for free functions + the script only) — reject fail-loud rather than
+  // emit a `return Err`/`?` in a non-`Result` method.
+  if (hirHasThrowOrTry(ctor.body) || methods.some((m) => hirHasThrowOrTry(m.body))) {
+    throw new UnsupportedError({
+      type: "throw / error propagation inside a class method or constructor (deferred)",
+    });
   }
   return { kind: "class", name, fields, ctor, methods };
 }
@@ -421,9 +562,7 @@ function lowerStatement(
       return [{ kind: "continue" }];
     }
     case "ThrowStatement":
-      // Scaffold seam (series 013): real `throw` → `return Err(...)` lowering,
-      // fallibility, and `?` propagation land in the GREEN step.
-      throw new UnsupportedError({ type: "throw → Result lowering pending" });
+      return [lowerThrow(stmt as ThrowStatement, analysis)];
     default:
       throw new UnsupportedError(stmt);
   }
@@ -838,7 +977,12 @@ function lowerCall(call: CallExpression, analysis: ModuleAnalysis): HirExpr {
       }
       return { borrow, expr: lowerExpr(a, analysis) };
     });
-    return { kind: "call", callee: name, args };
+    const callExpr: HirExpr = { kind: "call", callee: name, args };
+    // A call to a fallible function propagates its error with `?`. The
+    // fallibility fixpoint guarantees the enclosing function is itself fallible,
+    // so its return type is already `Result` and `?` is well-typed.
+    if (analysis.fallible.has(name)) return { kind: "try", expr: callExpr };
+    return callExpr;
   }
 
   // Method call: `obj.method(args)`.
