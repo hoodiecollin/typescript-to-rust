@@ -47,7 +47,7 @@ function flattenStmts(stmts: HirStmt[]): HirStmt[] {
     if (stmt.kind === "if") {
       out.push(...flattenStmts(stmt.conseq));
       if (stmt.alt) out.push(...flattenStmts(stmt.alt));
-    } else if (stmt.kind === "while") {
+    } else if (stmt.kind === "while" || stmt.kind === "block") {
       out.push(...flattenStmts(stmt.body));
     }
   }

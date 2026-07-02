@@ -14,6 +14,7 @@ import type {
   BlockStatement,
   CallExpression,
   Expression,
+  ForStatement,
   FunctionDeclaration,
   Identifier,
   IfStatement,
@@ -178,9 +179,7 @@ function lowerStatement(
       ];
     }
     case "ForStatement":
-      // Seam (series 007): the HIR `block` + emitter render the desugar, but
-      // `for` lowering is not wired yet — swapped for `lowerFor` at GREEN.
-      throw new UnsupportedError({ type: "for-loop lowering pending" });
+      return [lowerFor(stmt as ForStatement, analysis, scope)];
     default:
       throw new UnsupportedError(stmt);
   }
@@ -214,6 +213,35 @@ function lowerAlternate(
     return [lowerIf(alt as IfStatement, analysis, scope)];
   }
   return lowerBlock(alt, analysis, scope);
+}
+
+/**
+ * Desugar a C-style `for (init; test; update) body` into a scoped `while`:
+ * `{ init; while (test) { …body; update; } }`. The wrapping `block` contains the
+ * loop variable's scope; the `update` runs as the loop body's last statement.
+ * (Sound only without `continue`, which is not in the dialect yet — see design.)
+ */
+function lowerFor(
+  stmt: ForStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
+  const init: HirStmt[] = stmt.init
+    ? stmt.init.type === "VariableDeclaration"
+      ? lowerVarDecl(stmt.init as VariableDeclaration, analysis, scope)
+      : [{ kind: "expr", expr: lowerExpr(stmt.init as Expression, analysis) }]
+    : [];
+
+  const body = lowerBlock(stmt.body, analysis, scope);
+  if (stmt.update) {
+    body.push({ kind: "expr", expr: lowerExpr(stmt.update, analysis) });
+  }
+
+  const cond: HirExpr = stmt.test
+    ? lowerExpr(stmt.test, analysis)
+    : { kind: "bool", value: true };
+
+  return { kind: "block", body: [...init, { kind: "while", cond, body }] };
 }
 
 /**
