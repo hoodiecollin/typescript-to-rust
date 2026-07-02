@@ -27,6 +27,8 @@ const FIXTURES_DIR = join(import.meta.dir, "fixtures");
 const SUPPORTED = new Set([
   "01_variables/01_primitives",
   "01_variables/02_mutability",
+  "02_control_flow/01_if_else",
+  "02_control_flow/02_while_loop",
   "03_functions/01_basic",
   "04_data_structures/01_arrays",
   "04_data_structures/03_variable_index",
@@ -142,5 +144,59 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("Ada");
+  });
+
+  test("if / else if / else classifies each branch identically", async () => {
+    const ts = [
+      `function check(x: number): string {`,
+      `  if (x > 0) {`,
+      `    return "positive";`,
+      `  } else if (x < 0) {`,
+      `    return "negative";`,
+      `  } else {`,
+      `    return "zero";`,
+      `  }`,
+      `}`,
+      `console.log(check(5));`,
+      `console.log(check(-3));`,
+      `console.log(check(0));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("positive\nnegative\nzero");
+  });
+
+  test("a while loop counts to the same value", async () => {
+    const ts = [
+      `function countUp(): number {`,
+      `  let i: number = 0;`,
+      `  while (i < 10) {`,
+      `    i = i + 1;`,
+      `  }`,
+      `  return i;`,
+      `}`,
+      `console.log(countUp());`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("10");
   });
 });
