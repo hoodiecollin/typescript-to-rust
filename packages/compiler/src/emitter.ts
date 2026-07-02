@@ -96,6 +96,9 @@ function emitStmt(stmt: HirStmt): string {
     }
     case "while":
       return `while ${emitExpr(stmt.cond)} ${block(stmt.body)}`;
+    case "block":
+      // A bare scope-containing block; no trailing `;` as a statement.
+      return block(stmt.body);
   }
 }
 

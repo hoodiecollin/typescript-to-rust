@@ -94,7 +94,13 @@ export type HirStmt =
    * statements. (`conseq`, not `then`, to avoid thenable confusion.)
    */
   | { kind: "if"; cond: HirExpr; conseq: HirStmt[]; alt: HirStmt[] | null }
-  | { kind: "while"; cond: HirExpr; body: HirStmt[] };
+  | { kind: "while"; cond: HirExpr; body: HirStmt[] }
+  /**
+   * A bare, scope-containing `{ … }`. Emitted with no trailing `;`. The C-style
+   * `for` desugar wraps its `init` + `while` in one so the loop variable's scope
+   * is contained (see lower.ts).
+   */
+  | { kind: "block"; body: HirStmt[] };
 
 // ── Items & module ───────────────────────────────────────────────────────────
 

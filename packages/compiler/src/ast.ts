@@ -145,6 +145,15 @@ export interface WhileStatement extends Span {
   body: Statement;
 }
 
+export interface ForStatement extends Span {
+  type: "ForStatement";
+  /** `let i = 0` (a declaration), an expression, or absent. */
+  init: VariableDeclaration | Expression | null;
+  test: Expression | null;
+  update: Expression | null;
+  body: Statement;
+}
+
 export type Statement =
   | VariableDeclaration
   | FunctionDeclaration
@@ -153,6 +162,7 @@ export type Statement =
   | ExpressionStatement
   | IfStatement
   | WhileStatement
+  | ForStatement
   | ({ type: string } & Span);
 
 export interface Program extends Span {

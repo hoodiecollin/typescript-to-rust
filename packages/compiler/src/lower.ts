@@ -177,6 +177,10 @@ function lowerStatement(
         },
       ];
     }
+    case "ForStatement":
+      // Seam (series 007): the HIR `block` + emitter render the desugar, but
+      // `for` lowering is not wired yet — swapped for `lowerFor` at GREEN.
+      throw new UnsupportedError({ type: "for-loop lowering pending" });
     default:
       throw new UnsupportedError(stmt);
   }
