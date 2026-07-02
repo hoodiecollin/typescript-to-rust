@@ -12,6 +12,7 @@ Implementation details and decisions that aren't obvious from the code.
 │   ├── index.ts                   # CLI: parse → lower → emit → rustfmt → check/run
 │   ├── src/ast.ts                 # typed ESTree subset (the real runtime shape)
 │   ├── src/analysis.ts            # ownership/mutability inference (side tables)
+│   ├── src/validate.ts            # dialect validation (step 2): forbidden input
 │   ├── src/hir.ts                 # typed IR (Rust's shape) between AST and Rust
 │   ├── src/lower.ts               # AST → HIR: the single dialect gate
 │   ├── src/numeric.ts             # HIR → HIR: refine number → usize for indices
@@ -91,9 +92,15 @@ rejects nothing, so every dialect decision has exactly one home.
    lowering and is rejected.) This is the fix for the original fixtures that
    emitted bare `let a: f64 = 42.0;` at module scope — which is not valid Rust.
 
-2. **Fail loudly, in one place.** Unsupported constructs throw `UnsupportedError`
-   **during lowering** — never in the emitter, never as silent `Any` or
-   commented-out stubs. The harness then reports the gap.
+2. **Fail loudly, in one place — with two meanings.** Failures surface as one of
+   two errors, never as silent `Any` or commented-out stubs:
+   - `DialectError` (`validate.ts`, run first in `lower()` — pipeline step 2):
+     input **forbidden** by the dialect and always will be (`any`/`unknown` today;
+     more categories pending). The fix is the user's.
+   - `UnsupportedError` (lowering): a construct **in** the dialect but not yet
+     implemented (control flow, classes, …). The fix is ours.
+   Both throw during the lower step, never in the emitter; the harness reports the
+   gap. The distinction tells the user whether to change their code or wait.
 
 3. **Numeric inference.** `number → f64` by default (integer literals get an
    explicit `.0` so the type is unambiguous). A post-lowering HIR→HIR pass

@@ -39,7 +39,8 @@ strategy.
   │
   ▼
 2. Dialect validation        reject anything outside dialect.md — FAIL LOUD
-  │                          (no `any`/`unknown`, no untyped bindings, …)
+  │  (validate.ts)           `DialectError`. Enforces `any`/`unknown` today;
+  │                          untyped bindings et al. are pending slices.
   ▼
 3. Symbol table & scopes     resolve every identifier to a declaration
   │
@@ -128,13 +129,19 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   refining a read-only `string` parameter's `&String` into the idiomatic `&str`.
   Owned params stay `String`, mutated stay `&mut String`; call sites are unchanged
   (`&String` coerces to `&str`).
+- **Dialect validation** (`src/validate.ts`): pipeline step 2, run first in
+  `lower()`. Rejects `any`/`unknown` with a `DialectError` — "forbidden input, fix
+  it" — now distinct from `UnsupportedError` ("in the dialect, not yet built").
+  Other forbidden categories and the annotation requirement are future slices.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
       `.clone()`, move-through-store) and nested-scope shadowing (blocked on
       control flow — no block scopes exist yet). Read-only-string `&str` params
       are done (`strings.ts`).
-- [ ] Dialect validator pass (reject out-of-subset input; enforce [dialect.md](./dialect.md)).
+- [ ] Extend the dialect validator (`validate.ts` exists; rejects `any`/`unknown`):
+      missing-annotation enforcement (with the trivial-literal exception), class
+      `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
 - [ ] Control flow: `if`/`else`, `while`, `for`, `for…of`, `switch → match`.
 - [ ] Data structures: records/`HashMap`, `interface`/struct literals.
 - [ ] `interface`/`class` → `struct`/`impl`.
