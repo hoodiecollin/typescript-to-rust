@@ -14,7 +14,8 @@ Implementation details and decisions that aren't obvious from the code.
 │   ├── src/analysis.ts            # ownership/mutability inference (side tables)
 │   ├── src/hir.ts                 # typed IR (Rust's shape) between AST and Rust
 │   ├── src/lower.ts               # AST → HIR: the single dialect gate
-│   ├── src/emitter/index.ts       # HIR → Rust module string (pure, total)
+│   ├── src/numeric.ts             # HIR → HIR: refine number → usize for indices
+│   ├── src/emitter.ts             # HIR → Rust module string (pure, total)
 │   ├── src/harness/               # the verification oracle (cargo + rustfmt)
 │   ├── .scratch/                  # persistent crate the harness compiles into
 │   └── tests/
@@ -93,19 +94,21 @@ rejects nothing, so every dialect decision has exactly one home.
    **during lowering** — never in the emitter, never as silent `Any` or
    commented-out stubs. The harness then reports the gap.
 
-3. **Numeric literals.** `number → f64`, and integer literals get an explicit
-   `.0` so the type is unambiguous (a literal *index* is emitted as bare `usize`).
-   A future numeric-inference pass will pick `usize`/`i64` more broadly — `arr[i]`
-   with `i: f64` does not compile, so today's `f64`-everywhere is a
-   deliberately-scoped limitation, not a finished design. The HIR is where that
-   pass will attach refined types.
+3. **Numeric inference.** `number → f64` by default (integer literals get an
+   explicit `.0` so the type is unambiguous). A post-lowering HIR→HIR pass
+   (`numeric.ts`) then refines values that reach an array-index position to
+   `usize` — `arr[i]` with `i: f64` does not compile — propagating usize-ness
+   through initializers and integer arithmetic, and throwing `UnsupportedError`
+   when a value is forced to be both `usize` and float. `i64` for integer-only
+   counters is a documented future addition to the same pass.
 
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
   shadowing, no inter-procedural moves through returns/stores). Documented and
   enforced by the dialect, not silently widened.
-- Numeric types are `f64` everywhere except literal indices → variable array
-  indexing and `for`-loop counters await the numeric-inference pass.
+- Numeric inference refines `number → usize` for array indices (variable indexing
+  compiles); `i64` counters and `for`-loop counters (which also need control-flow
+  lowering) are not yet done.
 - `string → String` everywhere (owned); `&str` borrows await a read-only-string
   generalization of the ownership pass.

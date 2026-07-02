@@ -86,7 +86,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 
 | TypeScript            | Rust (today)                  | Notes |
 |-----------------------|-------------------------------|-------|
-| `number`              | `f64`                         | A numeric-inference pass for `i64`/`usize` (indices, counters) is planned — `f64` cannot index a `Vec`, so this is a known landmine for loop/array code. |
+| `number`              | `f64`, or `usize` for indices | Numeric inference (`numeric.ts`) refines index-reached values to `usize` so `Vec` indexing compiles; `i64` counters are a planned addition. |
 | `string`              | `String` (owned)              | `&str` where ownership analysis proves read-only borrow suffices. |
 | `boolean`             | `bool`                        | |
 | `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
@@ -116,15 +116,16 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - **Typed HIR layer** (`src/hir.ts` + `src/lower.ts`): the pipeline is now
   AST → HIR → Rust. Lowering is the single dialect gate — it consumes the
   ownership analysis once and bakes resolved `RustType`s, borrow forms, `mut`-ness,
-  and call-site borrows into the IR. The emitter (`src/emitter/`) is a pure, total
+  and call-site borrows into the IR. The emitter (`src/emitter.ts`) is a pure, total
   HIR → string function with no analysis and no rejection. Side tables are an
   internal detail of lowering, no longer threaded downstream.
+- **Numeric inference** (`src/numeric.ts`): a post-lowering HIR→HIR pass refining
+  `number → usize` where array indexing demands it, propagating usize-ness through
+  initializers and integer arithmetic and failing loud on an int/float conflict.
+  Unblocks variable array indexing (`arr[i]`, `arr[i + 1]`). `i64` counters
+  deferred to the control-flow slice.
 
 **Next** (order reflects decisions made 2026-07-01)
-- [ ] Numeric inference (`usize`/`i64` for indices & counters) → unblock
-      variable array indexing and `for`-loop fixtures. (Literal indices already
-      emit `usize`.) The HIR is the home for this: annotate `number` nodes with a
-      refined `RustType` during (or after) lowering.
 - [ ] Generalize ownership: inter-procedural moves (value passed/returned/stored),
       `&str` for read-only string params, nested scopes.
 - [ ] Dialect validator pass (reject out-of-subset input; enforce [dialect.md](./dialect.md)).
