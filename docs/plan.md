@@ -133,14 +133,16 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `lower()`. Rejects `any`/`unknown` with a `DialectError` — "forbidden input, fix
   it" — now distinct from `UnsupportedError` ("in the dialect, not yet built").
   Other forbidden categories and the annotation requirement are future slices.
-- **Control flow — `if`/`while`/`for`** (`src/hir.ts`, `src/lower.ts`,
+- **Control flow — `if`/`while`/`for`/`for…of`** (`src/hir.ts`, `src/lower.ts`,
   `src/emitter.ts`): `if`/`else if`/`else` and `while` lower to HIR `if`/`while`
   nodes with real block bodies (emitter renders idiomatic `else if` chains);
-  C-style `for` desugars to a scope-containing `block` + `while` (`lowerFor`).
-  Numeric inference descends into control-flow and block bodies. Fixtures
-  `01_if_else`, `02_while_loop`, `03_for_loop` compile **and** behave
-  (differential). `for…of`/`switch`, `break`/`continue`, idiomatic `for i in a..b`
-  ranges, and `i64` counters remain their own slices.
+  C-style `for` desugars to a scope-containing `block` + `while` (`lowerFor`);
+  `for…of` lowers to `for <pat> in <iterable>.iter()` (`lowerForOf`, iterate by
+  reference). Numeric inference descends into control-flow, block, and `forIn`
+  bodies. Fixtures `01_if_else`, `02_while_loop`, `03_for_loop`, `04_for_of_loop`
+  compile **and** behave (differential). `switch`, `break`/`continue`, idiomatic
+  `for i in a..b` ranges, destructuring/owned-element `for…of`, and `i64`
+  counters remain their own slices.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -150,12 +152,13 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - [ ] Extend the dialect validator (`validate.ts` exists; rejects `any`/`unknown`):
       missing-annotation enforcement (with the trivial-literal exception), class
       `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
-- [ ] Control flow (cont.): `for…of`, `switch → match`, and `break`/`continue`.
-      `if`/`else`/`while`/`for` shipped (`src/lower.ts`); each remaining construct
-      is its own slice (for…of → iterator borrows; switch → match arms +
-      fall-through rejection; break/continue → must revisit the `for`-desugar,
-      which is unsound with `continue` today). Idiomatic `for i in a..b` ranges
-      are a follow-up optimization over the general `while` desugar.
+- [ ] Control flow (cont.): `switch → match` and `break`/`continue`.
+      `if`/`else`/`while`/`for`/`for…of` shipped (`src/lower.ts`); each remaining
+      construct is its own slice (switch → match arms + fall-through rejection;
+      break/continue → must revisit the `for`-desugar, which is unsound with
+      `continue` today). Follow-up `for…of` refinements (destructuring,
+      owned/`&mut` elements) and idiomatic `for i in a..b` ranges are their own
+      optimizations over today's correct lowerings.
 - [ ] Data structures: records/`HashMap`, `interface`/struct literals.
 - [ ] `interface`/`class` → `struct`/`impl`.
 - [ ] `throw`/`try` → **`Result<T,E>` + `?`** (decided; not `panic!`).
