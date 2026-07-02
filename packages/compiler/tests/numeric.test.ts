@@ -18,7 +18,9 @@ import { UnsupportedError, lower } from "../src/lower";
 import { refineNumerics } from "../src/numeric";
 
 function refined(src: string): HirModule {
-  return refineNumerics(lower(parseSync("t.ts", src).program as unknown as Program));
+  return refineNumerics(
+    lower(parseSync("t.ts", src).program as unknown as Program),
+  );
 }
 
 type Let = Extract<HirStmt, { kind: "let" }>;
@@ -70,7 +72,9 @@ describe("numeric inference: usize typing", () => {
   });
 
   test("N4 usize-ness propagates within an index expression", () => {
-    const m = refined(withArr(`const i: number = 0; const x: number = arr[i + 1];`));
+    const m = refined(
+      withArr(`const i: number = 0; const x: number = arr[i + 1];`),
+    );
     const i = letStmt(m.main[1]);
     const idx = letStmt(m.main[2]).init as Index;
     expect(i.ty).toEqual(USIZE);
