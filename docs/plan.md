@@ -93,7 +93,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 | `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
 | `Record<string, T>`   | `HashMap<String, T>`          | Done: type + literal construction (`HashMap::from`) + string-literal lookup (`lower.ts`). String keys only (`f64` isn't `Hash`/`Eq`); mutation/methods/variable keys deferred. |
 | `interface` / object  | `struct`                      | Done: `interface` → `struct` item + named-struct literals (`lower.ts`, resolved via `analysis.structs`). Optional/readonly/nested fields and inheritance deferred. |
-| `class`               | `struct` + `impl`             | no inheritance; shared-mutable instances need the `Rc<RefCell>` fallback. Next data-structure slice (builds on the `struct` half). |
+| `class`               | `struct` + `impl`             | Done: fields + field-init `constructor` → `new` + methods (`&self`/`&mut self`), `this`→`self`, `new C()`→`C::new()` (`lower.ts`). No inheritance/statics/accessors/generics; method-param borrows and implicit constructors deferred. Shared-mutable instances would need the `Rc<RefCell>` fallback. |
 | `throw` / `try`       | `Result<T, E>` + `?`          | **not** `panic!` — `panic!` changes catch semantics. A return-type rewrite. |
 | `async` / `await`     | `async fn` / `.await`         | runtime is **tokio**; generated entry point is `#[tokio::main]`. |
 | `any` / `unknown`     | `ts_primitives::TsAny`        | escape hatch only. |
@@ -172,6 +172,22 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   / inheritance; optional (`x?: T`) and readonly fields; nested/struct-typed
   fields and structs inside collections; struct mutation / field assignment;
   `#[derive(...)]` and whole-struct printing.
+- **Data structures — `class` → `struct` + `impl`** (`src/hir.ts`, `src/lower.ts`,
+  `src/emitter.ts`, `src/analysis.ts`): `06_classes/01_basic` compiles **and**
+  behaves. A `class` → a `HirClass` item (`HirModule.items` is a
+  `HirFn | HirStruct | HirClass` union) emitted as a `struct` + an `impl`. A
+  field-init `constructor` → an associated `fn new(params) -> Name` returning a
+  struct literal (fields must be exactly the declared set); methods → `fn`s with a
+  `self` receiver (`HirFn.recv`), `&mut self` when the body assigns a
+  `this.<field>` else `&self`. `this` → the `self` identifier (so `this.x` reuses
+  the `field` node), `new C(args)` → `C::new(args)`. Calling a self-mutating
+  method marks its receiver binding `mut` (`analysis.mutatingMethods`), so
+  `const c = new C(); c.increment();` → `let mut c`. **Deferred** (each its own
+  future series): inheritance (`extends`/`super`/`implements`); implicit or
+  non-field-init constructors; static members, getters/setters, accessibility,
+  generics, decorators; method-parameter borrow inference (params are moved in) and
+  owned-`self` methods; the name-based receiver-mutability's cross-class
+  same-name-method edge (a `unused_mut` warning at worst).
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -186,9 +202,6 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       idiomatic `for i in a..b` ranges, for…of element ergonomics (owned/`&mut`,
       destructuring), and labeled/stacked jumps. All are optimizations or edge
       cases over today's correct, fail-loud lowerings — not blockers.
-- [ ] `class` → `struct` + `impl` (`06_classes/01_basic`): methods, constructor
-      (`new`), `this`, field access. No inheritance. The struct half is done
-      (series 011); this adds behavior. The next data-structure slice.
 - [ ] `throw`/`try` → **`Result<T,E>` + `?`** (decided; not `panic!`).
 - [ ] `async`/`await` — emit `async fn` + `#[tokio::main]` (runtime already wired).
 

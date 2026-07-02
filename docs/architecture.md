@@ -169,7 +169,28 @@ rejects nothing, so every dialect decision has exactly one home.
      an unknown type name (`Promise`, `Map`, …) stays fail-loud. Nominal, not
      structural: a literal must resolve to a named struct (or a record). Field reads
      (`p.x`) reuse the existing `field` node. `extends`/optional/readonly fields are
-     rejected; classes (methods/`new`/`this`) are the next slice.
+     rejected; classes (methods/`new`/`this`) are handled by invariant 7.
+
+7. **Classes split into a `struct` + `impl`.** A `class` lowers to a `HirClass`
+   item (`HirModule.items` is a `HirFn | HirStruct | HirClass` union) that the
+   emitter renders as a `struct` (its fields) followed by an `impl` block holding
+   an associated constructor and the methods. The field-init `constructor` becomes
+   `fn new(params) -> Name` returning a struct literal — its body must be exactly
+   `this.<field> = <expr>;` assignments covering every declared field (a Rust
+   struct literal is total), else `UnsupportedError`; constructor params are moved
+   into the fields. Each method becomes an `fn` with a `self` receiver
+   (`HirFn.recv`): `&mut self` when the AST body assigns a `this.<field>`, else
+   `&self` (`astAssignsThis`). `ThisExpression` lowers to the `self` identifier —
+   so `this.count` reuses the existing `field` node (`self.count`) and
+   `this.count = …` the `assign` node — and `new C(args)` to a `call` with callee
+   `C::new`. Because Rust needs a binding to be `mut` before a `&mut self` method
+   can be called on it, the ownership analysis collects the module's self-mutating
+   method names (`analysis.mutatingMethods`) and `mutableBindings` marks a receiver
+   `mut` when it calls one (`const c = new C(); c.increment();` → `let mut c`);
+   this is name-based (not binding-type-aware), so a cross-class same-named method
+   is a documented `unused_mut`-at-worst edge. Inheritance, statics, accessors,
+   generics, implicit constructors, and method-param borrows are rejected/deferred.
+   The numeric and string passes descend into a class's `ctor` and `methods`.
 
 ## Known limitations (tracked, not hidden)
 
@@ -208,6 +229,12 @@ rejects nothing, so every dialect decision has exactly one home.
   inside collections; struct-field mutation / assignment; `#[derive(...)]` and
   whole-struct printing. An object literal only lowers in a record- or
   struct-typed binding (nominal); a bare/unknown-typed literal is fail-loud.
+- Classes lower to a `struct` + `impl` for the **field-init-constructor + methods**
+  shape (construct, mutate/read through a binding). Deferred: inheritance
+  (`extends`/`super`/`implements`); implicit / non-field-init constructors; static
+  members, getters/setters, accessibility, generics, decorators; method-parameter
+  borrow inference (params are moved in) and owned-`self` methods; binding-type-
+  aware receiver mutability (today's is name-based across the module).
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization
