@@ -1,0 +1,34 @@
+# Persistent scratch crate driven by the verification harness (src/harness).
+# The harness swaps source files and runs `cargo check` / `cargo run` against
+# emitted Rust. Keeping it persistent preserves the incremental-compile cache,
+# so repeated checks stay fast. An explicit empty [workspace] isolates it from
+# the repo's root Cargo workspace.
+#
+# Two targets:
+#   - lib (src/lib.rs)  — used by `check`: compiles any item/expression without
+#                          requiring a `main`, so bare-function snippets verify.
+#   - bin (src/main.rs) — used by `run`: needs a `main`, executes for the
+#                          behavioral (differential) oracle.
+[package]
+name = "ttr_scratch"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ts-primitives = { path = "../../../crates/ts-primitives" }
+# Async lowering targets tokio: TS `async function` → `async fn`, and the
+# generated `main` becomes `#[tokio::main]`. Pinned so the offline cache stays
+# warm; the harness fetches it online on a cold cache. Unused by non-async
+# output (a present-but-unused dependency costs nothing at check time).
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[lib]
+name = "ttr_scratch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ttr_scratch"
+path = "src/main.rs"
+
+[workspace]

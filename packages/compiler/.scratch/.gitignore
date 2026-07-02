@@ -1,0 +1,4 @@
+# Build artifacts and the harness-managed source are disposable.
+/target
+/Cargo.lock
+/src/main.rs
