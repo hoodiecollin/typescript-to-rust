@@ -11,11 +11,6 @@
  * defeat static lowering. Other forbidden categories (class inheritance, dynamic
  * object manipulation, escaping shared mutable aliasing) and the explicit-
  * annotation requirement are future validator slices — see docs/work.
- *
- * NOTE: `validate` is a no-op passthrough (mock). The real check lands in the
- * GREEN step of series 005; until then `any`/`unknown` still throw the *wrong*
- * error (`UnsupportedError`, from lowering's `default`), so the RED specs — which
- * expect `DialectError` — fail against it.
  */
 
 import type { Program } from "./ast";
@@ -27,10 +22,48 @@ export class DialectError extends Error {
   }
 }
 
+/** Forbidden type keywords → the message naming them. */
+const FORBIDDEN_TYPES: Record<string, string> = {
+  TSAnyKeyword: "`any` type",
+  TSUnknownKeyword: "`unknown` type",
+};
+
+interface AnyNode {
+  type: string;
+  [key: string]: unknown;
+}
+
+function isNode(x: unknown): x is AnyNode {
+  return (
+    typeof x === "object" &&
+    x !== null &&
+    typeof (x as AnyNode).type === "string"
+  );
+}
+
+/** Depth-first walk over the whole AST, visiting every node. */
+function walk(node: unknown, visit: (n: AnyNode) => void): void {
+  if (Array.isArray(node)) {
+    for (const child of node) walk(child, visit);
+    return;
+  }
+  if (!isNode(node)) return;
+  visit(node);
+  for (const key in node) {
+    if (key === "type") continue;
+    walk(node[key], visit);
+  }
+}
+
 /**
  * Validate that `program` is within the accepted dialect.
  * @throws {DialectError} on forbidden input.
  */
-export function validate(_program: Program): void {
-  // mock: real enforcement lands in the GREEN step.
+export function validate(program: Program): void {
+  walk(program, (n) => {
+    const reason = FORBIDDEN_TYPES[n.type];
+    // `any`/`unknown` defeat static lowering — reject wherever they appear
+    // (variable, parameter, return, or nested in a type argument).
+    if (reason) throw new DialectError(reason);
+  });
 }
