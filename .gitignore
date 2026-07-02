@@ -1,0 +1,13 @@
+# Dependencies (bun install)
+node_modules/
+
+# Rust build artifacts (root workspace target)
+/target/
+
+# Build output
+dist/
+out/
+*.tsbuildinfo
+
+# macOS Finder metadata
+.DS_Store

@@ -1,0 +1,20 @@
+{
+  "name": "typescript-to-rust",
+  "version": "0.0.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "ttr": "bun run packages/compiler/index.ts",
+    "test": "bun test packages/compiler",
+    "typecheck": "tsc -p packages/compiler/tsconfig.json --noEmit",
+    "rust:check": "cargo check",
+    "rust:test": "cargo test",
+    "check": "bun run typecheck && bun run rust:test && bun run test",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.8.3",
+    "typescript": "^5.5.2"
+  }
+}
