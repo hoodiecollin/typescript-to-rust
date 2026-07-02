@@ -12,14 +12,25 @@
  *
  * Like `refineNumerics`, this is a standalone, pure, idempotent HIR → HIR pass
  * invoked as the final gate step in `lower()`. It mutates the module in place.
- *
- * NOTE: identity passthrough (mock). The real refinement lands in the GREEN step
- * of series 004; until then this returns the module untouched so the RED specs
- * fail against it.
  */
 
-import type { HirModule } from "./hir";
+import type { HirModule, HirParam } from "./hir";
 
 export function refineStrings(module: HirModule): HirModule {
+  for (const fn of module.items) {
+    for (const param of fn.params) refineParam(param);
+  }
   return module;
+}
+
+/**
+ * A read-only `&String` parameter becomes `&str`. Mutable `&mut String`
+ * (can't grow a `str`) and owned `String` (keeps ownership) are left alone, as is
+ * any non-string type — so this is safe to run on already-refined params.
+ */
+function refineParam(param: HirParam): void {
+  const ty = param.ty;
+  if (ty.kind === "ref" && !ty.mut && ty.inner.kind === "String") {
+    ty.inner = { kind: "str" };
+  }
 }
