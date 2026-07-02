@@ -23,6 +23,7 @@ import type {
   IfStatement,
   Literal,
   MemberExpression,
+  ObjectExpression,
   Program,
   Statement,
   SwitchStatement,
@@ -430,13 +431,53 @@ function lowerVarDecl(
     const ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation)
       : null;
+    // An object literal is interpreted from its binding's type: a `hashmap`
+    // annotation makes it a `HashMap::from([…])` construction. A bare object
+    // literal (no record type) stays unsupported until struct literals land.
+    const init =
+      ty?.kind === "hashmap" && d.init.type === "ObjectExpression"
+        ? lowerHashMapLiteral(d.init as ObjectExpression, analysis)
+        : lowerExpr(d.init, analysis);
     return {
       kind: "let",
       name: d.id.name,
       mut: mutable?.has(d.id.name) ?? false,
       ty,
-      init: lowerExpr(d.init, analysis),
+      init,
     };
+  });
+}
+
+/**
+ * Lower a record object literal to a `hashmap` HirExpr — each `key: value`
+ * property becomes a `(key, value)` entry. Keys are string literals or bare
+ * identifiers (both a `String`); spread and computed keys are unsupported.
+ */
+function lowerHashMapLiteral(
+  obj: ObjectExpression,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const entries = obj.properties.map((p) => {
+    if (p.type !== "Property" || p.computed) {
+      throw new UnsupportedError({
+        type: "unsupported object property (spread or computed key)",
+      });
+    }
+    return { key: lowerKey(p.key), value: lowerExpr(p.value, analysis) };
+  });
+  return { kind: "hashmap", entries };
+}
+
+/** A record key: a string literal or a bare identifier, both a `String`. */
+function lowerKey(key: Expression): HirExpr {
+  if (key.type === "Literal" && typeof (key as Literal).value === "string") {
+    return { kind: "string", value: (key as Literal).value as string };
+  }
+  if (key.type === "Identifier") {
+    return { kind: "string", value: (key as Identifier).name };
+  }
+  throw new UnsupportedError({
+    type: "record key must be a string literal or identifier",
   });
 }
 
@@ -485,6 +526,12 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       return lowerCall(expr as CallExpression, analysis);
     case "MemberExpression":
       return lowerMember(expr as MemberExpression, analysis);
+    case "ObjectExpression":
+      // An object literal only lowers contextually, in a record-typed binding
+      // (see lowerVarDecl). Bare/struct-typed literals await series 011.
+      throw new UnsupportedError({
+        type: "object literal without a Record type (struct literals: series 011)",
+      });
     default:
       throw new UnsupportedError(expr);
   }
@@ -596,8 +643,16 @@ function lowerType(ty: TSType): RustType {
         return { kind: "vec", elem: lowerType(inner) };
       }
       if (ref.typeName.name === "Record") {
-        // SEAM (series 010): the HIR/emitter shape exists; real lowering pending.
-        throw new UnsupportedError({ type: "Record → HashMap lowering pending" });
+        // `Record<string, V>` → `HashMap<String, V>`. Only a `string` key maps
+        // soundly: `f64` (a `number` key) is neither `Eq` nor `Hash` in Rust.
+        const [key, value] = ref.typeArguments?.params ?? [];
+        if (!key || !value) throw new UnsupportedError(ty);
+        if (key.type !== "TSStringKeyword") {
+          throw new UnsupportedError({
+            type: "Record with a non-string key (only string keys map to HashMap)",
+          });
+        }
+        return { kind: "hashmap", key: { kind: "String" }, value: lowerType(value) };
       }
       throw new UnsupportedError(ty);
     }

@@ -34,6 +34,7 @@ const SUPPORTED = new Set([
   "02_control_flow/05_switch",
   "03_functions/01_basic",
   "04_data_structures/01_arrays",
+  "04_data_structures/02_records",
   "04_data_structures/03_variable_index",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
@@ -340,6 +341,26 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("6");
+  });
+
+  test("a record builds a HashMap and looks up the same value", async () => {
+    const ts = [
+      `const scores: Record<string, number> = { "ada": 10, "linus": 7 };`,
+      `const ada: number = scores["ada"];`,
+      `console.log(ada);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("10");
   });
 
   test("a C-style for loop sums to the same value", async () => {
