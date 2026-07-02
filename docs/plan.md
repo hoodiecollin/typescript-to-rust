@@ -94,7 +94,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 | `Record<string, T>`   | `HashMap<String, T>`          | Done: type + literal construction (`HashMap::from`) + string-literal lookup (`lower.ts`). String keys only (`f64` isn't `Hash`/`Eq`); mutation/methods/variable keys deferred. |
 | `interface` / object  | `struct`                      | Done: `interface` → `struct` item + named-struct literals (`lower.ts`, resolved via `analysis.structs`). Optional/readonly/nested fields and inheritance deferred. |
 | `class`               | `struct` + `impl`             | Done: fields + field-init `constructor` → `new` + methods (`&self`/`&mut self`), `this`→`self`, `new C()`→`C::new()` (`lower.ts`). No inheritance/statics/accessors/generics; method-param borrows and implicit constructors deferred. Shared-mutable instances would need the `Rc<RefCell>` fallback. |
-| `throw` / `try`       | `Result<T, E>` + `?`          | **not** `panic!` — `panic!` changes catch semantics. A return-type rewrite. |
+| `throw` / `try`       | `Result<T, E>` + `?`          | Done (propagation): a throwing/thrower-calling function returns `Result<T, String>`, `throw new Error(msg)` → `Err(msg)`, returns wrap in `Ok`, callers `?`-propagate (`main` too). **not** `panic!` (changes catch semantics). `try`/`catch`, custom error types, throw-in-method/`async` deferred. |
 | `async` / `await`     | `async fn` / `.await`         | runtime is **tokio**; generated entry point is `#[tokio::main]`. |
 | `any` / `unknown`     | `ts_primitives::TsAny`        | escape hatch only. |
 
@@ -188,6 +188,23 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   generics, decorators; method-parameter borrow inference (params are moved in) and
   owned-`self` methods; the name-based receiver-mutability's cross-class
   same-name-method edge (a `unused_mut` warning at worst).
+- **Errors — `throw` → `Result<T, String>` + `?`** (`src/analysis.ts`,
+  `src/lower.ts`, `src/emitter.ts`, `src/hir.ts`): `08_errors/01_throw` compiles
+  and a success-path differential behaves. A function is *fallible* iff it `throw`s
+  or (transitively) calls a fallible function — a fixpoint over the top-level call
+  graph (`analysis.fallible`, incl. the `SCRIPT_SCOPE` sentinel for `main`). A
+  fallible function's return type wraps in a `result` `RustType` (`Result<T,
+  String>`, `void`→`()`); `throw new Error(msg)` → a `throw` HIR stmt emitting
+  `return Err(msg)`; `makeFallible` wraps every normal `return v` in `Ok` (a `ok`
+  HirExpr; `null`→`Ok(())`) and appends a trailing `Ok(())` to a fall-through
+  `void` body; a call to a fallible function wraps in a `try` HirExpr (`expr?`).
+  When the script propagates a throwing call, `main` returns `Result` via
+  `HirModule.mainRet`. **Deferred** (each its own future series): `try`/`catch`/
+  `finally` (the recovery side); custom error types / `Error` subclasses / an error
+  enum / `Box<dyn Error>` (`E` is uniformly `String`); `throw` of a
+  non-`new Error(...)` value; throwing / propagation inside a class method,
+  constructor, or `async` function (rejected fail-loud); ignoring/storing a
+  `Result` (every fallible call is `?`-propagated).
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -202,7 +219,9 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       idiomatic `for i in a..b` ranges, for…of element ergonomics (owned/`&mut`,
       destructuring), and labeled/stacked jumps. All are optimizations or edge
       cases over today's correct, fail-loud lowerings — not blockers.
-- [ ] `throw`/`try` → **`Result<T,E>` + `?`** (decided; not `panic!`).
+- [ ] `try`/`catch`/`finally` — the recovery side of errors (this slice shipped
+      the propagation side: `throw` → `Result` + `?`). Catch a `Result` into a
+      `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.
 - [ ] `async`/`await` — emit `async fn` + `#[tokio::main]` (runtime already wired).
 
 The `tests/fixtures/**` tree enumerates these as `test.todo` targets; each flips

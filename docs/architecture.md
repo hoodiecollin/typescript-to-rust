@@ -192,6 +192,35 @@ rejects nothing, so every dialect decision has exactly one home.
    generics, implicit constructors, and method-param borrows are rejected/deferred.
    The numeric and string passes descend into a class's `ctor` and `methods`.
 
+8. **`throw` lowers to `Result<T, String>` + `?`, driven by a fallibility
+   fixpoint.** TS exceptions have no Rust equivalent; a `throw`ing function
+   instead *returns* `Result`, and callers propagate with `?` (deliberately not
+   `panic!`, which would change catch semantics). A function is **fallible** iff
+   it `throw`s or (transitively) calls a fallible function — a fixpoint over the
+   top-level call graph computed in `analyzeModule` (`analysis.fallible`, including
+   the `SCRIPT_SCOPE` sentinel for the generated `main`). Everything reads that set:
+   - **Return type.** A fallible function's `ret` wraps in a new `RustType`
+     `{ kind: "result"; ok; err }` — `Result<T, String>` (`void` → `Result<(),
+     String>`). `E` is uniformly `String` (the `Error` message) this slice.
+   - **`throw`.** `throw new Error(<msg>)` → a `throw` HIR statement
+     (`lowerThrow`, accepting only that exact shape) that the emitter renders as
+     `return Err(<msg>);`; the message lowers as an expression, so a string
+     literal becomes a `String`.
+   - **Returns.** `makeFallible` rewrites every `return v` → `return Ok(v)` (a new
+     `ok` HirExpr, `null` value ⇒ `Ok(())`), recursing through control-flow bodies,
+     and appends a trailing `return Ok(());` to a `void` body that can fall through
+     the end (`diverges` checks the last statement).
+   - **`?` propagation.** A `call` to a fallible function wraps in a `try` HirExpr
+     (`<expr>?`); the fixpoint guarantees the enclosing function is itself fallible,
+     so its return type is already `Result` and `?` is well-typed. When the script
+     propagates a throwing call, `main` becomes `fn main() -> Result<(), String>`
+     via an optional `HirModule.mainRet` (absent ⇒ `()`).
+   `throw`/propagation inside a class method/constructor, and `async` fallible
+   functions, are rejected fail-loud (`hirHasThrowOrTry` guards the class; each is
+   a later series). `try`/`catch` (the recovery side), custom error types, and
+   non-`new Error(...)` throws are deferred. The numeric pass descends into the new
+   `throw`/`ok`/`try` nodes.
+
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
@@ -235,6 +264,15 @@ rejects nothing, so every dialect decision has exactly one home.
   members, getters/setters, accessibility, generics, decorators; method-parameter
   borrow inference (params are moved in) and owned-`self` methods; binding-type-
   aware receiver mutability (today's is name-based across the module).
+- Errors lower to `Result<T, String>` + `?` for the **propagation** shape: a
+  function that `throw`s or calls a thrower returns `Result`, `throw new
+  Error(msg)` → `return Err(msg)`, normal returns wrap in `Ok`, and fallible calls
+  `?`-propagate (the generated `main` returns `Result` too). Deferred: `try`/
+  `catch`/`finally` (the recovery side — this slice only propagates); custom error
+  types / `Error` subclasses / an error enum / `Box<dyn Error>` (`E` is uniformly
+  `String`); `throw` of a non-`new Error(...)` value; throwing / propagation inside
+  a class method, constructor, or `async` function (rejected fail-loud); and
+  ignoring/storing a `Result` (every fallible call is `?`-propagated).
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization
