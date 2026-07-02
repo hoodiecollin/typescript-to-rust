@@ -1,0 +1,101 @@
+/**
+ * Compiler tests, driven by the verification harness.
+ *
+ * Oracle = a real Rust toolchain, in two tiers:
+ *   1. COMPILES — emit Rust for a fixture, assert `cargo check` accepts it.
+ *   2. BEHAVES  — run a complete TS program and the emitted Rust, assert their
+ *                 stdout matches (differential testing).
+ *
+ * `SUPPORTED` lists the fixtures the emitter handles today; they must compile.
+ * Every other fixture under `fixtures/` is a dialect target not yet implemented
+ * and is registered as `test.todo`, so it shows up as pending work and flips to
+ * a real test the moment the feature lands. There is no hand-written `.rs`
+ * golden file anywhere — that oracle is gone.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+import { parseSync } from "oxc-parser";
+import type { Program } from "../src/ast";
+import { emit } from "../src/emitter";
+import { checkRust, runRust, summarizeErrors } from "../src/harness";
+
+const FIXTURES_DIR = join(import.meta.dir, "fixtures");
+
+/** Fixtures whose emitted Rust must compile today. */
+const SUPPORTED = new Set([
+  "01_variables/01_primitives",
+  "01_variables/02_mutability",
+  "03_functions/01_basic",
+  "04_data_structures/01_arrays",
+  "10_ownership/01_borrow",
+  "10_ownership/02_mut_borrow",
+  "10_ownership/03_move",
+]);
+
+function listFixtures(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out.push(...listFixtures(full));
+    else if (entry.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
+
+function emitFixture(tsPath: string): string {
+  const source = readFileSync(tsPath, "utf8");
+  const parsed = parseSync(tsPath, source);
+  return emit(parsed.program as unknown as Program);
+}
+
+describe("fixtures compile (tier 1: COMPILES)", () => {
+  const fixtures = listFixtures(FIXTURES_DIR).sort();
+
+  for (const tsPath of fixtures) {
+    const name = relative(FIXTURES_DIR, tsPath).replace(/\.ts$/, "");
+
+    if (!SUPPORTED.has(name)) {
+      test.todo(`${name} (dialect target — emitter support pending)`, () => {});
+      continue;
+    }
+
+    test(`${name}`, async () => {
+      const rust = emitFixture(tsPath);
+      const result = await checkRust(rust);
+      if (!result.ok) {
+        throw new Error(
+          `emitted Rust did not compile:\n${rust}\n\ncargo:\n${summarizeErrors(result)}`,
+        );
+      }
+      expect(result.ok).toBe(true);
+    });
+  }
+});
+
+describe("programs behave (tier 2: BEHAVES — differential)", () => {
+  test("functions + variables + console.log produce identical stdout", async () => {
+    const ts = [
+      `function add(a: number, b: number): number {`,
+      `  return a + b;`,
+      `}`,
+      `const result: number = add(2, 3);`,
+      `console.log(result);`,
+    ].join("\n");
+
+    // Reference output: run the TypeScript itself with Bun.
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    // Candidate output: emit Rust and run it.
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("5");
+  });
+});
