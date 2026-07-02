@@ -36,6 +36,7 @@ const SUPPORTED = new Set([
   "04_data_structures/01_arrays",
   "04_data_structures/02_records",
   "04_data_structures/03_variable_index",
+  "05_interfaces/01_basic",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
   "10_ownership/03_move",
@@ -348,6 +349,29 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
       `const scores: Record<string, number> = { "ada": 10, "linus": 7 };`,
       `const ada: number = scores["ada"];`,
       `console.log(ada);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("10");
+  });
+
+  test("an interface builds a struct and reads the same field", async () => {
+    const ts = [
+      `interface Point {`,
+      `  x: number;`,
+      `  y: number;`,
+      `}`,
+      `const p: Point = { x: 10, y: 20 };`,
+      `console.log(p.x);`,
     ].join("\n");
 
     const tsRun = Bun.spawnSync(["bun", "run", "-"], {

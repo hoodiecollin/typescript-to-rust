@@ -59,6 +59,8 @@ export interface ModuleAnalysis {
   fns: Map<string, FnInfo>;
   /** scope key → set of binding names that must be `mut` */
   mut: Map<string, Set<string>>;
+  /** names of declared `interface`s — resolved to nominal `struct` types */
+  structs: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -223,5 +225,13 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   }
   mut.set(SCRIPT_SCOPE, mutableBindings(script, fns));
 
-  return { fns, mut };
+  const structs = new Set<string>();
+  for (const stmt of program.body) {
+    if (stmt.type === "TSInterfaceDeclaration") {
+      const id = (stmt as { id?: { name?: string } }).id;
+      if (id?.name) structs.add(id.name);
+    }
+  }
+
+  return { fns, mut, structs };
 }

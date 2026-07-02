@@ -191,6 +191,28 @@ export interface SwitchStatement extends Span {
   cases: SwitchCase[];
 }
 
+/** One `name: T` member of an interface body. */
+export interface TSPropertySignature extends Span {
+  type: "TSPropertySignature";
+  key: Identifier;
+  typeAnnotation: TSTypeAnnotation | null;
+  optional: boolean;
+  computed: boolean;
+}
+
+export interface TSInterfaceBody extends Span {
+  type: "TSInterfaceBody";
+  body: TSPropertySignature[];
+}
+
+export interface TSInterfaceDeclaration extends Span {
+  type: "TSInterfaceDeclaration";
+  id: Identifier;
+  body: TSInterfaceBody;
+  /** Base interfaces (`extends A, B`) — non-empty means inheritance. */
+  extends: unknown[];
+}
+
 export interface BreakStatement extends Span {
   type: "BreakStatement";
   label: Identifier | null;
@@ -214,6 +236,7 @@ export type Statement =
   | SwitchStatement
   | BreakStatement
   | ContinueStatement
+  | TSInterfaceDeclaration
   | ({ type: string } & Span);
 
 export interface Program extends Span {

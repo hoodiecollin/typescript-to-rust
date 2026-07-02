@@ -27,6 +27,7 @@ import type {
   Program,
   Statement,
   SwitchStatement,
+  TSInterfaceDeclaration,
   TSType,
   VariableDeclaration,
   WhileStatement,
@@ -36,10 +37,12 @@ import type {
   HirArg,
   HirExpr,
   HirFn,
+  HirItem,
   HirMatchArm,
   HirModule,
   HirParam,
   HirStmt,
+  HirStruct,
   RustType,
 } from "./hir";
 import { refineNumerics } from "./numeric";
@@ -68,17 +71,14 @@ export function lower(program: Program): HirModule {
   // loud with `DialectError`, distinct from the "not yet implemented" gate below.
   validate(program);
   const analysis = analyzeModule(program);
-  const items: HirFn[] = [];
+  const items: HirItem[] = [];
   const script: Statement[] = [];
 
   for (const stmt of program.body) {
     if (stmt.type === "FunctionDeclaration") {
       items.push(lowerFunction(stmt as FunctionDeclaration, analysis));
     } else if (stmt.type === "TSInterfaceDeclaration") {
-      // SEAM (series 011): the HIR/emitter shape exists; real lowering pending.
-      throw new UnsupportedError({
-        type: "interface → struct lowering pending",
-      });
+      items.push(lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs));
     } else {
       script.push(stmt);
     }
@@ -86,7 +86,7 @@ export function lower(program: Program): HirModule {
 
   let main: HirStmt[] = [];
   if (script.length > 0) {
-    if (items.some((f) => f.name === "main")) {
+    if (items.some((f) => f.kind === "fn" && f.name === "main")) {
       // No sound single lowering mixes script with a user-defined `main`.
       throw new UnsupportedError({
         type: "top-level statements alongside a user-defined main()",
@@ -110,9 +110,11 @@ function lowerFunction(
   const name = func.id.name;
   const info = analysis.fns.get(name);
 
-  const params = func.params.map((p, i) => lowerParam(p, info?.params[i]));
+  const params = func.params.map((p, i) =>
+    lowerParam(p, info?.params[i], analysis.structs),
+  );
   const ret = func.returnType
-    ? lowerType(func.returnType.typeAnnotation)
+    ? lowerType(func.returnType.typeAnnotation, analysis.structs)
     : UNIT;
 
   if (!func.body)
@@ -123,9 +125,40 @@ function lowerFunction(
   return { kind: "fn", name, isAsync: func.async, params, ret, body };
 }
 
+/**
+ * Lower an `interface` to a `struct` item. Data-only: `extends` (inheritance) and
+ * optional/computed members are rejected (`UnsupportedError`), each a later
+ * series. Field types resolve through `structs` so a struct field may name
+ * another declared interface (though no fixture exercises nesting yet).
+ */
+function lowerInterface(
+  decl: TSInterfaceDeclaration,
+  structs: Set<string>,
+): HirStruct {
+  if (decl.extends && decl.extends.length > 0) {
+    throw new UnsupportedError({ type: "interface extends (inheritance)" });
+  }
+  const fields = decl.body.body.map((m) => {
+    if (m.type !== "TSPropertySignature" || m.computed) {
+      throw new UnsupportedError({ type: "unsupported interface member" });
+    }
+    if (m.optional) {
+      throw new UnsupportedError({ type: "optional interface field (x?: T)" });
+    }
+    if (!m.typeAnnotation) {
+      throw new UnsupportedError({
+        type: `interface field '${m.key.name}' without a type`,
+      });
+    }
+    return { name: m.key.name, ty: lowerType(m.typeAnnotation.typeAnnotation, structs) };
+  });
+  return { kind: "struct", name: decl.id.name, fields };
+}
+
 function lowerParam(
   p: Identifier,
   info: { ownership: "move" | "ref" | "refMut" } | undefined,
+  structs: Set<string>,
 ): HirParam {
   if (!p.typeAnnotation) {
     throw new UnsupportedError({
@@ -133,7 +166,7 @@ function lowerParam(
       start: p.start,
     });
   }
-  const base = lowerType(p.typeAnnotation.typeAnnotation);
+  const base = lowerType(p.typeAnnotation.typeAnnotation, structs);
   const ownership = info?.ownership ?? "move";
   const ty: RustType =
     ownership === "ref"
@@ -434,15 +467,19 @@ function lowerVarDecl(
   return decl.declarations.map((d) => {
     if (!d.init) throw new UnsupportedError({ type: "uninitialized binding" });
     const ty = d.id.typeAnnotation
-      ? lowerType(d.id.typeAnnotation.typeAnnotation)
+      ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
     // An object literal is interpreted from its binding's type: a `hashmap`
-    // annotation makes it a `HashMap::from([…])` construction. A bare object
-    // literal (no record type) stays unsupported until struct literals land.
-    const init =
-      ty?.kind === "hashmap" && d.init.type === "ObjectExpression"
-        ? lowerHashMapLiteral(d.init as ObjectExpression, analysis)
-        : lowerExpr(d.init, analysis);
+    // annotation makes it a `HashMap::from([…])` construction, a `struct` a
+    // `Name { … }` literal. A bare object literal (neither) stays unsupported.
+    let init: HirExpr;
+    if (ty?.kind === "hashmap" && d.init.type === "ObjectExpression") {
+      init = lowerHashMapLiteral(d.init as ObjectExpression, analysis);
+    } else if (ty?.kind === "struct" && d.init.type === "ObjectExpression") {
+      init = lowerStructLiteral(d.init as ObjectExpression, ty.name, analysis);
+    } else {
+      init = lowerExpr(d.init, analysis);
+    }
     return {
       kind: "let",
       name: d.id.name,
@@ -471,6 +508,33 @@ function lowerHashMapLiteral(
     return { key: lowerKey(p.key), value: lowerExpr(p.value, analysis) };
   });
   return { kind: "hashmap", entries };
+}
+
+/**
+ * Lower a struct object literal to a `structLit` HirExpr — each `field: value`
+ * property becomes a named field. Field names are identifiers (or string
+ * literals); spread and computed keys are unsupported. Field values lower as
+ * expressions; the struct's declared field types are not re-checked here (the
+ * cargo oracle catches a type mismatch).
+ */
+function lowerStructLiteral(
+  obj: ObjectExpression,
+  name: string,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const fields = obj.properties.map((p) => {
+    if (p.type !== "Property" || p.computed) {
+      throw new UnsupportedError({
+        type: "unsupported object property (spread or computed key)",
+      });
+    }
+    const key = lowerKey(p.key);
+    if (key.kind !== "string") {
+      throw new UnsupportedError({ type: "struct field name must be static" });
+    }
+    return { name: key.value, value: lowerExpr(p.value, analysis) };
+  });
+  return { kind: "structLit", name, fields };
 }
 
 /** A record key: a string literal or a bare identifier, both a `String`. */
@@ -630,7 +694,7 @@ function lowerMember(
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-function lowerType(ty: TSType): RustType {
+function lowerType(ty: TSType, structs: Set<string>): RustType {
   switch (ty.type) {
     case "TSNumberKeyword":
       return { kind: "f64" };
@@ -645,7 +709,7 @@ function lowerType(ty: TSType): RustType {
       if (ref.typeName.name === "Array") {
         const inner = ref.typeArguments?.params?.[0];
         if (!inner) throw new UnsupportedError(ty);
-        return { kind: "vec", elem: lowerType(inner) };
+        return { kind: "vec", elem: lowerType(inner, structs) };
       }
       if (ref.typeName.name === "Record") {
         // `Record<string, V>` → `HashMap<String, V>`. Only a `string` key maps
@@ -657,7 +721,16 @@ function lowerType(ty: TSType): RustType {
             type: "Record with a non-string key (only string keys map to HashMap)",
           });
         }
-        return { kind: "hashmap", key: { kind: "String" }, value: lowerType(value) };
+        return {
+          kind: "hashmap",
+          key: { kind: "String" },
+          value: lowerType(value, structs),
+        };
+      }
+      // A reference to a declared `interface` → its nominal `struct` type. An
+      // unknown type name stays fail-loud (`Promise`, `Map`, … are unsupported).
+      if (structs.has(ref.typeName.name)) {
+        return { kind: "struct", name: ref.typeName.name };
       }
       throw new UnsupportedError(ty);
     }
