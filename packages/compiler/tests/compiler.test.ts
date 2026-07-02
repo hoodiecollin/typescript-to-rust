@@ -29,6 +29,7 @@ const SUPPORTED = new Set([
   "01_variables/02_mutability",
   "02_control_flow/01_if_else",
   "02_control_flow/02_while_loop",
+  "02_control_flow/03_for_loop",
   "03_functions/01_basic",
   "04_data_structures/01_arrays",
   "04_data_structures/03_variable_index",
@@ -187,6 +188,31 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
       `  return i;`,
       `}`,
       `console.log(countUp());`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("10");
+  });
+
+  test("a C-style for loop sums to the same value", async () => {
+    const ts = [
+      `function sum(): number {`,
+      `  let total: number = 0;`,
+      `  for (let i: number = 0; i < 5; i = i + 1) {`,
+      `    total = total + i;`,
+      `  }`,
+      `  return total;`,
+      `}`,
+      `console.log(sum());`,
     ].join("\n");
 
     const tsRun = Bun.spawnSync(["bun", "run", "-"], {
