@@ -144,22 +144,32 @@ rejects nothing, so every dialect decision has exactly one home.
    nested loops). Control flow is otherwise complete — all five `02_control_flow`
    fixtures compile and behave.
 
-6. **Records lower to `HashMap`, interpreted from the binding type.** An object
-   literal is ambiguous in isolation (a `Record` map vs an `interface` struct), so
-   it is lowered **contextually**: `lowerVarDecl` reads the binding's resolved
-   `RustType`, and only when it is a `hashmap` (`Record<string, V>` →
-   `{ kind: "hashmap"; key; value }`) does the literal become a `hashmap` HirExpr
-   (`lowerHashMapLiteral`) → `HashMap::from([(k, v), …])` (empty → `HashMap::new()`,
-   which needs the binding's annotation to infer `K,V`). A bare object literal
-   reaching `lowerExpr` throws `UnsupportedError` (struct literals are a later
-   series). A keyed lookup `map["a"]` reuses the `index` HIR node; the emitter's
-   `emitIndex` renders a **string** index as a bare `&str` (`map["a"]`) — Rust's
-   `HashMap: Index<&Q> where K: Borrow<Q>` wants `&str`, and a `Copy` value copies
-   out of the returned place — mirroring the bare-integer case for `usize` `Vec`
-   indices. `emitModule` prepends `use std::collections::HashMap;` when a generic
-   deep-scan finds any `kind: "hashmap"` node (the emitter is the sole producer, so
-   this is exact). Only `string` keys map soundly — `f64` (a `number` key) is
-   neither `Hash` nor `Eq` — so a non-`string` `Record` key is rejected in lowering.
+6. **Object literals lower contextually, from the binding type.** A `{ … }`
+   literal is ambiguous in isolation — a `Record` map vs an `interface` struct — so
+   it is never lowered by `lowerExpr` (which throws `UnsupportedError`); instead
+   `lowerVarDecl` reads the binding's resolved `RustType` and dispatches:
+   - a `hashmap` type (`Record<string, V>` → `{ kind: "hashmap"; key; value }`) →
+     a `hashmap` HirExpr (`lowerHashMapLiteral`) → `HashMap::from([(k, v), …])`
+     (empty → `HashMap::new()`, which needs the annotation to infer `K,V`). A keyed
+     lookup `map["a"]` reuses the `index` HIR node; `emitIndex` renders a **string**
+     index as a bare `&str` (`map["a"]`) — `HashMap: Index<&Q> where K: Borrow<Q>`
+     wants `&str`, and a `Copy` value copies out of the returned place — mirroring
+     the bare-integer case for `usize` `Vec` indices. `emitModule` prepends
+     `use std::collections::HashMap;` when a generic deep-scan finds any
+     `kind: "hashmap"` node (the emitter is the sole producer, so this is exact).
+     Only `string` keys map soundly (`f64` is neither `Hash` nor `Eq`), so a
+     non-`string` `Record` key is rejected in lowering.
+   - a `struct` type (a declared `interface`) → a `structLit` HirExpr
+     (`lowerStructLiteral`) → `Name { field: value, … }`. An `interface` lowers to
+     a `HirStruct` **item**, so `HirModule.items` is a `HirFn | HirStruct` union
+     (`HirItem`); the emitter dispatches items through `emitItem`, and the numeric
+     and string passes skip non-`fn` items. Interface names are collected in
+     `analyzeModule` (`analysis.structs`), threaded into `lowerType`, which resolves
+     a `TSTypeReference` to `{ kind: "struct"; name }` **only** for a declared name —
+     an unknown type name (`Promise`, `Map`, …) stays fail-loud. Nominal, not
+     structural: a literal must resolve to a named struct (or a record). Field reads
+     (`p.x`) reuse the existing `field` node. `extends`/optional/readonly fields are
+     rejected; classes (methods/`new`/`this`) are the next slice.
 
 ## Known limitations (tracked, not hidden)
 
@@ -191,6 +201,13 @@ rejects nothing, so every dialect decision has exactly one home.
   (`f64` isn't `Hash`/`Eq`); variable/non-literal keys (need `map[&k]` and care
   with the numeric pass, which seeds every index position as `usize`); map
   mutation, `.get`/`.has`/`.delete`, and iteration; the `Map`/`Set` classes.
+- Interfaces lower to a `struct` for the **construct-and-read** shape (definition,
+  named struct literal, field read). Deferred: `class` → `struct` + `impl`
+  (methods, constructor, `this`, `new`); `interface extends` / inheritance;
+  optional (`x?: T`) and readonly fields; nested / struct-typed fields and structs
+  inside collections; struct-field mutation / assignment; `#[derive(...)]` and
+  whole-struct printing. An object literal only lowers in a record- or
+  struct-typed binding (nominal); a bare/unknown-typed literal is fail-loud.
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization

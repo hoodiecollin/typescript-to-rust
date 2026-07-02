@@ -92,8 +92,8 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 | `boolean`             | `bool`                        | |
 | `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
 | `Record<string, T>`   | `HashMap<String, T>`          | Done: type + literal construction (`HashMap::from`) + string-literal lookup (`lower.ts`). String keys only (`f64` isn't `Hash`/`Eq`); mutation/methods/variable keys deferred. |
-| `interface` / object  | `struct`                      | closed, statically-known shapes only. |
-| `class`               | `struct` + `impl`             | no inheritance; shared-mutable instances need the `Rc<RefCell>` fallback. |
+| `interface` / object  | `struct`                      | Done: `interface` → `struct` item + named-struct literals (`lower.ts`, resolved via `analysis.structs`). Optional/readonly/nested fields and inheritance deferred. |
+| `class`               | `struct` + `impl`             | no inheritance; shared-mutable instances need the `Rc<RefCell>` fallback. Next data-structure slice (builds on the `struct` half). |
 | `throw` / `try`       | `Result<T, E>` + `?`          | **not** `panic!` — `panic!` changes catch semantics. A return-type rewrite. |
 | `async` / `await`     | `async fn` / `.await`         | runtime is **tokio**; generated entry point is `#[tokio::main]`. |
 | `any` / `unknown`     | `ts_primitives::TsAny`        | escape hatch only. |
@@ -156,9 +156,22 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   index (not `.to_string()` — `HashMap: Index<&Q>`). A module using a map gets
   `use std::collections::HashMap;` prepended. A bare/struct-typed object literal
   is fail-loud (`UnsupportedError`). **Deferred** (each its own future series):
-  `interface`/object → struct literals (series 011); non-`string` keys (`f64` is
-  not `Hash`/`Eq`); variable/non-literal keys (need `&k` + numeric-seeding care);
-  mutation / `.get` / `.has` / iteration / maps API; the `Map`/`Set` classes.
+  non-`string` keys (`f64` is not `Hash`/`Eq`); variable/non-literal keys (need
+  `&k` + numeric-seeding care); mutation / `.get` / `.has` / iteration / maps API;
+  the `Map`/`Set` classes.
+- **Data structures — `interface`/object → `struct` literals** (`src/hir.ts`,
+  `src/lower.ts`, `src/emitter.ts`, `src/analysis.ts`): `05_interfaces/01_basic`
+  compiles **and** behaves. An `interface` → a `HirStruct` **item**
+  (`HirModule.items` is now a `HirFn | HirStruct` union); interface names are
+  collected into `analysis.structs`, so `lowerType` resolves a `TSTypeReference`
+  to a nominal `struct` `RustType` (an unknown type name stays fail-loud). An
+  object literal in a struct-typed binding → a `structLit` (`Name { f: v, … }`),
+  chosen contextually in `lowerVarDecl` (parallel to the record path); a field
+  read reuses the existing `field` node. **Deferred** (each its own future
+  series): `class` → `struct` + `impl` (methods/`new`/`this`); `interface extends`
+  / inheritance; optional (`x?: T`) and readonly fields; nested/struct-typed
+  fields and structs inside collections; struct mutation / field assignment;
+  `#[derive(...)]` and whole-struct printing.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -173,9 +186,9 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       idiomatic `for i in a..b` ranges, for…of element ergonomics (owned/`&mut`,
       destructuring), and labeled/stacked jumps. All are optimizations or edge
       cases over today's correct, fail-loud lowerings — not blockers.
-- [ ] Data structures (cont.): `interface`/object → `struct` literals
-      (`05_interfaces/01_basic`) — series 011. Records → `HashMap` are done.
-- [ ] `class` → `struct`/`impl` (no inheritance).
+- [ ] `class` → `struct` + `impl` (`06_classes/01_basic`): methods, constructor
+      (`new`), `this`, field access. No inheritance. The struct half is done
+      (series 011); this adds behavior. The next data-structure slice.
 - [ ] `throw`/`try` → **`Result<T,E>` + `?`** (decided; not `panic!`).
 - [ ] `async`/`await` — emit `async fn` + `#[tokio::main]` (runtime already wired).
 
