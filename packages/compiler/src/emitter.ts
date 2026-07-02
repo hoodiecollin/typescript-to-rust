@@ -96,9 +96,10 @@ const BINARY_OPS: Record<string, string> = {
 function emitExpr(expr: HirExpr): string {
   switch (expr.kind) {
     case "number":
-      // `number` maps to `f64`; integer literals need an explicit `.0` so the
-      // type is unambiguous. (A future numeric-inference pass may pick i64/usize
-      // for indices and counters — see docs/architecture.md.)
+      // A node the numeric-inference pass tagged `usize` (an index/counter)
+      // renders as a bare integer. Otherwise `number` maps to `f64`: integer
+      // literals need an explicit `.0` so the type is unambiguous.
+      if (expr.ty === "usize") return `${expr.value}`;
       return Number.isInteger(expr.value) ? `${expr.value}.0` : `${expr.value}`;
     case "string":
       return `${JSON.stringify(expr.value)}.to_string()`;
@@ -157,6 +158,8 @@ function emitType(ty: RustType): string {
   switch (ty.kind) {
     case "f64":
       return "f64";
+    case "usize":
+      return "usize";
     case "String":
       return "String";
     case "bool":

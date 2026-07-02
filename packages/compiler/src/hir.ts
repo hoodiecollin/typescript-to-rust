@@ -24,17 +24,25 @@ export type Borrow = "owned" | "ref" | "refMut";
 
 /**
  * A Rust type. `ref` models a borrow (`&T` / `&mut T`); a parameter's borrow
- * form is folded in here so the emitter renders it by simple recursion. A future
- * numeric-inference pass will refine `f64` into `i64` / `usize` where indices and
- * counters demand it.
+ * form is folded in here so the emitter renders it by simple recursion. The
+ * numeric-inference pass (`numeric.ts`) refines `f64` into `usize` where indexing
+ * demands it; `i64` for integer counters is a documented future addition here.
  */
 export type RustType =
   | { kind: "f64" }
+  | { kind: "usize" }
   | { kind: "String" }
   | { kind: "bool" }
   | { kind: "unit" }
   | { kind: "vec"; elem: RustType }
   | { kind: "ref"; mut: boolean; inner: RustType };
+
+/**
+ * The refined type of a numeric literal node. Absent ⇒ `f64` (the default). The
+ * numeric-inference pass tags integer literals that reach a `usize` context.
+ * (`"i64"` is the documented future extension — see docs/work.)
+ */
+export type NumericType = "f64" | "usize";
 
 // ── Expressions ──────────────────────────────────────────────────────────────
 
@@ -45,7 +53,7 @@ export interface HirArg {
 }
 
 export type HirExpr =
-  | { kind: "number"; value: number }
+  | { kind: "number"; value: number; ty?: NumericType }
   | { kind: "string"; value: string }
   | { kind: "bool"; value: boolean }
   | { kind: "ident"; name: string }
