@@ -139,10 +139,14 @@ rejects nothing, so every dialect decision has exactly one home.
    refinement reaches inside them.
 
    The `for`-desugar is sound with `break` (it exits the `while`, as the `for`
-   would) but **not** with `continue` (which would skip the appended `update`);
-   `lowerFor` therefore rejects an *own* `continue` (`hasOwnContinue`, stopping at
-   nested loops). Control flow is otherwise complete — all five `02_control_flow`
-   fixtures compile and behave.
+   would). A bare `continue` would skip the appended `update`, so `lowerFor`
+   rewrites each *own* `continue` (`hasOwnContinue`, stopping at nested loops) into
+   `{ update; continue; }` — the `update` runs before continuing, so the counter
+   still advances (`inlineUpdateBeforeContinue`, series 018). This is label-free:
+   an unlabeled `break` diverging through a labeled block is a hard error (E0695),
+   so the `'step:`-block alternative is avoided. A `for` with no `update` needs no
+   rewrite. Control flow is complete — all five `02_control_flow` fixtures compile
+   and behave.
 
 6. **Object literals lower contextually, from the binding type.** A `{ … }`
    literal is ambiguous in isolation — a `Record` map vs an `interface` struct — so
@@ -274,8 +278,12 @@ rejects nothing, so every dialect decision has exactly one home.
   identically to JS).
 - Control flow is complete (`if`/`else`/`while`/`for`/`for…of`/`switch`/`break`/
   `continue`), with these documented refinements deferred: C-style `for` desugars
-  to a `while` (not the idiomatic `for i in a..b` range) and rejects an own
-  `continue` (needs a labeled-block desugar); `switch` emits guarded-wildcard
+  to a `while` (not the idiomatic `for i in a..b` range — that needs
+  integer-counter inference, since a `usize` range counter can't mix with `f64`
+  body arithmetic). An own `continue` in a C-`for` is supported (series 018):
+  `lowerFor` inlines the `update` before each own `continue` (`{ update; continue;
+  }`), label-free (an unlabeled break through a labeled block is E0695); `switch`
+  emits guarded-wildcard
   `match` arms (not literal/or-patterns), rejects fall-through and empty/stacked
   cases; `for…of` iterates arrays by reference (element `&T` — fine for
   arithmetic, but `&f64 == f64` has no impl, so by-value comparison, destructuring,

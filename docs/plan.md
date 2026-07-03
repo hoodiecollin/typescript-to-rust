@@ -141,12 +141,16 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `for <pat> in <iterable>.iter()` (`lowerForOf`, by reference); `switch` → a
   guarded-wildcard `match` (`lowerSwitch`, sidestepping Rust's `f64`
   literal-pattern ban; cases must terminate, no fall-through); `break`/`continue`
-  → Rust `break;`/`continue;`. Numeric inference descends into every control-flow
-  body. **Deferred refinements** (each its own future series): idiomatic
-  `for i in a..b` ranges and literal-pattern `match` arms; `continue` inside a
-  C-`for` (rejected — needs a labeled-block desugar); for…of element ergonomics
-  (`&T` binding — fine for arithmetic, not by-value comparison; destructuring /
-  owned / `&mut` elements); labeled and stacked jumps; `i64` counters.
+  → Rust `break;`/`continue;`. An own `continue` inside a C-`for` is supported —
+  `lowerFor` inlines the `update` before each own `continue` (`{ update; continue;
+  }`), so the counter still advances (series 018; label-free — an unlabeled break
+  through a labeled block is E0695). Numeric inference descends into every
+  control-flow body. **Deferred refinements** (each its own future series):
+  idiomatic `for i in a..b` ranges (entangled with integer-counter inference — a
+  `usize` range counter can't mix with `f64` body arithmetic) and literal-pattern
+  `match` arms; for…of element ergonomics (`&T` binding — fine for arithmetic, not
+  by-value comparison; destructuring / owned / `&mut` elements); labeled and
+  stacked jumps; downward/non-unit-step counting loops; `i64` counters.
 - **Data structures — records → `HashMap`** (`src/hir.ts`, `src/lower.ts`,
   `src/emitter.ts`): `04_data_structures/02_records` compiles **and** behaves.
   `Record<string, V>` → a `hashmap` `RustType` (`HashMap<String, V>`); a
@@ -266,11 +270,12 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - [ ] Extend the dialect validator (`validate.ts` exists; rejects `any`/`unknown`):
       missing-annotation enforcement (with the trivial-literal exception), class
       `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
-- [ ] Control-flow refinements (deferred, revisit as needed): the labeled-block
-      `for`-`continue` desugar, literal-pattern / or-pattern `match` arms,
-      idiomatic `for i in a..b` ranges, for…of element ergonomics (owned/`&mut`,
+- [ ] Control-flow refinements (deferred, revisit as needed): literal-pattern /
+      or-pattern `match` arms, idiomatic `for i in a..b` ranges (needs
+      integer-counter inference first), for…of element ergonomics (owned/`&mut`,
       destructuring), and labeled/stacked jumps. All are optimizations or edge
-      cases over today's correct, fail-loud lowerings — not blockers.
+      cases over today's correct lowerings — not blockers. (The C-`for`
+      `continue` desugar shipped in series 018.)
 - [ ] `try`/`catch`/`finally` — the recovery side of errors (this slice shipped
       the propagation side: `throw` → `Result` + `?`). Catch a `Result` into a
       `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.
