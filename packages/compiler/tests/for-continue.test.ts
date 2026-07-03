@@ -31,7 +31,7 @@ describe("for-continue: unblock continue in a C-style for", () => {
     );
     expect(rust).toContain("continue;");
     // update at the continue site AND at the loop bottom → at least twice.
-    expect(occurrences(rust, "i = i + 1;")).toBeGreaterThanOrEqual(2);
+    expect(occurrences(rust, "i = i + 1.0;")).toBeGreaterThanOrEqual(2);
   });
 
   test("FORCONT2 a break in the same for stays a bare break", () => {

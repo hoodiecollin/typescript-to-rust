@@ -758,38 +758,86 @@ function isAstNode(x: unknown): x is { type: string } {
  * `{ init; while (test) { …body; update; } }`. The wrapping `block` contains the
  * loop variable's scope; the `update` runs as the loop body's last statement.
  *
- * A `continue` in the body would jump to the `while` condition and **skip** the
- * appended `update` — a semantic change — so an *own* `continue` (not inside a
- * nested loop) is rejected. `break` is sound (it exits the `while`, exactly as
- * the `for` would). The labeled-block fix is a deferred series (see design 009).
+ * A bare `continue` in the body would jump to the `while` condition and **skip**
+ * the appended `update` — a semantic change. Rather than reject it (as before),
+ * each *own* `continue` (not inside a nested loop) is rewritten to
+ * `{ update; continue; }`, so the loop variable still advances before continuing
+ * (`inlineUpdateBeforeContinue`). This is label-free — an unlabeled `break`
+ * through a labeled block is a hard error (E0695), so the `'step:`-block approach
+ * is avoided. `break` is untouched: a bare `break` exits the `while`, exactly as
+ * the `for` would. A `for` with no `update` needs no rewrite (nothing to skip).
  */
 function lowerFor(
   stmt: ForStatement,
   analysis: ModuleAnalysis,
   scope: string,
 ): HirStmt {
-  if (hasOwnContinue(stmt.body)) {
-    throw new UnsupportedError({
-      type: "continue inside a C-style for (unsound while-desugar — deferred)",
-    });
-  }
-
   const init: HirStmt[] = stmt.init
     ? stmt.init.type === "VariableDeclaration"
       ? lowerVarDecl(stmt.init as VariableDeclaration, analysis, scope)
       : [{ kind: "expr", expr: lowerExpr(stmt.init as Expression, analysis) }]
     : [];
 
-  const body = lowerBlock(stmt.body, analysis, scope);
-  if (stmt.update) {
-    body.push({ kind: "expr", expr: lowerExpr(stmt.update, analysis) });
+  const update: HirStmt | null = stmt.update
+    ? { kind: "expr", expr: lowerExpr(stmt.update, analysis) }
+    : null;
+
+  let body = lowerBlock(stmt.body, analysis, scope);
+  // An own `continue` skips the bottom `update`; inline the update before each so
+  // the loop variable still advances. Only meaningful when there is an `update`.
+  if (update && hasOwnContinue(stmt.body)) {
+    body = inlineUpdateBeforeContinue(body, update);
   }
+  if (update) body.push(update);
 
   const cond: HirExpr = stmt.test
     ? lowerExpr(stmt.test, analysis)
     : { kind: "bool", value: true };
 
   return { kind: "block", body: [...init, { kind: "while", cond, body }] };
+}
+
+/**
+ * Rewrite each *own* `continue` in a C-style `for` body to `{ update; continue; }`
+ * (a `block`), so the loop variable advances before re-testing. Descends through
+ * `if`/`block`/`match` (transparent to `continue`) but stops at a nested
+ * `while`/`forIn` — that loop owns its own `continue`. A nested C-style `for` is a
+ * `block` containing a `while`, so its inner `continue`s sit under the barrier and
+ * are left untouched. The `update` node is shared across sites (never mutated).
+ */
+function inlineUpdateBeforeContinue(
+  stmts: HirStmt[],
+  update: HirStmt,
+): HirStmt[] {
+  return stmts.map((s) => inlineUpdateInStmt(s, update));
+}
+
+function inlineUpdateInStmt(stmt: HirStmt, update: HirStmt): HirStmt {
+  switch (stmt.kind) {
+    case "continue":
+      return { kind: "block", body: [update, { kind: "continue" }] };
+    case "if":
+      return {
+        kind: "if",
+        cond: stmt.cond,
+        conseq: inlineUpdateBeforeContinue(stmt.conseq, update),
+        alt: stmt.alt ? inlineUpdateBeforeContinue(stmt.alt, update) : null,
+      };
+    case "block":
+      return { kind: "block", body: inlineUpdateBeforeContinue(stmt.body, update) };
+    case "match":
+      return {
+        kind: "match",
+        disc: stmt.disc,
+        arms: stmt.arms.map((a) => ({
+          guard: a.guard,
+          body: inlineUpdateBeforeContinue(a.body, update),
+        })),
+      };
+    default:
+      // `while`/`forIn` own their own `continue` (barrier); other stmts carry none.
+      return stmt;
+  }
 }
 
 /**
