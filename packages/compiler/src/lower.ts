@@ -106,6 +106,7 @@ export function lower(program: Program): HirModule {
 
   let main: HirStmt[] = [];
   let mainRet: RustType | undefined;
+  let mainAsync: boolean | undefined;
   if (script.length > 0) {
     if (items.some((f) => f.kind === "fn" && f.name === "main")) {
       // No sound single lowering mixes script with a user-defined `main`.
@@ -120,11 +121,14 @@ export function lower(program: Program): HirModule {
       main = makeFallible(main, UNIT);
       mainRet = resultType(UNIT);
     }
+    // A script that `await`s needs an async runtime entry: `#[tokio::main] async
+    // fn main()` (composes with `mainRet` if the script also throws).
+    if (hirHasAwait(main)) mainAsync = true;
   }
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`.
-  return refineStrings(refineNumerics({ items, main, mainRet }));
+  return refineStrings(refineNumerics({ items, main, mainRet, mainAsync }));
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────
@@ -135,12 +139,6 @@ function lowerFunction(
 ): HirFn {
   if (!func.id) throw new UnsupportedError(func);
   const name = func.id.name;
-  // SCAFFOLD SEAM (series 014): async lowering (async fn + await + Promise unwrap
-  // + #[tokio::main]) is stubbed so specs are RED; GREEN replaces this with real
-  // async lowering. The fallible-async rejection below stays either way.
-  if (func.async) {
-    throw new UnsupportedError({ type: "async/await lowering pending" });
-  }
   const info = analysis.fns.get(name);
 
   const params = func.params.map((p, i) =>
@@ -274,6 +272,18 @@ function hirHasThrowOrTry(node: unknown): boolean {
   const kind = (node as { kind?: string }).kind;
   if (kind === "throw" || kind === "try") return true;
   return Object.values(node).some(hirHasThrowOrTry);
+}
+
+/**
+ * Does a lowered HIR subtree contain an `await`? Used on the generated `main` to
+ * decide `#[tokio::main]`. Nested functions are separate `items`, so walking
+ * `main` sees exactly script-scope awaits.
+ */
+function hirHasAwait(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hirHasAwait);
+  if (node === null || typeof node !== "object") return false;
+  if ((node as { kind?: string }).kind === "await") return true;
+  return Object.values(node).some(hirHasAwait);
 }
 
 /**
@@ -454,6 +464,13 @@ function lowerMethod(
 ): HirFn {
   const fn = member.value;
   const name = member.key.name;
+  // async in a class is deferred: `asyncFns` tracks free functions only, so an
+  // async method could be defined but never soundly awaited. Fail-loud.
+  if (fn.async) {
+    throw new UnsupportedError({
+      type: "async method (async only on free functions this slice)",
+    });
+  }
   const structs = analysis.structs;
   const params = fn.params.map((p) => lowerParam(p, undefined, structs));
   const ret = fn.returnType
@@ -931,8 +948,7 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
     case "NewExpression":
       return lowerNew(expr as NewExpression, analysis);
     case "AwaitExpression":
-      // SCAFFOLD SEAM (series 014): `await` lowering is stubbed so specs are RED.
-      throw new UnsupportedError({ type: "async/await lowering pending" });
+      return lowerAwait(expr as AwaitExpression, analysis);
     case "ObjectExpression":
       // An object literal only lowers contextually, in a record-typed binding
       // (see lowerVarDecl). Bare/struct-typed literals await series 011.
@@ -964,7 +980,37 @@ function isConsoleLog(callee: Expression): boolean {
   );
 }
 
-function lowerCall(call: CallExpression, analysis: ModuleAnalysis): HirExpr {
+/**
+ * `await <asyncCall>` → `<call>.await`. Only `await` of a call to a known free
+ * `async` function maps: awaiting a non-call, or a call to a non-`async`
+ * function, is fail-loud (there is no future to poll). The awaited call lowers
+ * with `awaited = true` so `lowerCall` accepts the `async` callee.
+ */
+function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
+  const arg = expr.argument;
+  if (arg.type !== "CallExpression") {
+    throw new UnsupportedError({
+      type: "await of a non-call expression (only `await asyncFn(...)`)",
+    });
+  }
+  const call = arg as CallExpression;
+  const callee = call.callee;
+  if (
+    callee.type !== "Identifier" ||
+    !analysis.asyncFns.has((callee as Identifier).name)
+  ) {
+    throw new UnsupportedError({
+      type: "await of a call to a non-async function",
+    });
+  }
+  return { kind: "await", expr: lowerCall(call, analysis, true) };
+}
+
+function lowerCall(
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+  awaited = false,
+): HirExpr {
   // console.log(...) → println!
   if (isConsoleLog(call.callee)) {
     return {
@@ -988,6 +1034,18 @@ function lowerCall(call: CallExpression, analysis: ModuleAnalysis): HirExpr {
       return { borrow, expr: lowerExpr(a, analysis) };
     });
     const callExpr: HirExpr = { kind: "call", callee: name, args };
+    // A call to an `async` function is only valid `await`ed — a bare call is an
+    // un-polled future that never runs (a `must_use` warning, not an error, so
+    // it would silently diverge from TS). `lowerAwait` passes `awaited = true`.
+    // async fns are never fallible (async + throw is rejected), so no `?`.
+    if (analysis.asyncFns.has(name)) {
+      if (!awaited) {
+        throw new UnsupportedError({
+          type: "call to an async function not directly awaited (an un-polled future never runs)",
+        });
+      }
+      return callExpr;
+    }
     // A call to a fallible function propagates its error with `?`. The
     // fallibility fixpoint guarantees the enclosing function is itself fallible,
     // so its return type is already `Result` and `?` is well-typed.
@@ -1062,6 +1120,14 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
       return UNIT;
     case "TSTypeReference": {
       const ref = ty as Extract<TSType, { type: "TSTypeReference" }>;
+      if (ref.typeName.name === "Promise") {
+        // An `async fn`'s Rust return type is its resolved `T`, not a wrapper —
+        // Rust wraps in `Future` implicitly. `Promise<void>` → `()`. In-dialect
+        // `Promise` only ever annotates an `async` return (see design 014).
+        const inner = ref.typeArguments?.params?.[0];
+        if (!inner) throw new UnsupportedError(ty);
+        return lowerType(inner, structs);
+      }
       if (ref.typeName.name === "Array") {
         const inner = ref.typeArguments?.params?.[0];
         if (!inner) throw new UnsupportedError(ty);
