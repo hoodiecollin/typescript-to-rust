@@ -234,9 +234,13 @@ rejects nothing, so every dialect decision has exactly one home.
    async call that is not directly awaited (`awaited` flag). When the top-level
    script `await`s, the generated entry becomes `#[tokio::main] async fn main()`
    via `HirModule.mainAsync` (detected by `hirHasAwait` over `main`; composes with
-   `mainRet`). `async` + `throw` (a fallible async fn) and `async` methods are
-   rejected fail-loud; the numeric pass descends into the new `await` node. The
-   scratch crate pins `tokio`, so the runtime is present without extra plumbing.
+   `mainRet`). A fallible `async` fn composes too — `async fn … -> Result<…>`, and
+   an awaited fallible call propagates *after* the await as `<call>.await?`
+   (`lowerAwait` wraps the await in a `try` when the callee ∈ `analysis.fallible`;
+   the `?` sits outside the await, well-typed because the fixpoint makes the caller
+   `Result`). `async` methods are still rejected fail-loud; the numeric pass
+   descends into the new `await` node. The scratch crate pins `tokio`, so the
+   runtime is present without extra plumbing.
 
 10. **A top-level `const f = (…) => …` arrow normalizes to a free `fn` before
     analysis.** A module-scope `const` bound to a non-`async` arrow is semantically
@@ -311,9 +315,11 @@ rejects nothing, so every dialect decision has exactly one home.
   when the script awaits. `Promise<T>` unwraps to `T` in any type-annotation
   position (in-dialect `Promise` only ever annotates an `async` return; a
   `Promise`-typed param/variable is out-of-dialect and its unwrap unspecified).
-  Deferred (each fail-loud or its own series): a call to an `async` function that
-  is not directly awaited, and `await` of a non-call or a sync call; `async` +
-  `throw` (a fallible async fn) and `async` methods; `async` arrow functions
+  A fallible `async` fn composes too (`async fn … -> Result<…>`, awaited as
+  `<call>.await?`). Deferred (each fail-loud or its own series): a call to an
+  `async` function that is not directly awaited, and `await` of a non-call or a
+  sync call; catching an async error (`try`/`catch`) and `async` methods;
+  `async` arrow functions
   (a top-level `const` arrow now normalizes to a free `fn`, but only the
   non-`async` form — see below); `Promise` combinators / concurrency
   (`Promise.all`/`race`, timers, spawning, `.then` chains, cancellation) and real

@@ -216,11 +216,22 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   directly awaited (an un-polled future never runs — a silent divergence from TS's
   eager promise). When the top-level script awaits, the generated entry becomes
   `#[tokio::main] async fn main()` via `HirModule.mainAsync` (composes with
-  `mainRet`). **Deferred** (each its own future series): un-awaited async calls and
-  `await` of a non-async call (rejected); `async` + `throw` (a fallible async fn)
-  and `async` methods (rejected fail-loud); `async` arrows (only the non-`async`
-  arrow normalizes — see below); `Promise` combinators / concurrency
-  (`Promise.all`, timers, spawning, `.then`) and real async I/O.
+  `mainRet`). A fallible `async` fn is now supported too (see the async×errors
+  slice below). **Deferred** (each its own future series): un-awaited async calls
+  and `await` of a non-async call (rejected); `async` methods (rejected fail-loud);
+  `async` arrows (only the non-`async` arrow normalizes — see below); `Promise`
+  combinators / concurrency (`Promise.all`, timers, spawning, `.then`) and real
+  async I/O.
+- **Async×errors — a fallible `async function` → `async fn … -> Result<T, String>`**
+  (`src/lower.ts`): the intersection series 013/014 left fail-loud. Dropping the
+  `func.async` guard in `lowerFunction` lets an async throwing fn lower like any
+  fallible fn (`Result`-wrapped return, `Ok`/`Err` bodies) while keeping
+  `isAsync`; `lowerAwait` wraps an awaited call to a fallible async fn in a `try`
+  so it emits `<call>.await?` (the `?` outside the await, well-typed because the
+  fixpoint already makes the enclosing fn — and `main` — `Result`). No HIR/emitter
+  shape change; a success-path differential behaves (`5`). **Deferred:** catching
+  an async error (`try`/`catch` — the recovery side), `async` methods, and a
+  non-awaited fallible async call (still rejected — an un-polled future never runs).
 - **Arrow functions — a top-level `const f = (…) => …` → a free `fn`**
   (`src/ast.ts`, `src/lower.ts`): `03_functions/02_arrow` compiles **and** a
   block+expression-body differential behaves (`7\n9`). A single-declarator,
@@ -254,9 +265,9 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.
 - [ ] Finish all deferred work — sweep the fail-loud deferrals accumulated across
       the shipped slices (arrows: `let`/value-position/`async`/capturing arrows;
-      async: un-awaited calls, `await` of a sync call, `async` + `throw`, `async`
-      methods, `Promise` combinators; errors: `try`/`catch`, custom error types,
-      throw-in-method; classes/interfaces/records/control-flow deferrals) rather
+      async: un-awaited calls, `await` of a sync call, `async` methods, `Promise`
+      combinators; errors: `try`/`catch`, custom error types, throw-in-method;
+      classes/interfaces/records/control-flow deferrals) rather
       than starting new fixture areas. `09_modules` (`export`) is now the only
       `test.todo` fixture (backlogged).
 
