@@ -199,12 +199,23 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   HirExpr; `null`→`Ok(())`) and appends a trailing `Ok(())` to a fall-through
   `void` body; a call to a fallible function wraps in a `try` HirExpr (`expr?`).
   When the script propagates a throwing call, `main` returns `Result` via
-  `HirModule.mainRet`. **Deferred** (each its own future series): `try`/`catch`/
-  `finally` (the recovery side); custom error types / `Error` subclasses / an error
-  enum / `Box<dyn Error>` (`E` is uniformly `String`); `throw` of a
-  non-`new Error(...)` value; throwing / propagation inside a class method,
-  constructor, or `async` function (rejected fail-loud); ignoring/storing a
-  `Result` (every fallible call is `?`-propagated).
+  `HirModule.mainRet`. `throw` also accepts the built-in Error subclasses
+  (`TypeError`/`RangeError`/…) and bare string literals (both → `Err(String)`, the
+  class erased — see the generalized-throw slice below), and a fallible `async` fn
+  composes (see async×errors). **Deferred** (each its own future series):
+  `try`/`catch`/`finally` (the recovery side); custom error *types* / an error enum
+  / `Box<dyn Error>` (`E` is uniformly `String`); `throw` of a variable or
+  non-string value (needs type tracking) and a `cause`/multi-arg throw; throwing /
+  propagation inside a class method or constructor (rejected fail-loud);
+  ignoring/storing a `Result` (every fallible call is `?`-propagated).
+- **Errors — generalized `throw` values** (`src/lower.ts`): `lowerThrow` accepts
+  the standard built-in Error constructors (`Error`, `TypeError`, `RangeError`,
+  `SyntaxError`, `ReferenceError`, `EvalError`, `URIError`) via an `ERROR_CLASSES`
+  set, and a bare string literal (`throw "boom"`) — each → `return Err(<String>);`
+  (the class distinction erased; `E` stays uniformly `String`). Lowering-only, no
+  new shape; a subclass+string differential behaves (`positive`). **Deferred:** a
+  thrown variable/expression (needs type tracking to confirm `String`), a
+  `cause`/multi-arg throw, and user/custom error classes (the error-enum series).
 - **Async — `async`/`await` → `async fn` + `#[tokio::main]`** (`src/analysis.ts`,
   `src/lower.ts`, `src/emitter.ts`, `src/hir.ts`): `07_async/01_async_await`
   compiles and a top-level-await differential behaves (prints `row`). A free

@@ -202,10 +202,12 @@ rejects nothing, so every dialect decision has exactly one home.
    - **Return type.** A fallible function's `ret` wraps in a new `RustType`
      `{ kind: "result"; ok; err }` — `Result<T, String>` (`void` → `Result<(),
      String>`). `E` is uniformly `String` (the `Error` message) this slice.
-   - **`throw`.** `throw new Error(<msg>)` → a `throw` HIR statement
-     (`lowerThrow`, accepting only that exact shape) that the emitter renders as
-     `return Err(<msg>);`; the message lowers as an expression, so a string
-     literal becomes a `String`.
+   - **`throw`.** `throw new <ErrorClass>(<msg>)` for the built-in single-message
+     constructors (`Error`, `TypeError`, `RangeError`, `SyntaxError`,
+     `ReferenceError`, `EvalError`, `URIError` — an `ERROR_CLASSES` set, class
+     erased) and a bare string literal `throw "msg"` → a `throw` HIR statement
+     (`lowerThrow`) that the emitter renders as `return Err(<msg>);`; the message
+     lowers as an expression, so a string literal becomes a `String`.
    - **Returns.** `makeFallible` rewrites every `return v` → `return Ok(v)` (a new
      `ok` HirExpr, `null` value ⇒ `Ok(())`), recursing through control-flow bodies,
      and appends a trailing `return Ok(());` to a `void` body that can fall through
@@ -215,11 +217,11 @@ rejects nothing, so every dialect decision has exactly one home.
      so its return type is already `Result` and `?` is well-typed. When the script
      propagates a throwing call, `main` becomes `fn main() -> Result<(), String>`
      via an optional `HirModule.mainRet` (absent ⇒ `()`).
-   `throw`/propagation inside a class method/constructor, and `async` fallible
-   functions, are rejected fail-loud (`hirHasThrowOrTry` guards the class; each is
-   a later series). `try`/`catch` (the recovery side), custom error types, and
-   non-`new Error(...)` throws are deferred. The numeric pass descends into the new
-   `throw`/`ok`/`try` nodes.
+   `throw`/propagation inside a class method/constructor is rejected fail-loud
+   (`hirHasThrowOrTry` guards the class; a later series); a fallible `async` fn is
+   now supported (invariant 9). `try`/`catch` (the recovery side), custom error
+   *types*, and thrown variables / `cause`-multi-arg throws are deferred. The
+   numeric pass descends into the new `throw`/`ok`/`try` nodes.
 
 9. **`async`/`await` lowers to `async fn` + `.await`, with a `#[tokio::main]`
    runtime entry.** TS promises are eager and driven by an ambient event loop;
@@ -302,14 +304,18 @@ rejects nothing, so every dialect decision has exactly one home.
   borrow inference (params are moved in) and owned-`self` methods; binding-type-
   aware receiver mutability (today's is name-based across the module).
 - Errors lower to `Result<T, String>` + `?` for the **propagation** shape: a
-  function that `throw`s or calls a thrower returns `Result`, `throw new
-  Error(msg)` → `return Err(msg)`, normal returns wrap in `Ok`, and fallible calls
-  `?`-propagate (the generated `main` returns `Result` too). Deferred: `try`/
-  `catch`/`finally` (the recovery side — this slice only propagates); custom error
-  types / `Error` subclasses / an error enum / `Box<dyn Error>` (`E` is uniformly
-  `String`); `throw` of a non-`new Error(...)` value; throwing / propagation inside
-  a class method, constructor, or `async` function (rejected fail-loud); and
-  ignoring/storing a `Result` (every fallible call is `?`-propagated).
+  function that `throw`s or calls a thrower returns `Result`, normal returns wrap
+  in `Ok`, and fallible calls `?`-propagate (the generated `main` returns `Result`
+  too, and a fallible `async` fn composes as `async fn … -> Result<…>`, awaited
+  `<call>.await?`). `throw` accepts the built-in Error constructors (`Error`,
+  `TypeError`, `RangeError`, `SyntaxError`, `ReferenceError`, `EvalError`,
+  `URIError` — class erased) and a bare string literal, both → `Err(String)`.
+  Deferred: `try`/`catch`/`finally` (the recovery side — this slice only
+  propagates); custom error *types* / an error enum / `Box<dyn Error>` (`E` is
+  uniformly `String`); `throw` of a variable/non-string value or a
+  `cause`/multi-arg throw (needs type tracking); throwing / propagation inside a
+  class method or constructor (rejected fail-loud); and ignoring/storing a
+  `Result` (every fallible call is `?`-propagated).
 - Async lowers to `async fn` + `.await` for the **sequential await** shape: a free
   `async function`, `await asyncFn(...)`, and a `#[tokio::main] async fn main()`
   when the script awaits. `Promise<T>` unwraps to `T` in any type-annotation
