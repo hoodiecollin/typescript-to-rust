@@ -558,6 +558,63 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.stdout.trim()).toBe("5");
   });
 
+  test("a C-style for with mixed break + continue behaves identically", async () => {
+    const ts = [
+      `function pick(): number {`,
+      `  let sum: number = 0;`,
+      `  for (let i = 0; i < 6; i = i + 1) {`,
+      `    if (i === 3) { break; }`,
+      `    if (i === 1) { continue; }`,
+      `    sum = sum + i;`,
+      `  }`,
+      `  return sum;`,
+      `}`,
+      `console.log(pick());`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("2");
+  });
+
+  test("nested C-style fors each with their own continue behave (barrier)", async () => {
+    const ts = [
+      `function count(): number {`,
+      `  let k: number = 0;`,
+      `  for (let i = 0; i < 3; i = i + 1) {`,
+      `    for (let j = 0; j < 3; j = j + 1) {`,
+      `      if (j === 1) { continue; }`,
+      `      k = k + 1;`,
+      `    }`,
+      `    if (i === 0) { continue; }`,
+      `    k = k + 10;`,
+      `  }`,
+      `  return k;`,
+      `}`,
+      `console.log(count());`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("26");
+  });
+
   test("a C-style for loop sums to the same value", async () => {
     const ts = [
       `function sum(): number {`,
