@@ -221,6 +221,23 @@ rejects nothing, so every dialect decision has exactly one home.
    non-`new Error(...)` throws are deferred. The numeric pass descends into the new
    `throw`/`ok`/`try` nodes.
 
+9. **`async`/`await` lowers to `async fn` + `.await`, with a `#[tokio::main]`
+   runtime entry.** TS promises are eager and driven by an ambient event loop;
+   Rust futures are lazy and need a runtime to poll them. A free `async function`
+   → an `async fn` (`HirFn.isAsync`), and its `Promise<T>` return annotation
+   unwraps to `T` in `lowerType` (`Promise<void>` → `()`) — Rust wraps the result
+   in `Future` implicitly, so the wrapper is not written. `await asyncFn(...)` → an
+   `await` HirExpr rendered `<call>.await`; `lowerAwait` accepts only a call to a
+   known `async` function (`analysis.asyncFns`). Because a bare (un-awaited) async
+   call is an un-polled future that never runs — a `must_use` **warning**, not an
+   error, so it would silently diverge from TS — `lowerCall` is fail-loud on any
+   async call that is not directly awaited (`awaited` flag). When the top-level
+   script `await`s, the generated entry becomes `#[tokio::main] async fn main()`
+   via `HirModule.mainAsync` (detected by `hirHasAwait` over `main`; composes with
+   `mainRet`). `async` + `throw` (a fallible async fn) and `async` methods are
+   rejected fail-loud; the numeric pass descends into the new `await` node. The
+   scratch crate pins `tokio`, so the runtime is present without extra plumbing.
+
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
@@ -273,6 +290,17 @@ rejects nothing, so every dialect decision has exactly one home.
   `String`); `throw` of a non-`new Error(...)` value; throwing / propagation inside
   a class method, constructor, or `async` function (rejected fail-loud); and
   ignoring/storing a `Result` (every fallible call is `?`-propagated).
+- Async lowers to `async fn` + `.await` for the **sequential await** shape: a free
+  `async function`, `await asyncFn(...)`, and a `#[tokio::main] async fn main()`
+  when the script awaits. `Promise<T>` unwraps to `T` in any type-annotation
+  position (in-dialect `Promise` only ever annotates an `async` return; a
+  `Promise`-typed param/variable is out-of-dialect and its unwrap unspecified).
+  Deferred (each fail-loud or its own series): a call to an `async` function that
+  is not directly awaited, and `await` of a non-call or a sync call; `async` +
+  `throw` (a fallible async fn) and `async` methods; `async` arrow functions
+  (arrows are unsupported wholesale); `Promise` combinators / concurrency
+  (`Promise.all`/`race`, timers, spawning, `.then` chains, cancellation) and real
+  async I/O. Async functions here are ordinary computations marked `async`.
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization

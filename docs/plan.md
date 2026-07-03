@@ -95,7 +95,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 | `interface` / object  | `struct`                      | Done: `interface` → `struct` item + named-struct literals (`lower.ts`, resolved via `analysis.structs`). Optional/readonly/nested fields and inheritance deferred. |
 | `class`               | `struct` + `impl`             | Done: fields + field-init `constructor` → `new` + methods (`&self`/`&mut self`), `this`→`self`, `new C()`→`C::new()` (`lower.ts`). No inheritance/statics/accessors/generics; method-param borrows and implicit constructors deferred. Shared-mutable instances would need the `Rc<RefCell>` fallback. |
 | `throw` / `try`       | `Result<T, E>` + `?`          | Done (propagation): a throwing/thrower-calling function returns `Result<T, String>`, `throw new Error(msg)` → `Err(msg)`, returns wrap in `Ok`, callers `?`-propagate (`main` too). **not** `panic!` (changes catch semantics). `try`/`catch`, custom error types, throw-in-method/`async` deferred. |
-| `async` / `await`     | `async fn` / `.await`         | runtime is **tokio**; generated entry point is `#[tokio::main]`. |
+| `async` / `await`     | `async fn` / `.await`         | Done: a free `async function` → `async fn`, `Promise<T>` return → `T`, `await asyncFn(...)` → `.await`; a script that awaits gets a `#[tokio::main] async fn main()`. Un-awaited async calls, `await` of a sync call, async methods, and `Promise` combinators/concurrency deferred (fail-loud). |
 | `any` / `unknown`     | `ts_primitives::TsAny`        | escape hatch only. |
 
 ## Status
@@ -205,6 +205,22 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   non-`new Error(...)` value; throwing / propagation inside a class method,
   constructor, or `async` function (rejected fail-loud); ignoring/storing a
   `Result` (every fallible call is `?`-propagated).
+- **Async — `async`/`await` → `async fn` + `#[tokio::main]`** (`src/analysis.ts`,
+  `src/lower.ts`, `src/emitter.ts`, `src/hir.ts`): `07_async/01_async_await`
+  compiles and a top-level-await differential behaves (prints `row`). A free
+  `async function` → an `async fn` (`HirFn.isAsync`, already emitted); its
+  `Promise<T>` return annotation unwraps to `T` in `lowerType` (`Promise<void>` →
+  `()`) — Rust wraps in `Future` implicitly. `await asyncFn(...)` → an `await`
+  HirExpr (`<call>.await`); the awaited target must be a call to a known `async`
+  function (`analysis.asyncFns`). A call to an `async` function is fail-loud unless
+  directly awaited (an un-polled future never runs — a silent divergence from TS's
+  eager promise). When the top-level script awaits, the generated entry becomes
+  `#[tokio::main] async fn main()` via `HirModule.mainAsync` (composes with
+  `mainRet`). **Deferred** (each its own future series): un-awaited async calls and
+  `await` of a non-async call (rejected); `async` + `throw` (a fallible async fn)
+  and `async` methods (rejected fail-loud); `async` arrows (arrows are unsupported
+  wholesale); `Promise` combinators / concurrency (`Promise.all`, timers,
+  spawning, `.then`) and real async I/O.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -222,7 +238,12 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - [ ] `try`/`catch`/`finally` — the recovery side of errors (this slice shipped
       the propagation side: `throw` → `Result` + `?`). Catch a `Result` into a
       `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.
-- [ ] `async`/`await` — emit `async fn` + `#[tokio::main]` (runtime already wired).
+- [ ] Finish all deferred work — sweep the fail-loud deferrals accumulated across
+      the shipped slices (async: un-awaited calls, `await` of a sync call, `async`
+      + `throw`, `async` methods, `Promise` combinators; errors: `try`/`catch`,
+      custom error types, throw-in-method; classes/interfaces/records/control-flow
+      deferrals) rather than starting new fixture areas. `09_modules` (`export`)
+      and `03_functions/02_arrow` (arrows) remain the only `test.todo` fixtures.
 
 The `tests/fixtures/**` tree enumerates these as `test.todo` targets; each flips
 to a real compile/behave test as the feature lands.
