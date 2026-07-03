@@ -252,32 +252,56 @@ function lowerFunction(
 
 // ── Fallibility (throw / Result propagation) ─────────────────────────────────
 
+/** The built-in single-message Error constructors, all erased to `Err(String)`. */
+const ERROR_CLASSES = new Set([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "EvalError",
+  "URIError",
+]);
+
 /**
- * Lower `throw new Error(<message>)` to a `throw` HIR stmt (emitted as
- * `return Err(<message>);`). Only that exact shape maps this slice: a bare value,
- * a re-throw, an `Error` subclass, or a wrong argument count is fail-loud (each a
- * later series). The message lowers as an expression, so a string literal becomes
- * a `String` and `Err` carries it.
+ * Lower a `throw` to a `throw` HIR stmt (emitted as `return Err(<message>);`).
+ * Two shapes map, both carrying a `String` payload (E is uniformly `String`):
+ * `throw new <ErrorClass>(message)` for the built-in single-message constructors
+ * (the class distinction is erased), and a bare string literal `throw "msg"` (the
+ * literal is its own message). A thrown variable/expression (needs type tracking
+ * to confirm `String`), a user/custom error class (custom error types are a later
+ * series), a `cause`/multi-arg throw, or any other value is fail-loud. The message
+ * lowers as an expression, so a string literal becomes a `String` and `Err`
+ * carries it.
  */
 function lowerThrow(stmt: ThrowStatement, analysis: ModuleAnalysis): HirStmt {
   const arg = stmt.argument;
-  if (arg.type !== "NewExpression") {
-    throw new UnsupportedError({ type: "throw of a non-Error value" });
+  // `throw new <ErrorClass>(message)` — the message becomes Err's String payload.
+  if (arg.type === "NewExpression") {
+    const nw = arg as NewExpression;
+    if (
+      nw.callee.type !== "Identifier" ||
+      !ERROR_CLASSES.has((nw.callee as Identifier).name)
+    ) {
+      throw new UnsupportedError({
+        type: "throw of a non-built-in error class (custom error types: later series)",
+      });
+    }
+    const [message] = nw.arguments;
+    if (nw.arguments.length !== 1 || !message) {
+      throw new UnsupportedError({
+        type: "throw new Error() must have exactly one message argument",
+      });
+    }
+    return { kind: "throw", value: lowerExpr(message, analysis) };
   }
-  const nw = arg as NewExpression;
-  if (
-    nw.callee.type !== "Identifier" ||
-    (nw.callee as Identifier).name !== "Error"
-  ) {
-    throw new UnsupportedError({ type: "throw of a non-`new Error(...)` value" });
+  // `throw "literal"` — a bare string literal is thrown as its own message.
+  if (arg.type === "Literal" && typeof (arg as Literal).value === "string") {
+    return { kind: "throw", value: lowerExpr(arg, analysis) };
   }
-  const [message] = nw.arguments;
-  if (nw.arguments.length !== 1 || !message) {
-    throw new UnsupportedError({
-      type: "throw new Error() must have exactly one message argument",
-    });
-  }
-  return { kind: "throw", value: lowerExpr(message, analysis) };
+  throw new UnsupportedError({
+    type: "throw of a non-Error, non-string-literal value",
+  });
 }
 
 /**
