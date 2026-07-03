@@ -260,6 +260,9 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
     case "try":
       eachExpr(e.expr, fn);
       break;
+    case "await":
+      eachExpr(e.expr, fn);
+      break;
     // Leaves carry no nested expressions:
     case "number":
     case "string":

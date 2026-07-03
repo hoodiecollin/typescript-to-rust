@@ -70,6 +70,13 @@ export interface ModuleAnalysis {
    * sentinel when the generated `main` is fallible.
    */
   fallible: Set<string>;
+  /**
+   * Names of top-level `async` function declarations. A call to one is only valid
+   * `await`ed (an un-polled future never runs), and `await` only targets one of
+   * these — both enforced in lowering. The generated `main` becomes
+   * `#[tokio::main] async fn main()` when the script `await`s.
+   */
+  asyncFns: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -408,5 +415,13 @@ export function analyzeModule(program: Program): ModuleAnalysis {
 
   const fallible = analyzeFallible(program, script);
 
-  return { fns, mut, structs, mutatingMethods, fallible };
+  // Top-level `async` function declarations (drives the `await`-target check and
+  // the un-awaited-call rejection in lowering).
+  const asyncFns = new Set<string>();
+  for (const stmt of program.body) {
+    const named = namedFunction(stmt);
+    if (named && named.fn.async) asyncFns.add(named.name);
+  }
+
+  return { fns, mut, structs, mutatingMethods, fallible, asyncFns };
 }

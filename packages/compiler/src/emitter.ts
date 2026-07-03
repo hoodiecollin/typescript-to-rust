@@ -55,7 +55,10 @@ export function emitModule(mod: HirModule): string {
     // A fallible script makes `main` return `Result<(), String>` (its trailing
     // `Ok(())` is already in `mod.main`, added by lowering); else a bare `main`.
     const ret = mod.mainRet ? ` -> ${emitType(mod.mainRet)}` : "";
-    parts.push(`fn main()${ret} {\n${body}\n}`);
+    // A script that `await`s needs an async runtime: `#[tokio::main] async fn main`.
+    const attr = mod.mainAsync ? "#[tokio::main]\n" : "";
+    const asyncKw = mod.mainAsync ? "async " : "";
+    parts.push(`${attr}${asyncKw}fn main()${ret} {\n${body}\n}`);
   }
   const prelude = usesHashMap(mod) ? "use std::collections::HashMap;\n\n" : "";
   return `${prelude}${parts.join("\n\n")}\n`;
@@ -237,6 +240,8 @@ function emitExpr(expr: HirExpr): string {
       return expr.value ? `Ok(${emitExpr(expr.value)})` : "Ok(())";
     case "try":
       return `${emitExpr(expr.expr)}?`;
+    case "await":
+      return `${emitExpr(expr.expr)}.await`;
   }
 }
 

@@ -92,7 +92,9 @@ export type HirExpr =
   /** `Ok(value)` — the success arm of a `Result`. `null` value ⇒ `Ok(())`. */
   | { kind: "ok"; value: HirExpr | null }
   /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */
-  | { kind: "try"; expr: HirExpr };
+  | { kind: "try"; expr: HirExpr }
+  /** `expr.await` — suspend on a future (a call to an `async fn`) for its value. */
+  | { kind: "await"; expr: HirExpr };
 
 // ── Statements ───────────────────────────────────────────────────────────────
 
@@ -202,4 +204,10 @@ export interface HirModule {
    * (or throws), so `main` can use `?` and end in `Ok(())`.
    */
   mainRet?: RustType;
+  /**
+   * Whether the generated `fn main` needs an async runtime. Absent/false ⇒ a
+   * plain `fn main()`. `true` when the top-level script `await`s, so the entry is
+   * emitted as `#[tokio::main] async fn main()` (composes with `mainRet`).
+   */
+  mainAsync?: boolean;
 }

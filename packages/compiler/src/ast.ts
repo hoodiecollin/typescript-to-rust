@@ -93,6 +93,12 @@ export interface NewExpression extends Span {
   arguments: Expression[];
 }
 
+/** `await <expr>` — suspends until the awaited future settles, yielding its value. */
+export interface AwaitExpression extends Span {
+  type: "AwaitExpression";
+  argument: Expression;
+}
+
 /** One `key: value` pair of an object literal. `kind` is `"init"` in the dialect. */
 export interface Property extends Span {
   type: "Property";
@@ -119,6 +125,7 @@ export type Expression =
   | ObjectExpression
   | ThisExpression
   | NewExpression
+  | AwaitExpression
   | ({ type: string } & Span);
 
 // ── Statements ──────────────────────────────────────────────────────────────

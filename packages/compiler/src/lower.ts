@@ -12,6 +12,7 @@
 import { type ModuleAnalysis, SCRIPT_SCOPE, analyzeModule } from "./analysis";
 import type {
   AssignmentExpression,
+  AwaitExpression,
   BlockStatement,
   BreakStatement,
   CallExpression,
@@ -134,6 +135,12 @@ function lowerFunction(
 ): HirFn {
   if (!func.id) throw new UnsupportedError(func);
   const name = func.id.name;
+  // SCAFFOLD SEAM (series 014): async lowering (async fn + await + Promise unwrap
+  // + #[tokio::main]) is stubbed so specs are RED; GREEN replaces this with real
+  // async lowering. The fallible-async rejection below stays either way.
+  if (func.async) {
+    throw new UnsupportedError({ type: "async/await lowering pending" });
+  }
   const info = analysis.fns.get(name);
 
   const params = func.params.map((p, i) =>
@@ -923,6 +930,9 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       return { kind: "ident", name: "self" };
     case "NewExpression":
       return lowerNew(expr as NewExpression, analysis);
+    case "AwaitExpression":
+      // SCAFFOLD SEAM (series 014): `await` lowering is stubbed so specs are RED.
+      throw new UnsupportedError({ type: "async/await lowering pending" });
     case "ObjectExpression":
       // An object literal only lowers contextually, in a record-typed binding
       // (see lowerVarDecl). Bare/struct-typed literals await series 011.
