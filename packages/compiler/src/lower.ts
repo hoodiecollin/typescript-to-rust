@@ -233,14 +233,10 @@ function lowerFunction(
   const body = lowerStatements(func.body.body, analysis, name);
 
   // A fallible function (it throws, or calls something that throws) returns
-  // `Result<ret, String>`: wrap its returns in `Ok`, keep its `throw`s as
-  // `Err`. `async` + `Result` is deferred (the async runtime slice is separate).
+  // `Result<ret, String>`: wrap its returns in `Ok`, keep its `throw`s as `Err`.
+  // An `async` fallible fn composes both — `async fn … -> Result<…>` — and an
+  // awaited fallible call propagates with `.await?` (see lowerAwait).
   if (analysis.fallible.has(name)) {
-    if (func.async) {
-      throw new UnsupportedError({
-        type: "async throwing function (async + Result deferred)",
-      });
-    }
     return {
       kind: "fn",
       name,
@@ -1064,6 +1060,11 @@ function isConsoleLog(callee: Expression): boolean {
  * `async` function maps: awaiting a non-call, or a call to a non-`async`
  * function, is fail-loud (there is no future to poll). The awaited call lowers
  * with `awaited = true` so `lowerCall` accepts the `async` callee.
+ *
+ * When the awaited fn is also *fallible*, the `Result` it yields is
+ * `?`-propagated *after* the `.await` (`<call>.await?`) — the `?` sits outside
+ * the await (correct precedence), and the fallibility fixpoint guarantees the
+ * enclosing fn is itself `Result`, so `?` is well-typed.
  */
 function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   const arg = expr.argument;
@@ -1082,7 +1083,13 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
       type: "await of a call to a non-async function",
     });
   }
-  return { kind: "await", expr: lowerCall(call, analysis, true) };
+  const awaited: HirExpr = {
+    kind: "await",
+    expr: lowerCall(call, analysis, true),
+  };
+  return analysis.fallible.has((callee as Identifier).name)
+    ? { kind: "try", expr: awaited }
+    : awaited;
 }
 
 function lowerCall(
