@@ -34,6 +34,7 @@ import type {
   ObjectExpression,
   Program,
   PropertyDefinition,
+  ReturnStatement,
   Statement,
   SwitchStatement,
   ThrowStatement,
@@ -151,12 +152,48 @@ function normalizeArrows(program: Program): Program {
   const body = program.body.map((stmt) => {
     const found = topLevelConstArrow(stmt);
     if (!found) return stmt;
-    // SEAM: the real synthesis lands in GREEN.
-    throw new UnsupportedError({
-      type: "arrow function → free fn (normalization pending)",
-    });
+    return arrowToFunctionDecl(found.name, found.arrow);
   });
   return { ...program, body };
+}
+
+/**
+ * Build the synthetic `FunctionDeclaration` for a normalized arrow: the binding
+ * name becomes the fn `id`; `params`/`returnType`/`async` carry over unchanged;
+ * the body is the arrow's `BlockStatement` verbatim, or `{ return <expr>; }` for
+ * an expression body (the `=> expr` desugar). Spans are inherited from the arrow
+ * so any downstream diagnostic still points at the source.
+ */
+function arrowToFunctionDecl(
+  name: Identifier,
+  arrow: ArrowFunctionExpression,
+): FunctionDeclaration {
+  const body: BlockStatement =
+    arrow.body.type === "BlockStatement"
+      ? (arrow.body as BlockStatement)
+      : {
+          type: "BlockStatement",
+          body: [
+            {
+              type: "ReturnStatement",
+              argument: arrow.body as Expression,
+              start: arrow.body.start,
+              end: arrow.body.end,
+            } satisfies ReturnStatement,
+          ],
+          start: arrow.body.start,
+          end: arrow.body.end,
+        };
+  return {
+    type: "FunctionDeclaration",
+    id: name,
+    async: arrow.async,
+    params: arrow.params,
+    returnType: arrow.returnType ?? null,
+    body,
+    start: arrow.start,
+    end: arrow.end,
+  };
 }
 
 /** A qualifying top-level `const <id> = <non-async arrow>`, else null. */
