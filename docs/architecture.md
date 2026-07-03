@@ -238,6 +238,22 @@ rejects nothing, so every dialect decision has exactly one home.
    rejected fail-loud; the numeric pass descends into the new `await` node. The
    scratch crate pins `tokio`, so the runtime is present without extra plumbing.
 
+10. **A top-level `const f = (…) => …` arrow normalizes to a free `fn` before
+    analysis.** A module-scope `const` bound to a non-`async` arrow is semantically
+    a plain named function, and Rust's idiomatic form is a free `fn` (not a closure
+    `let f = |…|`), which participates in ownership/borrow/fallibility inference for
+    free. `normalizeArrows` (run in `lower()` *before* `analyzeModule`) rewrites
+    each qualifying statement into a synthetic `FunctionDeclaration` — `id` = the
+    binding name, `params`/`returnType`/`async` carried over, body = the arrow's
+    block verbatim or a `{ return <expr>; }` desugar for an expression body — so
+    the whole pipeline treats it identically to a `function` (no HIR, emitter, or
+    analysis-shape change). Only a single-declarator, top-level, non-`async` `const`
+    arrow normalizes; a `let`/`var`-bound, value-position, nested, or `async` arrow
+    stays an `ArrowFunctionExpression` and is rejected by `lowerExpr`'s `default`
+    (the documented deferral boundary). A capturing top-level arrow (referencing a
+    `main`-local binding) is caught by the cargo oracle, not the gate — a capture
+    check belongs with the closure series.
+
 ## Known limitations (tracked, not hidden)
 
 - Ownership inference is **intra-procedural and name-based** (no nested-scope
@@ -298,9 +314,18 @@ rejects nothing, so every dialect decision has exactly one home.
   Deferred (each fail-loud or its own series): a call to an `async` function that
   is not directly awaited, and `await` of a non-call or a sync call; `async` +
   `throw` (a fallible async fn) and `async` methods; `async` arrow functions
-  (arrows are unsupported wholesale); `Promise` combinators / concurrency
+  (a top-level `const` arrow now normalizes to a free `fn`, but only the
+  non-`async` form — see below); `Promise` combinators / concurrency
   (`Promise.all`/`race`, timers, spawning, `.then` chains, cancellation) and real
   async I/O. Async functions here are ordinary computations marked `async`.
+- Arrow functions lower for the **top-level `const f = (…) => …`** shape only: a
+  single-declarator, non-`async` `const` arrow normalizes to a free `fn` (block or
+  expression body). Deferred (fail-loud, each a later series): `let`/`var`-bound
+  arrows (a reassignable callable — needs a closure local); arrows in value
+  position (argument, return, nested) — local closures with capture and `Fn`/`FnMut`
+  traits; `async` arrows; capturing top-level arrows (no capture analysis — caught
+  by cargo); multiple declarators; destructuring/rest params (the same gap as
+  `function` declarations).
 - `string → String` for owned/mutated bindings; a read-only string **parameter**
   refines to `&str` (`strings.ts`). `&str` in return position and struct fields
   awaits a lifetime story, and the bare-literal call-site optimization

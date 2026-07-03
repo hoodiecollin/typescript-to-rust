@@ -218,9 +218,23 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `#[tokio::main] async fn main()` via `HirModule.mainAsync` (composes with
   `mainRet`). **Deferred** (each its own future series): un-awaited async calls and
   `await` of a non-async call (rejected); `async` + `throw` (a fallible async fn)
-  and `async` methods (rejected fail-loud); `async` arrows (arrows are unsupported
-  wholesale); `Promise` combinators / concurrency (`Promise.all`, timers,
-  spawning, `.then`) and real async I/O.
+  and `async` methods (rejected fail-loud); `async` arrows (only the non-`async`
+  arrow normalizes — see below); `Promise` combinators / concurrency
+  (`Promise.all`, timers, spawning, `.then`) and real async I/O.
+- **Arrow functions — a top-level `const f = (…) => …` → a free `fn`**
+  (`src/ast.ts`, `src/lower.ts`): `03_functions/02_arrow` compiles **and** a
+  block+expression-body differential behaves (`7\n9`). A single-declarator,
+  top-level, non-`async` `const` bound to an arrow normalizes to a synthetic
+  `FunctionDeclaration` (`normalizeArrows`, run *before* `analyzeModule`) — `id` =
+  the binding name, params/returnType/async carried over, body = the arrow's block
+  verbatim or a `{ return <expr>; }` desugar for an expression body. The whole
+  pipeline (ownership, fallibility, lowering, emitter) then treats it identically
+  to a `function`; no HIR or emitter change. **Deferred** (each fail-loud, its own
+  future series): `let`/`var`-bound arrows (a reassignable callable — a closure
+  local); arrows in value position (argument/return/nested — local closures with
+  capture and `Fn`/`FnMut` traits); `async` arrows; capturing top-level arrows (no
+  capture analysis — caught by cargo); multiple declarators; destructuring/rest
+  params.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -239,11 +253,12 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       the propagation side: `throw` → `Result` + `?`). Catch a `Result` into a
       `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.
 - [ ] Finish all deferred work — sweep the fail-loud deferrals accumulated across
-      the shipped slices (async: un-awaited calls, `await` of a sync call, `async`
-      + `throw`, `async` methods, `Promise` combinators; errors: `try`/`catch`,
-      custom error types, throw-in-method; classes/interfaces/records/control-flow
-      deferrals) rather than starting new fixture areas. `09_modules` (`export`)
-      and `03_functions/02_arrow` (arrows) remain the only `test.todo` fixtures.
+      the shipped slices (arrows: `let`/value-position/`async`/capturing arrows;
+      async: un-awaited calls, `await` of a sync call, `async` + `throw`, `async`
+      methods, `Promise` combinators; errors: `try`/`catch`, custom error types,
+      throw-in-method; classes/interfaces/records/control-flow deferrals) rather
+      than starting new fixture areas. `09_modules` (`export`) is now the only
+      `test.todo` fixture (backlogged).
 
 The `tests/fixtures/**` tree enumerates these as `test.todo` targets; each flips
 to a real compile/behave test as the feature lands.
