@@ -11,6 +11,7 @@
 
 import { type ModuleAnalysis, SCRIPT_SCOPE, analyzeModule } from "./analysis";
 import type {
+  ArrowFunctionExpression,
   AssignmentExpression,
   AwaitExpression,
   BlockStatement,
@@ -88,11 +89,15 @@ export function lower(program: Program): HirModule {
   // Step 2: reject input forbidden by the dialect (`any`/`unknown`, …) — fail
   // loud with `DialectError`, distinct from the "not yet implemented" gate below.
   validate(program);
-  const analysis = analyzeModule(program);
+  // Normalize a top-level `const f = (…) => …` arrow into a synthetic function
+  // declaration *before* analysis, so ownership, fallibility, and lowering treat
+  // it identically to a `function` (see normalizeArrows).
+  const normalized = normalizeArrows(program);
+  const analysis = analyzeModule(normalized);
   const items: HirItem[] = [];
   const script: Statement[] = [];
 
-  for (const stmt of program.body) {
+  for (const stmt of normalized.body) {
     if (stmt.type === "FunctionDeclaration") {
       items.push(lowerFunction(stmt as FunctionDeclaration, analysis));
     } else if (stmt.type === "TSInterfaceDeclaration") {
@@ -129,6 +134,43 @@ export function lower(program: Program): HirModule {
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`.
   return refineStrings(refineNumerics({ items, main, mainRet, mainAsync }));
+}
+
+// ── Arrow normalization ──────────────────────────────────────────────────────
+
+/**
+ * Rewrite each top-level `const f = (…) => …` (a single-declarator `const` bound
+ * to a non-`async` arrow) into a synthetic `FunctionDeclaration`, leaving every
+ * other statement untouched. Run before analysis so a normalized arrow's
+ * parameter ownership and call-site borrows are inferred, and calls to it adapt
+ * their arguments, exactly as for a `function`. A non-normalized arrow (async,
+ * `let`/`var`-bound, value-position, nested) stays an expression and is rejected
+ * downstream in `lowerExpr` — the documented deferral boundary.
+ */
+function normalizeArrows(program: Program): Program {
+  const body = program.body.map((stmt) => {
+    const found = topLevelConstArrow(stmt);
+    if (!found) return stmt;
+    // SEAM: the real synthesis lands in GREEN.
+    throw new UnsupportedError({
+      type: "arrow function → free fn (normalization pending)",
+    });
+  });
+  return { ...program, body };
+}
+
+/** A qualifying top-level `const <id> = <non-async arrow>`, else null. */
+function topLevelConstArrow(
+  stmt: Statement,
+): { name: Identifier; arrow: ArrowFunctionExpression } | null {
+  if (stmt.type !== "VariableDeclaration") return null;
+  const decl = stmt as VariableDeclaration;
+  if (decl.kind !== "const" || decl.declarations.length !== 1) return null;
+  const d = decl.declarations[0];
+  if (!d || d.init?.type !== "ArrowFunctionExpression") return null;
+  const arrow = d.init as ArrowFunctionExpression;
+  if (arrow.async) return null;
+  return { name: d.id, arrow };
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────

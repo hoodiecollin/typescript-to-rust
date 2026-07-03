@@ -99,6 +99,21 @@ export interface AwaitExpression extends Span {
   argument: Expression;
 }
 
+/**
+ * `(params) => body` — an arrow function. `params` share a `FunctionDeclaration`'s
+ * shape (typed `Identifier`s); `body` is a `BlockStatement` (`=> { … }`) or an
+ * `Expression` (`=> expr`, with `expression: true`). A top-level `const`-bound
+ * non-`async` arrow normalizes to a free `fn` (see lower.ts).
+ */
+export interface ArrowFunctionExpression extends Span {
+  type: "ArrowFunctionExpression";
+  async: boolean;
+  params: Identifier[];
+  returnType?: TSTypeAnnotation | null;
+  body: BlockStatement | Expression;
+  expression: boolean;
+}
+
 /** One `key: value` pair of an object literal. `kind` is `"init"` in the dialect. */
 export interface Property extends Span {
   type: "Property";
@@ -126,6 +141,7 @@ export type Expression =
   | ThisExpression
   | NewExpression
   | AwaitExpression
+  | ArrowFunctionExpression
   | ({ type: string } & Span);
 
 // ── Statements ──────────────────────────────────────────────────────────────
