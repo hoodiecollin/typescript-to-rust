@@ -38,6 +38,7 @@ const SUPPORTED = new Set([
   "04_data_structures/03_variable_index",
   "05_interfaces/01_basic",
   "06_classes/01_basic",
+  "07_async/01_async_await",
   "08_errors/01_throw",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
@@ -444,6 +445,35 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("7\n5");
+  });
+
+  test("a top-level await drives an async runtime main (→ #[tokio::main])", async () => {
+    // Exercises `async fn`, the `Promise<string>` → `String` unwrap, `.await`
+    // (both the nested call and the top-level one), and `#[tokio::main] async fn
+    // main()`. The two async functions are ordinary computations marked async.
+    const ts = [
+      `async function doFetch(id: number): Promise<string> {`,
+      `  return "row";`,
+      `}`,
+      `async function fetchData(id: number): Promise<string> {`,
+      `  const res: string = await doFetch(id);`,
+      `  return res;`,
+      `}`,
+      `const out: string = await fetchData(1);`,
+      `console.log(out);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("row");
   });
 
   test("a C-style for loop sums to the same value", async () => {
