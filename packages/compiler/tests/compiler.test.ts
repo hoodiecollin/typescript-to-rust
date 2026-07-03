@@ -503,6 +503,31 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.stdout.trim()).toBe("7\n9");
   });
 
+  test("generalized throws (subclass + string literal) compile and behave", async () => {
+    // Untaken branches throw a RangeError and a bare string; the success path
+    // returns. Exercises both new throw forms in one compiling Result program.
+    const ts = [
+      `function classify(n: number): string {`,
+      `  if (n < 0) { throw new RangeError("negative"); }`,
+      `  if (n === 0) { throw "zero not allowed"; }`,
+      `  return "positive";`,
+      `}`,
+      `console.log(classify(5));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("positive");
+  });
+
   test("a fallible async fn awaits and propagates via .await? on the success path", async () => {
     // risky throws only for n < 0; caller awaits it; the top-level await drives a
     // fallible tokio main. Exercises `async fn … -> Result`, `.await?`, and
