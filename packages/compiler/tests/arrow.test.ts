@@ -1,0 +1,81 @@
+/**
+ * Specs for a top-level `const f = (…) => …` arrow → a free `fn` (series 015).
+ * Drives the public `emit(...)` entry and asserts the emitted shape: the `fn`
+ * keyword and signature, the expression-body `return` desugar, call-site
+ * participation, a non-arrow green control, and the fail-loud rejections. The
+ * cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
+ * docs/work/015-arrow-functions/specs.md.
+ *
+ * RED against the scaffold seam in `src/lower.ts`: a qualifying top-level `const`
+ * arrow throws `UnsupportedError` "arrow normalization pending" until the
+ * synthetic `FunctionDeclaration` rewrite lands. ARROW4 is a green control (no
+ * arrow) proving normalization doesn't touch a `function` declaration.
+ */
+
+import { describe, expect, test } from "bun:test";
+import { parseSync } from "oxc-parser";
+import type { Program } from "../src/ast";
+import { emit } from "../src/emitter";
+
+function compile(src: string): string {
+  return emit(parseSync("t.ts", src).program as unknown as Program);
+}
+
+const SUB = `const sub = (a: number, b: number): number => {
+  return a - b;
+};`;
+
+describe("arrow: top-level const arrow → free fn", () => {
+  test("ARROW1 a block-body arrow emits a free fn (not a closure)", () => {
+    const rust = compile(SUB);
+    expect(rust).toContain("fn sub(a: f64, b: f64) -> f64 {");
+    expect(rust).toContain("return a - b;");
+    expect(rust).not.toContain("let sub");
+    expect(rust).not.toContain("|a");
+  });
+
+  test("ARROW2 an expression-body arrow desugars to { return <expr>; }", () => {
+    const rust = compile(
+      `const add = (a: number, b: number): number => a + b;`,
+    );
+    expect(rust).toContain("fn add(a: f64, b: f64) -> f64 {");
+    expect(rust).toContain("return a + b;");
+  });
+
+  test("ARROW3 a normalized arrow is a module item, callable from the script", () => {
+    const rust = compile(
+      `const inc = (n: number): number => { return n + 1; };\n` +
+        `const r: number = inc(4);\nconsole.log(r);`,
+    );
+    expect(rust).toContain("fn inc(n: f64) -> f64 {");
+    expect(rust).toContain("inc(4");
+    expect(rust).toContain("println!");
+  });
+
+  test("ARROW4 (green control) a function declaration is untouched", () => {
+    const rust = compile(`function id(n: number): number { return n; }`);
+    expect(rust).toContain("fn id(n: f64) -> f64 {");
+    expect(rust).not.toContain("|n");
+  });
+
+  test("ARROW5 (fail-loud) an async arrow is rejected", () => {
+    expect(() =>
+      compile(`const ping = async (): Promise<void> => { };`),
+    ).toThrow();
+  });
+
+  test("ARROW6 (fail-loud) a let-bound arrow is rejected", () => {
+    expect(() =>
+      compile(`let f = (n: number): number => { return n; };`),
+    ).toThrow();
+  });
+
+  test("ARROW7 (fail-loud) a nested/local arrow is rejected", () => {
+    expect(() =>
+      compile(
+        `const g = (n: number): number => { ` +
+          `const h = (m: number): number => { return m; }; return h(n); };`,
+      ),
+    ).toThrow();
+  });
+});

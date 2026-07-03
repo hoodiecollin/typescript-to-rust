@@ -33,6 +33,7 @@ const SUPPORTED = new Set([
   "02_control_flow/04_for_of_loop",
   "02_control_flow/05_switch",
   "03_functions/01_basic",
+  "03_functions/02_arrow",
   "04_data_structures/01_arrays",
   "04_data_structures/02_records",
   "04_data_structures/03_variable_index",
@@ -474,6 +475,32 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("row");
+  });
+
+  test("top-level const arrows lower to free fns and behave (block + expr body)", async () => {
+    // A block-body arrow and an expression-body arrow, both normalized to free
+    // `fn`s and called from the generated `main` — exercises the `return`
+    // desugar and call-site argument adaptation.
+    const ts = [
+      `const sub = (a: number, b: number): number => {`,
+      `  return a - b;`,
+      `};`,
+      `const add = (a: number, b: number): number => a + b;`,
+      `console.log(sub(10, 3));`,
+      `console.log(add(4, 5));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("7\n9");
   });
 
   test("a C-style for loop sums to the same value", async () => {
