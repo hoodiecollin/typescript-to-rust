@@ -503,6 +503,36 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.stdout.trim()).toBe("7\n9");
   });
 
+  test("a fallible async fn awaits and propagates via .await? on the success path", async () => {
+    // risky throws only for n < 0; caller awaits it; the top-level await drives a
+    // fallible tokio main. Exercises `async fn … -> Result`, `.await?`, and
+    // `#[tokio::main] async fn main() -> Result<(), String>` on the success path.
+    const ts = [
+      `async function risky(n: number): Promise<number> {`,
+      `  if (n < 0) { throw new Error("negative"); }`,
+      `  return n / 2;`,
+      `}`,
+      `async function caller(n: number): Promise<number> {`,
+      `  const x: number = await risky(n);`,
+      `  return x;`,
+      `}`,
+      `const r: number = await caller(10);`,
+      `console.log(r);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("5");
+  });
+
   test("a C-style for loop sums to the same value", async () => {
     const ts = [
       `function sum(): number {`,
