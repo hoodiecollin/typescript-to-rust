@@ -87,7 +87,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 
 | TypeScript            | Rust (today)                  | Notes |
 |-----------------------|-------------------------------|-------|
-| `number`              | `f64`, or `usize` for indices | Numeric inference (`numeric.ts`) refines index-reached values to `usize` so `Vec` indexing compiles; `i64` counters are a planned addition. |
+| `number`              | `f64`, `usize` for indices, `i64` for integer discriminants | Numeric inference (`numeric.ts`) refines index-reached values to `usize` so `Vec` indexing compiles, and an integer `switch` discriminant to `i64` (literal-pattern `match`, series 019). General `i64` counter inference is future work. |
 | `string`              | `String`, or `&str` for read-only params | Read-only string params refine to `&str` (`strings.ts`); owned params stay `String`, mutated stay `&mut String`. |
 | `boolean`             | `bool`                        | |
 | `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
@@ -123,8 +123,14 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - **Numeric inference** (`src/numeric.ts`): a post-lowering HIR→HIR pass refining
   `number → usize` where array indexing demands it, propagating usize-ness through
   initializers and integer arithmetic and failing loud on an int/float conflict.
-  Unblocks variable array indexing (`arr[i]`, `arr[i + 1]`). `i64` counters
-  remain a separate numeric slice.
+  Unblocks variable array indexing (`arr[i]`, `arr[i + 1]`). Two *preferring*
+  integer promotions layer on top (series 019/020, each with a valid f64 fallback,
+  never fail-loud): `promoteIntegerMatches` retypes an integer-safe `switch`
+  discriminant to `i64` and emits literal-pattern `match` arms (a whole-program
+  transform — integer-literal call args at that param retype too; a non-literal
+  caller keeps the guarded f64 form), and `promoteRanges` rewrites a canonical
+  `usize` counting `for` into a `for i in a..b` range. General `i64` counter
+  inference (bare, non-index, non-discriminant counters) remains future work.
 - **String-borrow inference** (`src/strings.ts`): a post-lowering HIR→HIR pass
   refining a read-only `string` parameter's `&String` into the idiomatic `&str`.
   Owned params stay `String`, mutated stay `&mut String`; call sites are unchanged
@@ -145,12 +151,18 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `lowerFor` inlines the `update` before each own `continue` (`{ update; continue;
   }`), so the counter still advances (series 018; label-free — an unlabeled break
   through a labeled block is E0695). Numeric inference descends into every
-  control-flow body. **Deferred refinements** (each its own future series):
-  idiomatic `for i in a..b` ranges (entangled with integer-counter inference — a
-  `usize` range counter can't mix with `f64` body arithmetic) and literal-pattern
-  `match` arms; for…of element ergonomics (`&T` binding — fine for arithmetic, not
-  by-value comparison; destructuring / owned / `&mut` elements); labeled and
-  stacked jumps; downward/non-unit-step counting loops; `i64` counters.
+  control-flow body. **Idiomatic integer forms** (series 019/020, post-lowering
+  refinements in `numeric.ts`): an integer `switch` → literal-pattern `match`
+  (`match x { 1 => …, _ => … }`, discriminant retyped `i64`); an index-driven
+  `usize` counting `for` → a `for i in a..b` range (`..=` for `<=`). Both prefer
+  the idiomatic form and fall back to the guarded `match` / `while` desugar when a
+  construct isn't eligible (the accumulator loop, a `continue` loop, a
+  non-integer/non-literal-caller `switch`). **Deferred refinements** (each its own
+  future series): or-patterns (`1 | 2 =>`) and string/range literal patterns;
+  native `continue`-in-range, downward/non-unit-step and bound-driven `i64` ranges;
+  for…of element ergonomics (`&T` binding — fine for arithmetic, not by-value
+  comparison; destructuring / owned / `&mut` elements); labeled and stacked jumps;
+  general `i64` counters.
 - **Data structures — records → `HashMap`** (`src/hir.ts`, `src/lower.ts`,
   `src/emitter.ts`): `04_data_structures/02_records` compiles **and** behaves.
   `Record<string, V>` → a `hashmap` `RustType` (`HashMap<String, V>`); a
@@ -270,12 +282,13 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 - [ ] Extend the dialect validator (`validate.ts` exists; rejects `any`/`unknown`):
       missing-annotation enforcement (with the trivial-literal exception), class
       `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
-- [ ] Control-flow refinements (deferred, revisit as needed): literal-pattern /
-      or-pattern `match` arms, idiomatic `for i in a..b` ranges (needs
-      integer-counter inference first), for…of element ergonomics (owned/`&mut`,
-      destructuring), and labeled/stacked jumps. All are optimizations or edge
-      cases over today's correct lowerings — not blockers. (The C-`for`
-      `continue` desugar shipped in series 018.)
+- [ ] Control-flow refinements (deferred, revisit as needed): or-pattern
+      (`1 | 2 =>`) and string/range literal `match` arms; native `continue`-in-range,
+      downward/non-unit-step and bound-driven `i64` ranges; for…of element
+      ergonomics (owned/`&mut`, destructuring); labeled/stacked jumps. All are
+      optimizations or edge cases over today's correct lowerings — not blockers.
+      (The C-`for` `continue` desugar shipped in series 018; integer literal-pattern
+      `match` in series 019; index-driven `for i in a..b` ranges in series 020.)
 - [ ] `try`/`catch`/`finally` — the recovery side of errors (this slice shipped
       the propagation side: `throw` → `Result` + `?`). Catch a `Result` into a
       `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.

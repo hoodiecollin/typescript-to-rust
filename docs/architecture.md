@@ -107,8 +107,15 @@ rejects nothing, so every dialect decision has exactly one home.
    (`numeric.ts`) then refines values that reach an array-index position to
    `usize` — `arr[i]` with `i: f64` does not compile — propagating usize-ness
    through initializers and integer arithmetic, and throwing `UnsupportedError`
-   when a value is forced to be both `usize` and float. `i64` for integer-only
-   counters is a documented future addition to the same pass.
+   when a value is forced to be both `usize` and float. That `usize` pass is
+   *forcing* (a conflict is a hard error). Layered on top are two *preferring*
+   integer promotions (series 019/020), each an idiomatic rewrite with a valid f64
+   fallback, so neither fails loud: `promoteIntegerMatches` retypes an
+   integer-safe `switch` discriminant to `i64` and emits literal-pattern `match`
+   arms (a whole-program transform — every integer-literal call argument at that
+   parameter retypes too, and a single non-integer-literal caller keeps the
+   guarded f64 form); `promoteRanges` rewrites a canonical `usize` counting `for`
+   into a `for i in a..b` range. `usize` (index-forced) wins the type over `i64`.
 
 4. **String-borrow refinement.** A second post-lowering HIR→HIR pass
    (`strings.ts`) refines a read-only string parameter's `&String` into the
@@ -147,6 +154,16 @@ rejects nothing, so every dialect decision has exactly one home.
    so the `'step:`-block alternative is avoided. A `for` with no `update` needs no
    rewrite. Control flow is complete — all five `02_control_flow` fixtures compile
    and behave.
+
+   Two post-lowering *refinements* (in the numeric pass) make the common integer
+   forms idiomatic (series 019/020). An integer `switch` becomes a literal-pattern
+   `match` (`match x { 1 => …, _ => … }`) instead of the guarded-wildcard fallback,
+   with the discriminant retyped `i64`; a canonical `usize` counting `for` (an
+   index-driven loop, no own `continue`) becomes a `forRange` HIR node
+   (`for i in a..b`, `..=` for `<=`) instead of the block+`while` desugar. Both are
+   *preferring* rewrites — the guarded `match` and the `while` desugar remain the
+   correct fallback for anything not eligible (e.g. the accumulator loop, whose
+   counter is `f64`), so neither ever fails loud.
 
 6. **Object literals lower contextually, from the binding type.** A `{ … }`
    literal is ambiguous in isolation — a `Record` map vs an `interface` struct — so
@@ -273,19 +290,23 @@ rejects nothing, so every dialect decision has exactly one home.
   scopes — mutability/ownership stay name-based per function, so nested-scope
   *shadowing* is still unhandled and gets its own series.)
 - Numeric inference refines `number → usize` for array indices (variable indexing
-  compiles), and now descends into `if`/`while`/`block` bodies. `i64` counters are
-  not yet done — `while`/`for` counters stay `f64` (they compile and print
-  identically to JS).
+  compiles), and now descends into `if`/`while`/`block` bodies. `i64` counters
+  exist for integer `switch` discriminants (series 019); a *bare* `while`/`for`
+  counter not driven by an index or a `switch` still stays `f64` (compiles and
+  prints identically to JS) — general `i64` counter inference is future work.
 - Control flow is complete (`if`/`else`/`while`/`for`/`for…of`/`switch`/`break`/
-  `continue`), with these documented refinements deferred: C-style `for` desugars
-  to a `while` (not the idiomatic `for i in a..b` range — that needs
-  integer-counter inference, since a `usize` range counter can't mix with `f64`
-  body arithmetic). An own `continue` in a C-`for` is supported (series 018):
-  `lowerFor` inlines the `update` before each own `continue` (`{ update; continue;
-  }`), label-free (an unlabeled break through a labeled block is E0695); `switch`
-  emits guarded-wildcard
-  `match` arms (not literal/or-patterns), rejects fall-through and empty/stacked
-  cases; `for…of` iterates arrays by reference (element `&T` — fine for
+  `continue`). An index-driven `usize` counting `for` promotes to a `for i in a..b`
+  range (series 020); the accumulator loop (an `f64` counter) and a loop with an
+  own `continue` keep the correct `while` desugar. An own `continue` in a C-`for`
+  is supported (series 018): `lowerFor` inlines the `update` before each own
+  `continue` (`{ update; continue; }`), label-free (an unlabeled break through a
+  labeled block is E0695). An integer `switch` emits idiomatic literal-pattern
+  `match` arms (series 019); a non-integer/non-promotable discriminant keeps the
+  guarded-wildcard fallback. Remaining refinements deferred: or-patterns
+  (`1 | 2 =>`) and string/range literal patterns; native `continue`-in-range and
+  non-unit/downward range steps; bound-driven `i64` ranges (retyping the bound
+  param crosses a call boundary). `switch` still rejects fall-through and
+  empty/stacked cases; `for…of` iterates arrays by reference (element `&T` — fine for
   arithmetic, but `&f64 == f64` has no impl, so by-value comparison, destructuring,
   non-array iterables, and owned/`&mut` elements are deferred); labeled
   `break`/`continue` and negative literals (`-3`, a `UnaryExpression`) are
