@@ -31,6 +31,8 @@ export type Borrow = "owned" | "ref" | "refMut";
 export type RustType =
   | { kind: "f64" }
   | { kind: "usize" }
+  /** A signed 64-bit integer — an integer counter/discriminant (`numeric.ts`). */
+  | { kind: "i64" }
   | { kind: "String" }
   /** The unsized string slice `str` — only ever valid behind a `ref` (`&str`). */
   | { kind: "str" }
@@ -47,10 +49,11 @@ export type RustType =
 
 /**
  * The refined type of a numeric literal node. Absent ⇒ `f64` (the default). The
- * numeric-inference pass tags integer literals that reach a `usize` context.
- * (`"i64"` is the documented future extension — see docs/work.)
+ * numeric-inference pass tags integer literals that reach a `usize` context, and
+ * `i64` literals that drive an integer counter / `match` discriminant. Both
+ * integer tags emit bare (no `.0` suffix); only `f64` integers need `.0`.
  */
-export type NumericType = "f64" | "usize";
+export type NumericType = "f64" | "usize" | "i64";
 
 // ── Expressions ──────────────────────────────────────────────────────────────
 
@@ -127,6 +130,20 @@ export type HirStmt =
    */
   | { kind: "forIn"; pat: string; iter: HirExpr; body: HirStmt[] }
   /**
+   * `for <counter> in <start>..<end> { body }` (`..=` when `inclusive`). An
+   * idiomatic integer range, recovered from a canonical `usize` counting `for`
+   * by `promoteRanges` (numeric.ts) — the counter's `let` and `+ 1` update are
+   * folded into the range. `break`/`continue` render natively.
+   */
+  | {
+      kind: "forRange";
+      counter: string;
+      start: HirExpr;
+      end: HirExpr;
+      inclusive: boolean;
+      body: HirStmt[];
+    }
+  /**
    * `match <disc> { arms }`. A `switch` lowers here with **guarded wildcard**
    * arms (`_ if disc == case`) — Rust forbids `f64` literal patterns, so the
    * discriminant is compared in a guard rather than matched as a literal.
@@ -137,9 +154,14 @@ export type HirStmt =
   /** `throw new Error(msg)` → `return Err(value);` (`value` is the message). */
   | { kind: "throw"; value: HirExpr };
 
-/** One `match` arm. `guard` is `disc == case`; `null` is the wildcard `_`. */
+/**
+ * One `match` arm. `guard` is `disc == case` (`null` is the wildcard `_`). When
+ * `pat` is set — an integer-typed discriminant promoted by `promoteMatches` — the
+ * arm is a **literal pattern** (`<pat> => …`) and the guard is cleared.
+ */
 export interface HirMatchArm {
   guard: HirExpr | null;
+  pat?: HirExpr;
   body: HirStmt[];
 }
 

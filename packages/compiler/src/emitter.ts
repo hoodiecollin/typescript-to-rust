@@ -156,6 +156,11 @@ function emitStmt(stmt: HirStmt): string {
       return block(stmt.body);
     case "forIn":
       return `for ${stmt.pat} in ${emitExpr(stmt.iter)} ${block(stmt.body)}`;
+    case "forRange": {
+      const dots = stmt.inclusive ? "..=" : "..";
+      const range = `${emitExpr(stmt.start)}${dots}${emitExpr(stmt.end)}`;
+      return `for ${stmt.counter} in ${range} ${block(stmt.body)}`;
+    }
     case "match": {
       const arms = stmt.arms.map((arm) => indent(emitArm(arm))).join("\n");
       return `match ${emitExpr(stmt.disc)} {\n${arms}\n}`;
@@ -170,9 +175,16 @@ function emitStmt(stmt: HirStmt): string {
   }
 }
 
-/** A `match` arm: `_ if <guard> => { … }`, or `_ => { … }` for the wildcard. */
+/**
+ * A `match` arm. A promoted integer arm is a **literal pattern** (`<pat> => …`);
+ * otherwise a guarded wildcard `_ if <guard> => …`, or the bare wildcard `_`.
+ */
 function emitArm(arm: HirMatchArm): string {
-  const head = arm.guard ? `_ if ${emitExpr(arm.guard)}` : "_";
+  const head = arm.pat
+    ? emitExpr(arm.pat)
+    : arm.guard
+      ? `_ if ${emitExpr(arm.guard)}`
+      : "_";
   return `${head} => ${block(arm.body)}`;
 }
 
@@ -188,10 +200,11 @@ const BINARY_OPS: Record<string, string> = {
 function emitExpr(expr: HirExpr): string {
   switch (expr.kind) {
     case "number":
-      // A node the numeric-inference pass tagged `usize` (an index/counter)
-      // renders as a bare integer. Otherwise `number` maps to `f64`: integer
-      // literals need an explicit `.0` so the type is unambiguous.
-      if (expr.ty === "usize") return `${expr.value}`;
+      // A node the numeric-inference pass tagged with an integer type (`usize`
+      // index/counter, or `i64` counter/discriminant) renders as a bare integer.
+      // Otherwise `number` maps to `f64`: integer literals need an explicit `.0`
+      // so the type is unambiguous.
+      if (expr.ty === "usize" || expr.ty === "i64") return `${expr.value}`;
       return Number.isInteger(expr.value) ? `${expr.value}.0` : `${expr.value}`;
     case "string":
       return `${JSON.stringify(expr.value)}.to_string()`;
@@ -275,6 +288,8 @@ function emitType(ty: RustType): string {
       return "f64";
     case "usize":
       return "usize";
+    case "i64":
+      return "i64";
     case "String":
       return "String";
     case "str":
