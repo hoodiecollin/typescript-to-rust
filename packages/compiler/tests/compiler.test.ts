@@ -639,4 +639,90 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("10");
   });
+
+  test("an integer switch emits literal-pattern arms and behaves (→ match)", async () => {
+    // The discriminant retypes to `i64`; cases become bare literal patterns
+    // (`1 => …`) and the integer-literal call args retype too.
+    const ts = [
+      `function matchNum(x: number): string {`,
+      `  switch (x) {`,
+      `    case 1: return "one";`,
+      `    case 2: return "two";`,
+      `    default: return "other";`,
+      `  }`,
+      `}`,
+      `console.log(matchNum(1));`,
+      `console.log(matchNum(2));`,
+      `console.log(matchNum(9));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    expect(rust).toContain("fn matchNum(x: i64)");
+    expect(rust).toContain("1 => {");
+    expect(rust).not.toContain("_ if x ==");
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("one\ntwo\nother");
+  });
+
+  test("an index-driven for promotes to `for i in 0..arr.len()` and behaves", async () => {
+    const ts = [
+      `function total(arr: Array<number>): number {`,
+      `  let sum: number = 0;`,
+      `  for (let i = 0; i < arr.length; i = i + 1) {`,
+      `    sum = sum + arr[i];`,
+      `  }`,
+      `  return sum;`,
+      `}`,
+      `console.log(total([1, 2, 3, 4]));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    expect(rust).toContain("for i in 0..arr.len()");
+    expect(rust).not.toContain("while i <");
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("10");
+  });
+
+  test("a literal-bound index for promotes to `for i in 0..3` and behaves", async () => {
+    const ts = [
+      `function firstThree(arr: Array<number>): number {`,
+      `  let sum: number = 0;`,
+      `  for (let i = 0; i < 3; i = i + 1) {`,
+      `    sum = sum + arr[i];`,
+      `  }`,
+      `  return sum;`,
+      `}`,
+      `console.log(firstThree([10, 20, 30, 40, 50]));`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    expect(rust).toContain("for i in 0..3");
+    expect(rust).not.toContain("0.0..3.0");
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("60");
+  });
 });

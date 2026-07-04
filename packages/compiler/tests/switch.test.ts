@@ -1,8 +1,11 @@
 /**
- * Specs for `switch → match` (series 009). Drives the public `emit(...)` entry
- * and asserts the guarded-wildcard `match` shape (Rust forbids `f64` literal
- * patterns, so cases compare in a guard). The cargo-backed COMPILES/BEHAVES proof
- * lives in compiler.test.ts. IDs map to docs/work/009-switch-break-continue/specs.md.
+ * Specs for `switch → match` (series 009). Drives the public `emit(...)` entry.
+ * A `switch` lowers to a guarded-wildcard `match` (Rust forbids `f64` literal
+ * patterns, so cases compare in a guard) — but series 019 now promotes an
+ * *integer* discriminant to `i64` with idiomatic literal-pattern arms, so SW2
+ * asserts the promoted form (see tests/integer-match.test.ts for the full 019
+ * specs). The cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs
+ * map to docs/work/009-switch-break-continue/specs.md.
  *
  * RED against the scaffold seam in `src/lower.ts`: `SwitchStatement` throws
  * `UnsupportedError` until `lowerSwitch` lands. SW6 is a green control.
@@ -30,10 +33,13 @@ describe("control flow: switch → match", () => {
     expect(compile(MATCH_NUM)).toContain("match x {");
   });
 
-  test("SW2 a `case` becomes a guarded wildcard arm", () => {
+  test("SW2 an integer `case` becomes a literal-pattern arm (series 019)", () => {
+    // An integer discriminant promotes to `i64` with bare literal patterns,
+    // superseding the guarded-wildcard form (`_ if x == 1.0`).
     const rust = compile(MATCH_NUM);
-    expect(rust).toContain("_ if x == 1.0 =>");
-    expect(rust).toContain("_ if x == 2.0 =>");
+    expect(rust).toContain("1 => {");
+    expect(rust).toContain("2 => {");
+    expect(rust).not.toContain("_ if x ==");
   });
 
   test("SW3 `default` becomes the wildcard arm", () => {
