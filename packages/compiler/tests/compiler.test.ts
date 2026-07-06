@@ -41,6 +41,9 @@ const SUPPORTED = new Set([
   "06_classes/01_basic",
   "07_async/01_async_await",
   "08_errors/01_throw",
+  "08_errors/02_try_catch",
+  "08_errors/03_custom_error",
+  "08_errors/04_method_throw",
   "10_ownership/01_borrow",
   "10_ownership/02_mut_borrow",
   "10_ownership/03_move",
@@ -724,5 +727,119 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.ok).toBe(true);
     expect(rustRun.stdout.trim()).toBe(tsStdout);
     expect(rustRun.stdout.trim()).toBe("60");
+  });
+
+  test("try/catch/finally recovers and both runtimes agree (series 021)", async () => {
+    const ts = [
+      `function risky(n: number): void {`,
+      `  if (n < 0) { throw new Error("negative"); }`,
+      `  console.log("ran");`,
+      `}`,
+      `function attempt(n: number): void {`,
+      `  try {`,
+      `    risky(n);`,
+      `  } catch (e) {`,
+      `    console.log("caught");`,
+      `  } finally {`,
+      `    console.log("done");`,
+      `  }`,
+      `}`,
+      `attempt(5);`,
+      `attempt(0 - 1);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    // The try block is a Result-returning IIFE; `attempt` itself stays non-Result
+    // (the error is caught, not propagated — fallibility shielding).
+    expect(rust).toContain("(|| -> Result<(), String> {");
+    expect(rust).toContain("fn attempt(n: f64) {");
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("ran\ndone\ncaught\ndone");
+  });
+
+  test("a custom error type propagates and prints the same (series 022)", async () => {
+    // Success path (both runtimes agree); the boxed custom-error branch is
+    // proven to compile at tier 1. A custom error class present makes the whole
+    // program's error type `Box<dyn Error>`.
+    const ts = [
+      `class NotFoundError extends Error {`,
+      `  constructor(message: string) {`,
+      `    super(message);`,
+      `  }`,
+      `}`,
+      `function lookup(id: number): number {`,
+      `  if (id < 0) {`,
+      `    throw new NotFoundError("no such id");`,
+      `  }`,
+      `  return id * 2;`,
+      `}`,
+      `const x: number = lookup(3);`,
+      `console.log(x);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    expect(rust).toContain("impl std::error::Error for NotFoundError {}");
+    expect(rust).toContain("Result<f64, Box<dyn std::error::Error>>");
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("6");
+  });
+
+  test("throwing methods/constructors propagate and behave the same (series 023)", async () => {
+    const ts = [
+      `class Account {`,
+      `  balance: number;`,
+      `  constructor(initial: number) {`,
+      `    if (initial < 0) { throw new Error("negative initial"); }`,
+      `    this.balance = initial;`,
+      `  }`,
+      `  withdraw(amount: number): void {`,
+      `    if (amount > this.balance) { throw new Error("insufficient funds"); }`,
+      `    this.balance = this.balance - amount;`,
+      `  }`,
+      `  pay(amount: number): void {`,
+      `    this.withdraw(amount);`,
+      `    console.log("paid");`,
+      `  }`,
+      `}`,
+      `const a: Account = new Account(100);`,
+      `a.pay(30);`,
+      `console.log(a.balance);`,
+    ].join("\n");
+
+    const tsRun = Bun.spawnSync(["bun", "run", "-"], {
+      stdin: new TextEncoder().encode(ts),
+    });
+    const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
+
+    const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
+    // fallible ctor + method, `?`-propagated at the use sites, `pay` inferred
+    // `&mut self` (it calls the mutating `withdraw`).
+    expect(rust).toContain("fn new(initial: f64) -> Result<Account, String> {");
+    expect(rust).toContain(
+      "fn pay(&mut self, amount: f64) -> Result<(), String> {",
+    );
+    expect(rust).toContain("self.withdraw(amount)?");
+    expect(rust).toContain("Account::new(100.0)?");
+    const rustRun = await runRust(rust);
+
+    expect(rustRun.ok).toBe(true);
+    expect(rustRun.stdout.trim()).toBe(tsStdout);
+    expect(rustRun.stdout.trim()).toBe("paid\n70");
   });
 });
