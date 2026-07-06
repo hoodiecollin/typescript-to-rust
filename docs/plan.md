@@ -354,11 +354,19 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       are both correct. Still a *may*-analysis that only ever adds clones →
       fail-loud preserved (unprovable shapes stay bare → cargo-loud). Supersedes
       the 034 `refineMoves` heuristic; all 034 cases preserved
-      (`tests/ownership-cfg.test.ts`). **First increment was series 034**
-      (use-after-move → `.clone()`, straight-line; see
+      (`tests/ownership-cfg.test.ts`). **Struct derives LANDED (series 037b):** a
+      shared `structDeriveClause` (`src/derives.ts`) gives every interface/class
+      struct `#[derive(Clone, Debug)]` on-demand (gated by field eligibility;
+      `Clone` for the ownership pass, `Debug` for `console.log` per issue #22), and
+      `refineOwnership` folds `struct` into the movable set via the same
+      cloneability test — so struct moves clone in lockstep with the derive. The
+      refine chain reorders so `refineOwnership` runs **last** (after
+      `refineRc`/`refineArena`), letting the directives impose their ownership model
+      first. Specs: `tests/struct-derives.test.ts`. **First increment was series
+      034** (use-after-move → `.clone()`, straight-line; see
       docs/work/_archive/034-ownership-clone-moves). **Still open (epic #1):**
-      struct `Clone`/`Debug` derives (**037b**, next), partial moves,
-      move-out-of-borrow, move-through-store. Read-only-string `&str` params are
+      partial moves, move-out-of-borrow, move-through-store; the `PartialEq`/`===`
+      struct-equality decision is issue #28. Read-only-string `&str` params are
       done (`strings.ts`).
 - [ ] Extend the dialect validator further (default-deny landed in series 024 —
       rejects `any`/`unknown`, `for await`, `await using`, decorators, `abstract`,

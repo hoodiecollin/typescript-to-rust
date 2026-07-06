@@ -1,16 +1,20 @@
 # 037 — Ownership analysis: CFG + backward liveness (the real engine)
 
-> **Status: 037a LANDED. 037b (struct derives) pending.** Epic: GitHub issue #1
+> **Status: 037a + 037b LANDED (archived).** Epic: GitHub issue #1
 > (`hoodiecollin/typescript-to-rust`, label `ownership`). Decision on file
 > (2026-07-06): build the **full CFG + dataflow now**, not the staged-heuristics
-> path. This series replaces the straight-line `refineMoves` (series 034) with a
-> proper control-flow-graph + liveness dataflow, and folds struct `Clone` in.
+> path. This series replaced the straight-line `refineMoves` (series 034) with a
+> proper control-flow-graph + liveness dataflow, and folded struct derives in.
 >
 > **037a** — `refineOwnership` (`src/ownership.ts`): CFG + backward liveness
-> replacing the heuristic; loop back-edges + branch joins now handled. Specs:
+> replacing the heuristic; loop back-edges + branch joins handled. Specs:
 > `tests/ownership-cfg.test.ts` (7). All 034 cases preserved. **037b** — the
-> `deriveClause` helper (`Clone` + `Debug`) + folding `struct` into the movable
-> set — not yet started.
+> `structDeriveClause` helper (`src/derives.ts`, `Clone` + `Debug`) + folding
+> `struct` into the movable set; `refineOwnership` reordered to run last. Specs:
+> `tests/struct-derives.test.ts` (6).
+>
+> **Still open under epic #1** (later series): partial moves, move-out-of-borrow,
+> move-through-store; the `PartialEq`/`===` semantics decision is issue #28.
 
 ## Why this exists / what changes
 
