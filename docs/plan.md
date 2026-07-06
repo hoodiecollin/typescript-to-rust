@@ -364,10 +364,17 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       `refineRc`/`refineArena`), letting the directives impose their ownership model
       first. Specs: `tests/struct-derives.test.ts`. **First increment was series
       034** (use-after-move → `.clone()`, straight-line; see
-      docs/work/_archive/034-ownership-clone-moves). **Still open (epic #1):**
-      partial moves, move-out-of-borrow, move-through-store; the `PartialEq`/`===`
-      struct-equality decision is issue #28. Read-only-string `&str` params are
-      done (`strings.ts`).
+      docs/work/_archive/034-ownership-clone-moves). **Move coverage COMPLETE
+      (series 038):** move-through-store (a name moved into a struct/array/hashmap
+      literal, a by-value method arg, or an assignment value) and move-out-of-place
+      (a non-Copy `field`/`index` projection read by value that moves out of an
+      index, a borrowed param, or a reused owned base — partial moves +
+      move-out-of-borrow, `E0382`/`E0507`), driven by a per-body type environment +
+      `refParams`. So the epic-#1 sub-parts — conditional/loop/shadowed moves
+      (037a), struct `Clone` (037b), and stores/projections (038) — are all done;
+      the frontier that stays fail-loud is owned-`self` receiver moves and
+      dynamic-shape moves (out of dialect). The `PartialEq`/`===` struct-equality
+      decision is issue #28. Read-only-string `&str` params are done (`strings.ts`).
 - [ ] Extend the dialect validator further (default-deny landed in series 024 —
       rejects `any`/`unknown`, `for await`, `await using`, decorators, `abstract`,
       `declare`, and any unmodeled node type; **sync finite-yield generators now
