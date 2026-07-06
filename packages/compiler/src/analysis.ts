@@ -71,6 +71,23 @@ export interface ModuleAnalysis {
    */
   fallible: Set<string>;
   /**
+   * Fallible class **method names** (series 023): a method that throws, or
+   * transitively calls a fallible free fn / method / fallible-ctor `new`. A call
+   * `obj.M(…)` / `this.M(…)` to such a name propagates with `?`. Name-based (like
+   * `mutatingMethods`); the cross-class same-name edge is a documented limit.
+   */
+  fallibleMethods: Set<string>;
+  /** Class **names** whose constructor is fallible (`new C(…)` propagates `?`). */
+  fallibleCtors: Set<string>;
+  /**
+   * Names of declared **custom error classes** (`class X extends Error { … }`).
+   * They are emitted as error `struct`s + `Display`/`Error` impls (not general
+   * data structs, so they are *excluded* from `structs`); a `throw new X(…)`
+   * boxes them, and a non-empty set upgrades the program error type from `String`
+   * to `Box<dyn Error>`.
+   */
+  errorClasses: Set<string>;
+  /**
    * Names of top-level `async` function declarations. A call to one is only valid
    * `await`ed (an un-polled future never runs), and `await` only targets one of
    * these — both enforced in lowering. The generated `main` becomes
@@ -246,6 +263,30 @@ function mutatesThis(body: unknown): boolean {
   return mutates;
 }
 
+/** Does a body call a self-mutating method on `this` (`this.<mutating>()`)? */
+function callsMutatingThisMethod(
+  body: unknown,
+  mutating: Set<string>,
+): boolean {
+  let found = false;
+  // `walk` (not `walkOwn`): `classMethods` passes the `FunctionExpression`
+  // wrapper, which `walkOwn` treats as a boundary — matching `mutatesThis`.
+  walk(body, (n) => {
+    if (n.type !== "CallExpression") return;
+    const callee = n.callee;
+    if (
+      isNode(callee) &&
+      callee.type === "MemberExpression" &&
+      isNode(callee.object) &&
+      callee.object.type === "ThisExpression"
+    ) {
+      const prop = identName(callee.property);
+      if (prop && mutating.has(prop)) found = true;
+    }
+  });
+  return found;
+}
+
 /** Every method of a `class` declaration, with its class name. */
 function classMethods(
   program: Program,
@@ -293,6 +334,16 @@ function walkOwn(node: unknown, visit: (n: AnyNode) => void): void {
   ) {
     return;
   }
+  // A `try` with a `catch` handler *catches* its block's throws/fallible calls,
+  // so they must not count toward the enclosing scope's fallibility. Skip the
+  // `block`, but walk the `handler` and `finalizer` (a re-throw or un-caught
+  // fallible call there still propagates). A `try` with no handler is walked
+  // whole (errors propagate; lowering rejects that shape anyway).
+  if (node.type === "TryStatement" && node.handler) {
+    walkOwn(node.handler, visit);
+    walkOwn(node.finalizer, visit);
+    return;
+  }
   for (const key in node) {
     if (key === "type") continue;
     walkOwn(node[key], visit);
@@ -322,42 +373,167 @@ function calledNames(body: unknown): Set<string> {
 }
 
 /**
- * Fixpoint over the top-level call graph: a function is fallible if it throws or
- * calls a fallible function. The generated `main` (`SCRIPT_SCOPE`) is included so
- * a script that propagates a throwing call returns `Result` too.
+ * Method names this body calls (`obj.M(…)` / `this.M(…)`), restricted to `known`
+ * declared class-method names so built-ins (`.push`, `console.log`) never count.
+ */
+function calledMethodNames(body: unknown, known: Set<string>): Set<string> {
+  const names = new Set<string>();
+  walkOwn(body, (n) => {
+    if (n.type !== "CallExpression") return;
+    const callee = n.callee;
+    if (isNode(callee) && callee.type === "MemberExpression") {
+      const prop = identName(callee.property);
+      if (prop && known.has(prop)) names.add(prop);
+    }
+  });
+  return names;
+}
+
+/** Class names `new`ed in this body (`new C(…)`, identifier callees). */
+function newedClassNames(body: unknown): Set<string> {
+  const names = new Set<string>();
+  walkOwn(body, (n) => {
+    if (n.type !== "NewExpression") return;
+    const name = identName(n.callee);
+    if (name) names.add(name);
+  });
+  return names;
+}
+
+/** One scope in the fallibility fixpoint (a free fn, the script, a method, or a ctor). */
+interface FallScope {
+  key: string;
+  throws: boolean;
+  callsFree: Set<string>;
+  callsMethod: Set<string>;
+  newsClass: Set<string>;
+  /** Set for a free fn / the script (contributes to the public `fallible` set). */
+  freeOrScript?: boolean;
+  /** Set for a class method (its name feeds method-call fallibility). */
+  methodName?: string;
+  /** Set for a constructor (its class feeds `new`-fallibility). */
+  ctorClass?: string;
+}
+
+/** Methods and constructors of every non-error class, as fallibility scopes. */
+function classFallScopes(program: Program): {
+  className: string;
+  methodName?: string;
+  ctorClass?: string;
+  body: unknown;
+}[] {
+  const out: {
+    className: string;
+    methodName?: string;
+    ctorClass?: string;
+    body: unknown;
+  }[] = [];
+  for (const stmt of program.body) {
+    if (stmt.type !== "ClassDeclaration" || isErrorSubclass(stmt)) continue;
+    const decl = stmt as unknown as {
+      id?: { name?: string };
+      body?: { body?: AnyNode[] };
+    };
+    const className = decl.id?.name;
+    if (!className) continue;
+    for (const m of decl.body?.body ?? []) {
+      if (m.type !== "MethodDefinition") continue;
+      const kind = (m as AnyNode).kind;
+      // The method's block body (not the FunctionExpression) — `walkOwn` stops at
+      // a function boundary, so passing the wrapper would hide every throw/call.
+      const value = (m as AnyNode).value;
+      const body = isNode(value) ? value.body : undefined;
+      if (kind === "constructor") {
+        out.push({ className, ctorClass: className, body });
+      } else if (kind === "method") {
+        const name = identName((m as AnyNode).key);
+        if (name) out.push({ className, methodName: name, body });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Fixpoint over the whole call graph — free functions, the script, class methods,
+ * and constructors. A scope is fallible if it `throw`s (own-level, `try`-shielded)
+ * or calls a fallible free fn / method (by name) / fallible-ctor `new`. Method
+ * fallibility feeds back in, so method→method propagation converges here. Returns
+ * the public free-fn+script set plus the derived fallible method names and ctor
+ * class names.
  */
 function analyzeFallible(
   program: Program,
   script: Statement[],
-): Set<string> {
-  const throws = new Map<string, boolean>();
-  const calls = new Map<string, Set<string>>();
+): {
+  fallible: Set<string>;
+  fallibleMethods: Set<string>;
+  fallibleCtors: Set<string>;
+} {
+  const classScopes = classFallScopes(program);
+  const methodUniverse = new Set<string>();
+  for (const s of classScopes)
+    if (s.methodName) methodUniverse.add(s.methodName);
+
+  const scopes: FallScope[] = [];
+  const record = (key: string, body: unknown, extra: Partial<FallScope>) => {
+    scopes.push({
+      key,
+      throws: bodyThrows(body),
+      callsFree: calledNames(body),
+      callsMethod: calledMethodNames(body, methodUniverse),
+      newsClass: newedClassNames(body),
+      ...extra,
+    });
+  };
 
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
-    if (!named) continue;
-    throws.set(named.name, bodyThrows(named.fn.body));
-    calls.set(named.name, calledNames(named.fn.body));
+    if (named) record(named.name, named.fn.body, { freeOrScript: true });
   }
-  throws.set(SCRIPT_SCOPE, bodyThrows(script));
-  calls.set(SCRIPT_SCOPE, calledNames(script));
+  record(SCRIPT_SCOPE, script, { freeOrScript: true });
+  for (const s of classScopes) {
+    const key = s.ctorClass
+      ? `new ${s.className}`
+      : `${s.className}.${s.methodName}`;
+    record(key, s.body, { methodName: s.methodName, ctorClass: s.ctorClass });
+  }
 
   const fallible = new Set<string>();
-  for (const [name, t] of throws) if (t) fallible.add(name);
+  for (const s of scopes) if (s.throws) fallible.add(s.key);
   for (;;) {
+    const methodNames = new Set<string>();
+    const ctorClasses = new Set<string>();
+    for (const s of scopes) {
+      if (!fallible.has(s.key)) continue;
+      if (s.methodName) methodNames.add(s.methodName);
+      if (s.ctorClass) ctorClasses.add(s.ctorClass);
+    }
     let changed = false;
-    for (const [name, callees] of calls) {
-      if (fallible.has(name)) continue;
-      for (const c of callees) {
-        if (fallible.has(c)) {
-          fallible.add(name);
-          changed = true;
-          break;
-        }
+    for (const s of scopes) {
+      if (fallible.has(s.key)) continue;
+      const hit =
+        [...s.callsFree].some((c) => fallible.has(c)) ||
+        [...s.callsMethod].some((m) => methodNames.has(m)) ||
+        [...s.newsClass].some((c) => ctorClasses.has(c));
+      if (hit) {
+        fallible.add(s.key);
+        changed = true;
       }
     }
-    if (!changed) return fallible;
+    if (!changed) break;
   }
+
+  const publicFallible = new Set<string>();
+  const fallibleMethods = new Set<string>();
+  const fallibleCtors = new Set<string>();
+  for (const s of scopes) {
+    if (!fallible.has(s.key)) continue;
+    if (s.freeOrScript) publicFallible.add(s.key);
+    if (s.methodName) fallibleMethods.add(s.methodName);
+    if (s.ctorClass) fallibleCtors.add(s.ctorClass);
+  }
+  return { fallible: publicFallible, fallibleMethods, fallibleCtors };
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -382,9 +558,23 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   }
 
   // Self-mutating methods (→ `&mut self`, and `mut` for their call-site receiver).
+  // A method mutates `self` if it assigns a `this.<field>` directly, or — a
+  // fixpoint — calls another self-mutating method on `this` (so `pay` that calls
+  // `this.withdraw()` is itself `&mut self`).
   const methods = classMethods(program);
   const mutatingMethods = new Set<string>();
   for (const m of methods) if (mutatesThis(m.body)) mutatingMethods.add(m.name);
+  for (;;) {
+    let changed = false;
+    for (const m of methods) {
+      if (mutatingMethods.has(m.name)) continue;
+      if (callsMutatingThisMethod(m.body, mutatingMethods)) {
+        mutatingMethods.add(m.name);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
 
   const mut = new Map<string, Set<string>>();
   for (const stmt of program.body) {
@@ -401,19 +591,32 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     );
   }
 
-  // Declared nominal types: interfaces and classes both resolve to a `struct`.
+  // Custom error classes (`class X extends Error`) are collected separately and
+  // kept *out* of `structs` — they map to error types, not general data structs.
+  const errorClasses = new Set<string>();
+  for (const stmt of program.body) {
+    if (stmt.type === "ClassDeclaration" && isErrorSubclass(stmt)) {
+      const id = (stmt as { id?: { name?: string } }).id;
+      if (id?.name) errorClasses.add(id.name);
+    }
+  }
+
+  // Declared nominal types: interfaces and (non-error) classes resolve to a `struct`.
   const structs = new Set<string>();
   for (const stmt of program.body) {
     if (
       stmt.type === "TSInterfaceDeclaration" ||
-      stmt.type === "ClassDeclaration"
+      (stmt.type === "ClassDeclaration" && !isErrorSubclass(stmt))
     ) {
       const id = (stmt as { id?: { name?: string } }).id;
       if (id?.name) structs.add(id.name);
     }
   }
 
-  const fallible = analyzeFallible(program, script);
+  const { fallible, fallibleMethods, fallibleCtors } = analyzeFallible(
+    program,
+    script,
+  );
 
   // Top-level `async` function declarations (drives the `await`-target check and
   // the un-awaited-call rejection in lowering).
@@ -423,5 +626,24 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     if (named && named.fn.async) asyncFns.add(named.name);
   }
 
-  return { fns, mut, structs, mutatingMethods, fallible, asyncFns };
+  return {
+    fns,
+    mut,
+    structs,
+    mutatingMethods,
+    fallible,
+    fallibleMethods,
+    fallibleCtors,
+    errorClasses,
+    asyncFns,
+  };
+}
+
+/** Is a class declaration `class X extends Error { … }` (a custom error type)? */
+export function isErrorSubclass(stmt: Statement): boolean {
+  if (stmt.type !== "ClassDeclaration") return false;
+  const sup = (stmt as { superClass?: unknown }).superClass;
+  return (
+    isNode(sup) && sup.type === "Identifier" && (sup.name as string) === "Error"
+  );
 }

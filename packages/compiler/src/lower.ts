@@ -9,7 +9,12 @@
  * silently (see hir.ts for why the emitter is then pure and total).
  */
 
-import { type ModuleAnalysis, SCRIPT_SCOPE, analyzeModule } from "./analysis";
+import {
+  type ModuleAnalysis,
+  SCRIPT_SCOPE,
+  analyzeModule,
+  isErrorSubclass,
+} from "./analysis";
 import type {
   ArrowFunctionExpression,
   AssignmentExpression,
@@ -37,17 +42,19 @@ import type {
   ReturnStatement,
   Statement,
   SwitchStatement,
-  ThrowStatement,
   TSInterfaceDeclaration,
   TSType,
+  ThrowStatement,
+  TryStatement,
   VariableDeclaration,
   WhileStatement,
 } from "./ast";
 import type {
   Borrow,
   HirArg,
-  HirExpr,
   HirClass,
+  HirErrorClass,
+  HirExpr,
   HirFn,
   HirItem,
   HirMatchArm,
@@ -74,12 +81,21 @@ export class UnsupportedError extends Error {
 }
 
 const UNIT: RustType = { kind: "unit" };
-/** The error type for every fallible function this slice: the `Error` message. */
+/** The default fallible error type: the `Error` message as a `String`. */
 const ERR_STRING: RustType = { kind: "String" };
 
-/** Wrap an ok-type in the slice's `Result<ok, String>`. */
-function resultType(ok: RustType): RustType {
-  return { kind: "result", ok, err: ERR_STRING };
+/** Wrap an ok-type in `Result<ok, err>`. */
+function resultType(ok: RustType, err: RustType): RustType {
+  return { kind: "result", ok, err };
+}
+
+/**
+ * The program-wide error type: `Box<dyn std::error::Error>` when any custom
+ * error class is declared (series 022), else `String`. Uniform across every
+ * fallible function so `?` composes.
+ */
+function programErrType(analysis: ModuleAnalysis): RustType {
+  return analysis.errorClasses.size > 0 ? { kind: "boxError" } : ERR_STRING;
 }
 
 /**
@@ -102,9 +118,16 @@ export function lower(program: Program): HirModule {
     if (stmt.type === "FunctionDeclaration") {
       items.push(lowerFunction(stmt as FunctionDeclaration, analysis));
     } else if (stmt.type === "TSInterfaceDeclaration") {
-      items.push(lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs));
+      items.push(
+        lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs),
+      );
     } else if (stmt.type === "ClassDeclaration") {
-      items.push(lowerClass(stmt as ClassDeclaration, analysis));
+      // A `class X extends Error` is a custom error type, not a data class.
+      items.push(
+        isErrorSubclass(stmt)
+          ? lowerErrorClass(stmt as ClassDeclaration)
+          : lowerClass(stmt as ClassDeclaration, analysis),
+      );
     } else {
       script.push(stmt);
     }
@@ -125,7 +148,7 @@ export function lower(program: Program): HirModule {
     // `fn main() -> Result<(), String>`, returns wrapped in `Ok`, trailing `Ok(())`.
     if (analysis.fallible.has(SCRIPT_SCOPE)) {
       main = makeFallible(main, UNIT);
-      mainRet = resultType(UNIT);
+      mainRet = resultType(UNIT, programErrType(analysis));
     }
     // A script that `await`s needs an async runtime entry: `#[tokio::main] async
     // fn main()` (composes with `mainRet` if the script also throws).
@@ -242,7 +265,7 @@ function lowerFunction(
       name,
       isAsync: func.async,
       params,
-      ret: resultType(ret),
+      ret: resultType(ret, programErrType(analysis)),
       body: makeFallible(body, ret),
     };
   }
@@ -276,32 +299,201 @@ const ERROR_CLASSES = new Set([
  */
 function lowerThrow(stmt: ThrowStatement, analysis: ModuleAnalysis): HirStmt {
   const arg = stmt.argument;
-  // `throw new <ErrorClass>(message)` — the message becomes Err's String payload.
+  const errTy = programErrType(analysis);
   if (arg.type === "NewExpression") {
     const nw = arg as NewExpression;
-    if (
-      nw.callee.type !== "Identifier" ||
-      !ERROR_CLASSES.has((nw.callee as Identifier).name)
-    ) {
+    if (nw.callee.type !== "Identifier") {
       throw new UnsupportedError({
-        type: "throw of a non-built-in error class (custom error types: later series)",
+        type: "throw of a non-identifier constructor",
+      });
+    }
+    const cname = (nw.callee as Identifier).name;
+    const isCustom = analysis.errorClasses.has(cname);
+    if (!isCustom && !ERROR_CLASSES.has(cname)) {
+      throw new UnsupportedError({
+        type: "throw of an unknown error class (declare it as `class X extends Error`)",
       });
     }
     const [message] = nw.arguments;
     if (nw.arguments.length !== 1 || !message) {
       throw new UnsupportedError({
-        type: "throw new Error() must have exactly one message argument",
+        type: "throw new <Error>() must have exactly one message argument",
       });
     }
-    return { kind: "throw", value: lowerExpr(message, analysis) };
+    const msg = lowerExpr(message, analysis);
+    // A custom error is boxed: `Box::new(<X>::new(msg))`. A built-in `Error` /
+    // string throw carries the message; under a boxed program error type it
+    // converts with `.into()` (the `From<String>` for `Box<dyn Error>`).
+    if (isCustom) {
+      const ctor: HirExpr = {
+        kind: "call",
+        callee: `${cname}::new`,
+        args: [{ borrow: "owned", expr: msg }],
+      };
+      return {
+        kind: "throw",
+        value: {
+          kind: "call",
+          callee: "Box::new",
+          args: [{ borrow: "owned", expr: ctor }],
+        },
+      };
+    }
+    return { kind: "throw", value: boxIfNeeded(msg, errTy) };
   }
   // `throw "literal"` — a bare string literal is thrown as its own message.
   if (arg.type === "Literal" && typeof (arg as Literal).value === "string") {
-    return { kind: "throw", value: lowerExpr(arg, analysis) };
+    return {
+      kind: "throw",
+      value: boxIfNeeded(lowerExpr(arg, analysis), errTy),
+    };
   }
   throw new UnsupportedError({
     type: "throw of a non-Error, non-string-literal value",
   });
+}
+
+/**
+ * Under a `Box<dyn Error>` program error type, a `String` message must convert to
+ * the boxed error via `.into()` (the standard `From<String>` impl). Under the
+ * `String` error type (no custom error classes) the message is carried as-is.
+ */
+function boxIfNeeded(msg: HirExpr, errTy: RustType): HirExpr {
+  return errTy.kind === "boxError"
+    ? { kind: "method", receiver: msg, name: "into", args: [] }
+    : msg;
+}
+
+/**
+ * Lower a `class X extends Error { constructor(message: string) { super(message); } }`
+ * to a `HirErrorClass`. Only that exact shape maps — no fields, exactly one
+ * constructor taking a single message param whose body is `super(message);` —
+ * anything else is fail-loud (richer custom error shapes are a later series).
+ */
+function lowerErrorClass(decl: ClassDeclaration): HirErrorClass {
+  const name = decl.id?.name;
+  if (!name) throw new UnsupportedError({ type: "anonymous error class" });
+  const members = decl.body.body;
+  const nonCtor = members.filter(
+    (m) => !(m.type === "MethodDefinition" && m.kind === "constructor"),
+  );
+  if (nonCtor.length > 0) {
+    throw new UnsupportedError({
+      type: "custom error class with extra members (only { message } is supported)",
+    });
+  }
+  const ctors = members.filter(
+    (m): m is MethodDefinition =>
+      m.type === "MethodDefinition" && m.kind === "constructor",
+  );
+  const [ctorDef] = ctors;
+  if (ctors.length !== 1 || !ctorDef) {
+    throw new UnsupportedError({
+      type: "custom error class must have exactly one constructor",
+    });
+  }
+  const ctor = ctorDef.value;
+  if (ctor.params.length !== 1) {
+    throw new UnsupportedError({
+      type: "custom error class constructor must take exactly one message param",
+    });
+  }
+  const body = ctor.body?.body ?? [];
+  const only = body[0];
+  const isSuperCall =
+    body.length === 1 &&
+    only?.type === "ExpressionStatement" &&
+    (only as ExpressionStatement).expression.type === "CallExpression" &&
+    ((only as ExpressionStatement).expression as CallExpression).callee.type ===
+      "Super";
+  if (!isSuperCall) {
+    throw new UnsupportedError({
+      type: "custom error class constructor body must be `super(message)`",
+    });
+  }
+  return { kind: "errorClass", name };
+}
+
+/**
+ * Lower a `try`/`catch`/`finally` to a `tryCatch` HIR node (an `if let Err` over
+ * a `Result`-returning IIFE closure). Statement-level recovery only: a `catch`
+ * handler is required, and neither the `try` nor the `catch` body may `return` /
+ * `break` / `continue` past the closure (value-yielding `try`/`catch` is
+ * deferred). A `finally` runs after; a re-`throw` in `catch` alongside a
+ * `finally` is rejected (the trailing `finally` would be skipped). The `try`
+ * body is `makeFallible`-wrapped so its fallible calls/`throw`s get the closure's
+ * `Ok(())` tail (there are no returns to wrap — they're rejected).
+ */
+function lowerTry(
+  stmt: TryStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
+  if (!stmt.handler) {
+    throw new UnsupportedError({
+      type: "try/finally without a catch handler (deferred)",
+    });
+  }
+  const rawTry = lowerStatements(stmt.block.body, analysis, scope);
+  const catchBody = lowerStatements(stmt.handler.body.body, analysis, scope);
+  if (escapesClosure(rawTry, false) || escapesClosure(catchBody, false)) {
+    throw new UnsupportedError({
+      type: "return/break/continue inside try/catch (value-yielding try/catch: deferred)",
+    });
+  }
+  const finallyBody = stmt.finalizer
+    ? lowerStatements(stmt.finalizer.body, analysis, scope)
+    : null;
+  if (finallyBody && hirHasThrowOrTry(catchBody)) {
+    throw new UnsupportedError({
+      type: "re-throw inside catch alongside a finally (deferred)",
+    });
+  }
+  return {
+    kind: "tryCatch",
+    tryBody: makeFallible(rawTry, UNIT),
+    catchParam: stmt.handler.param ? stmt.handler.param.name : null,
+    catchBody,
+    finallyBody,
+    errTy: programErrType(analysis),
+  };
+}
+
+/**
+ * Does a statement list contain a control-flow jump that would escape the `try`
+ * IIFE closure? A `return` anywhere escapes it; a `break`/`continue` escapes only
+ * when it is *not* bound by a loop nested inside the try (`insideLoop`). Descends
+ * `if`/`block`/`match` and into loops (to catch a `return` there), but a
+ * `break`/`continue` under a nested loop is that loop's own concern.
+ */
+function escapesClosure(stmts: HirStmt[], insideLoop: boolean): boolean {
+  for (const s of stmts) {
+    switch (s.kind) {
+      case "return":
+        return true;
+      case "break":
+      case "continue":
+        if (!insideLoop) return true;
+        break;
+      case "if":
+        if (escapesClosure(s.conseq, insideLoop)) return true;
+        if (s.alt && escapesClosure(s.alt, insideLoop)) return true;
+        break;
+      case "block":
+        if (escapesClosure(s.body, insideLoop)) return true;
+        break;
+      case "match":
+        for (const arm of s.arms)
+          if (escapesClosure(arm.body, insideLoop)) return true;
+        break;
+      case "while":
+      case "forIn":
+      case "forRange":
+        if (escapesClosure(s.body, true)) return true;
+        break;
+    }
+  }
+  return false;
 }
 
 /**
@@ -332,7 +524,11 @@ function wrapReturns(stmt: HirStmt): HirStmt {
         alt: stmt.alt ? stmt.alt.map(wrapReturns) : null,
       };
     case "while":
-      return { kind: "while", cond: stmt.cond, body: stmt.body.map(wrapReturns) };
+      return {
+        kind: "while",
+        cond: stmt.cond,
+        body: stmt.body.map(wrapReturns),
+      };
     case "block":
       return { kind: "block", body: stmt.body.map(wrapReturns) };
     case "forIn":
@@ -410,7 +606,10 @@ function lowerInterface(
         type: `interface field '${m.key.name}' without a type`,
       });
     }
-    return { name: m.key.name, ty: lowerType(m.typeAnnotation.typeAnnotation, structs) };
+    return {
+      name: m.key.name,
+      ty: lowerType(m.typeAnnotation.typeAnnotation, structs),
+    };
   });
   return { kind: "struct", name: decl.id.name, fields };
 }
@@ -423,7 +622,10 @@ function lowerInterface(
  * series. Fields are collected first so a method or the constructor may reference
  * a field declared after it.
  */
-function lowerClass(decl: ClassDeclaration, analysis: ModuleAnalysis): HirClass {
+function lowerClass(
+  decl: ClassDeclaration,
+  analysis: ModuleAnalysis,
+): HirClass {
   if (!decl.id) throw new UnsupportedError({ type: "anonymous class" });
   if (decl.superClass || (decl.implements && decl.implements.length > 0)) {
     throw new UnsupportedError({
@@ -444,7 +646,10 @@ function lowerClass(decl: ClassDeclaration, analysis: ModuleAnalysis): HirClass 
           type: `class field '${f.key.name}' without a type`,
         });
       }
-      return { name: f.key.name, ty: lowerType(f.typeAnnotation.typeAnnotation, structs) };
+      return {
+        name: f.key.name,
+        ty: lowerType(f.typeAnnotation.typeAnnotation, structs),
+      };
     });
 
   let ctor: HirFn | null = null;
@@ -463,16 +668,13 @@ function lowerClass(decl: ClassDeclaration, analysis: ModuleAnalysis): HirClass 
     }
   }
   if (!ctor) {
-    throw new UnsupportedError({ type: "class without an explicit constructor" });
-  }
-  // Throwing / error propagation inside a class is deferred (fallibility is
-  // analysed for free functions + the script only) — reject fail-loud rather than
-  // emit a `return Err`/`?` in a non-`Result` method.
-  if (hirHasThrowOrTry(ctor.body) || methods.some((m) => hirHasThrowOrTry(m.body))) {
     throw new UnsupportedError({
-      type: "throw / error propagation inside a class method or constructor (deferred)",
+      type: "class without an explicit constructor",
     });
   }
+  // Throwing / `?`-propagation inside methods and constructors is supported
+  // (series 023): the fallibility fixpoint types the method/ctor as `Result` and
+  // `?`-propagates fallible method/`new` calls.
   return { kind: "class", name, fields, ctor, methods };
 }
 
@@ -494,15 +696,24 @@ function lowerConstructor(
   if (!fn.body) {
     throw new UnsupportedError({ type: "constructor without a body" });
   }
+  const isFallible = analysis.fallibleCtors.has(className);
+  // Field-init assignments are folded into the returned struct literal; any other
+  // statement is a *guard* (`if (…) throw …`), allowed only in a fallible ctor
+  // (which returns `Result`), emitted as leading statements before the return.
   const assigned = new Map<string, HirExpr>();
+  const leading: HirStmt[] = [];
   for (const stmt of fn.body.body) {
     const init = constructorFieldInit(stmt, analysis);
-    if (!init) {
+    if (init) {
+      assigned.set(init.field, init.value);
+      continue;
+    }
+    if (!isFallible) {
       throw new UnsupportedError({
         type: "constructor body beyond `this.field = expr` initialization",
       });
     }
-    assigned.set(init.field, init.value);
+    leading.push(...lowerStatement(stmt, analysis, `${className}.constructor`));
   }
   if (assigned.size !== fields.length) {
     throw new UnsupportedError({
@@ -518,7 +729,27 @@ function lowerConstructor(
     }
     return { name: f.name, value };
   });
-  const structLit: HirExpr = { kind: "structLit", name: className, fields: litFields };
+  const structLit: HirExpr = {
+    kind: "structLit",
+    name: className,
+    fields: litFields,
+  };
+  if (isFallible) {
+    return {
+      kind: "fn",
+      name: "new",
+      isAsync: false,
+      params,
+      ret: resultType(
+        { kind: "struct", name: className },
+        programErrType(analysis),
+      ),
+      body: [
+        ...leading,
+        { kind: "return", value: { kind: "ok", value: structLit } },
+      ],
+    };
+  }
   return {
     kind: "fn",
     name: "new",
@@ -577,26 +808,22 @@ function lowerMethod(
     : UNIT;
   if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
   const body = lowerStatements(fn.body.body, analysis, `${className}.${name}`);
-  const recv: SelfRecv = astAssignsThis(fn.body) ? "refMut" : "ref";
+  // `&mut self` when the method mutates `self` — directly or transitively (it
+  // calls another self-mutating method); `analysis.mutatingMethods` is the
+  // fixpoint of both. A fallible method (throws or propagates) returns `Result`.
+  const recv: SelfRecv = analysis.mutatingMethods.has(name) ? "refMut" : "ref";
+  if (analysis.fallibleMethods.has(name)) {
+    return {
+      kind: "fn",
+      name,
+      isAsync: fn.async,
+      params,
+      ret: resultType(ret, programErrType(analysis)),
+      body: makeFallible(body, ret),
+      recv,
+    };
+  }
   return { kind: "fn", name, isAsync: fn.async, params, ret, body, recv };
-}
-
-/** Does an AST subtree assign to a `this.<field>` (→ a `&mut self` receiver)? */
-function astAssignsThis(node: unknown): boolean {
-  if (Array.isArray(node)) return node.some(astAssignsThis);
-  if (!isAstNode(node)) return false;
-  if (node.type === "AssignmentExpression") {
-    const left = (node as Record<string, unknown>).left;
-    if (isAstNode(left) && left.type === "MemberExpression") {
-      const object = (left as Record<string, unknown>).object;
-      if (isAstNode(object) && object.type === "ThisExpression") return true;
-    }
-  }
-  for (const key in node) {
-    if (key === "type") continue;
-    if (astAssignsThis((node as Record<string, unknown>)[key])) return true;
-  }
-  return false;
 }
 
 function lowerParam(
@@ -686,6 +913,8 @@ function lowerStatement(
     }
     case "ThrowStatement":
       return [lowerThrow(stmt as ThrowStatement, analysis)];
+    case "TryStatement":
+      return [lowerTry(stmt as TryStatement, analysis, scope)];
     default:
       throw new UnsupportedError(stmt);
   }
@@ -824,7 +1053,10 @@ function inlineUpdateInStmt(stmt: HirStmt, update: HirStmt): HirStmt {
         alt: stmt.alt ? inlineUpdateBeforeContinue(stmt.alt, update) : null,
       };
     case "block":
-      return { kind: "block", body: inlineUpdateBeforeContinue(stmt.body, update) };
+      return {
+        kind: "block",
+        body: inlineUpdateBeforeContinue(stmt.body, update),
+      };
     case "match":
       return {
         kind: "match",
@@ -1215,12 +1447,18 @@ function lowerCall(
   if (call.callee.type === "MemberExpression") {
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
-    return {
+    const methodName = (m.property as Identifier).name;
+    const methodExpr: HirExpr = {
       kind: "method",
       receiver: lowerExpr(m.object, analysis),
-      name: (m.property as Identifier).name,
+      name: methodName,
       args: call.arguments.map((a) => lowerExpr(a, analysis)),
     };
+    // A call to a fallible method propagates its error with `?`; the fallibility
+    // fixpoint guarantees the enclosing scope is itself `Result`.
+    return analysis.fallibleMethods.has(methodName)
+      ? { kind: "try", expr: methodExpr }
+      : methodExpr;
   }
 
   throw new UnsupportedError(call);
@@ -1236,7 +1474,11 @@ function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
     borrow: "owned",
     expr: lowerExpr(a, analysis),
   }));
-  return { kind: "call", callee: `${className}::new`, args };
+  const callExpr: HirExpr = { kind: "call", callee: `${className}::new`, args };
+  // A `new` of a class with a fallible constructor propagates with `?`.
+  return analysis.fallibleCtors.has(className)
+    ? { kind: "try", expr: callExpr }
+    : callExpr;
 }
 
 function lowerMember(

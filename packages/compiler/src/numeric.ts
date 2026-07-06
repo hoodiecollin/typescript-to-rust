@@ -37,7 +37,8 @@ export function refineNumerics(module: HirModule): HirModule {
     if (item.kind === "fn") {
       item.body = refineBody(item.params, item.body);
     } else if (item.kind === "class") {
-      if (item.ctor) item.ctor.body = refineBody(item.ctor.params, item.ctor.body);
+      if (item.ctor)
+        item.ctor.body = refineBody(item.ctor.params, item.ctor.body);
       for (const m of item.methods) m.body = refineBody(m.params, m.body);
     }
   }
@@ -82,6 +83,10 @@ function flattenStmts(stmts: HirStmt[]): HirStmt[] {
       out.push(...flattenStmts(stmt.body));
     } else if (stmt.kind === "match") {
       for (const arm of stmt.arms) out.push(...flattenStmts(arm.body));
+    } else if (stmt.kind === "tryCatch") {
+      out.push(...flattenStmts(stmt.tryBody));
+      out.push(...flattenStmts(stmt.catchBody));
+      if (stmt.finallyBody) out.push(...flattenStmts(stmt.finallyBody));
     }
   }
   return out;
@@ -327,8 +332,10 @@ function promoteIntegerMatches(module: HirModule): void {
     if (item.kind === "fn") {
       bodies.push({ fnName: item.name, params: item.params, stmts: item.body });
     } else if (item.kind === "class") {
-      if (item.ctor) bodies.push({ params: item.ctor.params, stmts: item.ctor.body });
-      for (const m of item.methods) bodies.push({ params: m.params, stmts: m.body });
+      if (item.ctor)
+        bodies.push({ params: item.ctor.params, stmts: item.ctor.body });
+      for (const m of item.methods)
+        bodies.push({ params: m.params, stmts: m.body });
     }
   }
   bodies.push({ params: [], stmts: module.main });
@@ -355,7 +362,11 @@ function promoteIntegerMatches(module: HirModule): void {
       } else if (paramIdx >= 0 && body.fnName) {
         // A free-function param: retype it and every integer-literal call arg.
         if (!isIntegerSafe(name, all)) continue;
-        const argLiterals = collectIntegerCallArgs(module, body.fnName, paramIdx);
+        const argLiterals = collectIntegerCallArgs(
+          module,
+          body.fnName,
+          paramIdx,
+        );
         if (argLiterals === null) continue; // a caller passes a non-integer arg
         const param = body.params[paramIdx];
         if (param) param.ty = { kind: "i64" };
@@ -415,7 +426,10 @@ function eachModuleExpr(module: HirModule, fn: (e: HirExpr) => void): void {
 }
 
 /** If `guard` is `<name> == <integer literal>`, return the literal value, else null. */
-function integerCaseLiteral(guard: HirExpr | null, name: string): number | null {
+function integerCaseLiteral(
+  guard: HirExpr | null,
+  name: string,
+): number | null {
   if (!guard || guard.kind !== "binary" || guard.op !== "==") return null;
   if (!isNamedIdent(guard.left, name)) return null;
   const r = guard.right;
@@ -435,7 +449,8 @@ function isIntegerSafe(name: string, stmts: HirStmt[]): boolean {
   for (const stmt of stmts) {
     eachStmtExpr(stmt, (e) => {
       if (e.kind === "binary") {
-        const hasName = isNamedIdent(e.left, name) || isNamedIdent(e.right, name);
+        const hasName =
+          isNamedIdent(e.left, name) || isNamedIdent(e.right, name);
         if (!hasName) return;
         if (e.op === "/") safe = false;
         else if (isFractionalLiteral(e.left) || isFractionalLiteral(e.right))
@@ -480,7 +495,11 @@ function mapStmtBodies(
 ): HirStmt {
   switch (stmt.kind) {
     case "if":
-      return { ...stmt, conseq: f(stmt.conseq), alt: stmt.alt ? f(stmt.alt) : null };
+      return {
+        ...stmt,
+        conseq: f(stmt.conseq),
+        alt: stmt.alt ? f(stmt.alt) : null,
+      };
     case "while":
     case "block":
     case "forIn":
@@ -513,7 +532,8 @@ function tryRange(
   if (!usize.has(counter)) return null; // index-driven counters only
 
   const cond = whileStmt.cond;
-  if (cond.kind !== "binary" || (cond.op !== "<" && cond.op !== "<=")) return null;
+  if (cond.kind !== "binary" || (cond.op !== "<" && cond.op !== "<="))
+    return null;
   if (!isNamedIdent(cond.left, counter)) return null;
   if (!isIntegerBound(cond.right, usize)) return null;
 
