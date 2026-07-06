@@ -344,17 +344,22 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
         `binary` operand from a `BINARY_PREC` table (left-assoc: right same-prec
         operand wraps). The full rust-ast.ts/printer.ts rewrite stays deferred
         (026 doc trigger: 027 method-chain nesting). Specs in precedence.test.ts.
-- [ ] Finish generalizing ownership. **First increment LANDED (series 034):**
-      use-after-move → `.clone()` — a post-lowering `refineMoves` pass
-      (`ownership.ts`, wired last in `lower()` beside `refineNumerics`/
-      `refineStrings`) clones every straight-line move site (`let b = a`, owned
-      call/ctor arg) that has a later textual use, leaving the last use a bare
-      move. Clone-able non-Copy only (`String`, `Vec`/`HashMap` of scalar/String;
-      structs excluded — no `Clone` derive yet). See
-      docs/work/_archive/034-ownership-clone-moves. **Still open:** loops (move
-      live across iterations), nested-scope shadowing, conditional moves (need the
-      CFG), struct `Clone`, and move-through-store. Read-only-string `&str` params
-      are done (`strings.ts`).
+- [ ] Finish generalizing ownership (**GitHub epic #1** — the backlog now lives in
+      issues, see CLAUDE.md). **CFG + liveness LANDED (series 037a):**
+      `refineMoves` → `refineOwnership` (`ownership.ts`) now runs real **backward
+      liveness over a control-flow graph** instead of the straight-line last-use
+      heuristic — a `.clone()` is placed at a move site iff the moved binding is
+      *live* after it, so **loop back-edges** (a move live across iterations) and
+      **branch joins** (dead-after-a-mutually-exclusive-branch → no needless clone)
+      are both correct. Still a *may*-analysis that only ever adds clones →
+      fail-loud preserved (unprovable shapes stay bare → cargo-loud). Supersedes
+      the 034 `refineMoves` heuristic; all 034 cases preserved
+      (`tests/ownership-cfg.test.ts`). **First increment was series 034**
+      (use-after-move → `.clone()`, straight-line; see
+      docs/work/_archive/034-ownership-clone-moves). **Still open (epic #1):**
+      struct `Clone`/`Debug` derives (**037b**, next), partial moves,
+      move-out-of-borrow, move-through-store. Read-only-string `&str` params are
+      done (`strings.ts`).
 - [ ] Extend the dialect validator further (default-deny landed in series 024 —
       rejects `any`/`unknown`, `for await`, `await using`, decorators, `abstract`,
       `declare`, and any unmodeled node type; **sync finite-yield generators now
