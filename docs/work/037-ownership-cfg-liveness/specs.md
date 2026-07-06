@@ -49,3 +49,39 @@ must. All existing `ownership-clone.test.ts` (034) cases stay green (regression)
 - The pass still only *adds* clones. Anything it can't prove stays a bare move that
   cargo rejects loudly — never a wrong value. (No new rejection is introduced; the
   engine strictly *reduces* rejections vs 034.)
+
+---
+
+# 037b — Specs: struct derives (`deriveClause`) + struct moves
+
+Structs join the movable set once they carry a `Clone` derive. A single
+`structDeriveClause` helper (`derives.ts`) is the source of truth for both the
+emitted `#[derive(...)]` and the ownership pass's struct-cloneability test.
+
+- **D1 — interface struct move + reuse is cloned + behaves.** An `interface`-typed
+  binding moved into another `let` and then read again clones at the move site; the
+  emitted struct carries `#[derive(Clone, Debug)]`. Behaves (both read their field).
+
+  ```ts
+  interface Point { x: number; y: number; }
+  const a: Point = { x: 1, y: 2 };
+  const b: Point = a;          // moves a → clone (a read below)
+  console.log(a.x);
+  console.log(b.x);            // → 1 / 1
+  ```
+
+- **D2 — class instance move + reuse is cloned + behaves.** Same for a `class`
+  (its struct half derives `Clone, Debug`); a moved-then-reused instance clones.
+
+- **D3 — the derive is present on generated structs.** Assert
+  `#[derive(Clone, Debug)]` on an emitted interface/class struct.
+
+- **D4 — struct last-use stays bare (no needless clone).** A struct move that is
+  genuinely the last use is not cloned.
+
+- **D5 — loop-carried struct move is cloned** (the 037a engine + 037b movability
+  compose): a struct moved inside a loop, live across the back-edge, clones.
+
+- **D6 — enum and error-class derives are unchanged** (regression): an `enum` keeps
+  `#[derive(Clone, Copy, PartialEq)]`; a custom error class keeps its hand-written
+  `Display`/`Debug`/`Error` impls (no data-struct derive line added).

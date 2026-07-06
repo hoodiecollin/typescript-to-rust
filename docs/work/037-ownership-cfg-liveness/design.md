@@ -158,15 +158,24 @@ here.
 
 ## Wiring
 
-`refineMoves` → **`refineOwnership`** in the same `lower()` slot (unchanged
-order — after `refineStrings`/`refineNumerics`, before `refineRc`/`refineArena`,
-so the directives still override). Public surface: the pass stays a single
-`HirModule → HirModule`. `src/ownership.ts` grows the CFG + liveness; the
-move-site collection and `cloneOf` helpers are reused.
+`refineMoves` → **`refineOwnership`**, now run **last** — after
+`refineRc`/`refineArena`, not before (a 037b change; see below). Public surface:
+the pass stays a single `HirModule → HirModule`. `src/ownership.ts` grows the CFG +
+liveness; the move-site collection and `cloneOf` helpers are reused.
 
 ```
-refineArena(refineRc(refineOwnership(refineStrings(refineNumerics(mod)))), …)
+refineOwnership(refineArena(refineRc(refineStrings(refineNumerics(mod))), …))
 ```
+
+**Why ownership runs last (037b).** Once structs are movable (037b), a class-typed
+alias `const b = a` in a `"use rc"` scope is a move the clone pass would rewrite to
+`a.clone()` — stomping the `Rc::clone` that `refineRc` produces. Running ownership
+*after* the directive passes means it sees the HIR with the directives' ownership
+model already imposed: an `rc` alias is already `Rc::clone` (not a bare move) and an
+arena `Vec` is already un-annotated (`ty: null`, so not movable), so the clone pass
+leaves both alone and only fills the remaining plain-move gaps. (037a shipped with
+ownership *before* the directives; that was safe only because structs weren't yet
+movable — 037b surfaced the ordering and fixed it.)
 
 ## Fail-loud contract (unchanged, restated)
 
