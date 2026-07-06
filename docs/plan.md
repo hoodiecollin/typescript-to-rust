@@ -273,6 +273,49 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   capture and `Fn`/`FnMut` traits); `async` arrows; capturing top-level arrows (no
   capture analysis — caught by cargo); multiple declarators; destructuring/rest
   params.
+- **Errors — `try`/`catch`/`finally`, the recovery side** (`src/ast.ts`,
+  `src/hir.ts`, `src/lower.ts`, `src/emitter.ts`, `src/analysis.ts`):
+  `08_errors/02_try_catch` compiles **and** behaves (`ran\ndone\ncaught\ndone`).
+  A `try` block lowers to a `Result`-returning **IIFE closure** (`(|| ->
+  Result<(), E> { … Ok(()) })()`) so its `?`/`throw`s short-circuit *to the
+  closure*; `catch (e)` → `if let Err(e) = …` (`Err(_)` for a binding-less
+  `catch`); `finally` → statements emitted after. The key analysis change is
+  **fallibility shielding**: `analyzeFallible`'s walk skips a `try` block that has
+  a handler, so the enclosing fn is *not* fallible (`fn attempt(n: f64)`, no
+  `Result`) — the error is caught, not propagated. Statement-level recovery only.
+  **Deferred** (each its own future series): `return`/`break`/`continue` inside
+  `try`/`catch` (value-yielding `try`/`catch` — the closure would swallow the
+  jump); `try`/`finally` with no handler; a re-`throw` in `catch` alongside a
+  `finally`; typed/discriminated catch bindings.
+- **Errors — custom error types → `Box<dyn Error>`** (`src/hir.ts`,
+  `src/lower.ts`, `src/emitter.ts`, `src/analysis.ts`):
+  `08_errors/03_custom_error` compiles **and** behaves (`6`). A `class X extends
+  Error { constructor(message: string) { super(message); } }` (that exact shape)
+  → a `struct X { message: String }` with an associated `new` and
+  `Display`/`Debug`/`std::error::Error` impls (all fully-qualified, no `use`
+  prelude). The **program error type** upgrades from `String` to `Box<dyn
+  std::error::Error>` for *every* fallible fn iff any custom error class is
+  declared (`programErrType`, uniform so `?` composes); otherwise `String` is
+  unchanged (013/021 output preserved). `throw new X(msg)` → `Err(Box::new(X::new(
+  msg)))`; a plain `throw new Error(msg)` / string under a boxed program converts
+  with `.into()`. Custom error classes are tracked in `analysis.errorClasses`,
+  **excluded** from `structs`. **Deferred** (each its own future series):
+  `instanceof`-based catch discrimination (downcast); error classes with extra
+  fields/methods; a synthesized error `enum`; deep hierarchies / `cause`.
+- **Errors — `throw`/propagation in class methods & constructors** (`src/lower.ts`,
+  `src/analysis.ts`): `08_errors/04_method_throw` compiles **and** behaves
+  (`paid\n70`). `analyzeFallible` is generalised to a fixpoint over **all** scopes
+  — free fns, script, each `Class.method`, each ctor — so a method/ctor that
+  throws or transitively calls a fallible fn/method/`new` is fallible; a fallible
+  method → `fn m(&self…) -> Result<T, E>`, a fallible ctor → `fn new(…) ->
+  Result<Name, E>` (guards allowed before the field-inits; the struct return wraps
+  in `Ok`). Fallible method/`new` **calls** propagate with `?` (`self.withdraw(
+  amount)?`, `Account::new(100)?`), keyed name-based (`analysis.fallibleMethods` /
+  `fallibleCtors`). `mutatingMethods` is now a **fixpoint** too, so a method that
+  calls a self-mutating method (`pay` → `this.withdraw()`) is itself `&mut self`.
+  The old throw-in-class rejection is removed. **Deferred**: cross-class same-name
+  method resolution (name-based can over-`?`; cargo backstops); `try`/`catch`
+  inside a method; fallible getters/setters/static/`async` methods.
 
 **Next** (order reflects decisions made 2026-07-01)
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
@@ -289,15 +332,18 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       optimizations or edge cases over today's correct lowerings — not blockers.
       (The C-`for` `continue` desugar shipped in series 018; integer literal-pattern
       `match` in series 019; index-driven `for i in a..b` ranges in series 020.)
-- [ ] `try`/`catch`/`finally` — the recovery side of errors (this slice shipped
-      the propagation side: `throw` → `Result` + `?`). Catch a `Result` into a
-      `match`/`if let`/`unwrap_or`; then custom error types and throw-in-method.
+- [ ] Value-yielding `try`/`catch` — a `try`/`catch` that computes a function's
+      return value (the closure's `Ok` payload carries the returned value; both
+      arms yield it), plus `try`/`finally` without a handler and `instanceof`-based
+      catch discrimination (downcast). Series 021 shipped statement-level recovery.
 - [ ] Finish all deferred work — sweep the fail-loud deferrals accumulated across
       the shipped slices (arrows: `let`/value-position/`async`/capturing arrows;
       async: un-awaited calls, `await` of a sync call, `async` methods, `Promise`
-      combinators; errors: `try`/`catch`, custom error types, throw-in-method;
-      classes/interfaces/records/control-flow deferrals) rather
-      than starting new fixture areas. `09_modules` (`export`) is now the only
+      combinators; errors: value-yielding `try`/`catch`, catch discrimination,
+      error enums; classes/interfaces/records/control-flow deferrals) rather
+      than starting new fixture areas. The error trio landed 2026-07-06 —
+      `try`/`catch`/`finally` (021), custom error types → `Box<dyn Error>` (022),
+      throw-in-method/ctor (023). `09_modules` (`export`) is now the only
       `test.todo` fixture (backlogged).
 
 The `tests/fixtures/**` tree enumerates these as `test.todo` targets; each flips
