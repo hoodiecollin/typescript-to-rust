@@ -326,13 +326,46 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   inside a method; fallible getters/setters/static/`async` methods.
 
 **Next** (order reflects decisions made 2026-07-01)
+- [ ] Two gaps surfaced by **series 030** (fixture-coverage expansion) remain
+      open. The three *fail-loud holes* it surfaced — (A) integer-arg retyping
+      across call boundaries, (C) Rust-keyword identifier hygiene, (E) HashMap
+      index-assignment → `.insert` — are **closed in series 031**
+      (docs/work/_archive/031-fail-loud-lowering-holes): each now compiles+behaves
+      for the common case and fails loud (`UnsupportedError`) on the residual
+      instead of emitting broken Rust. Still open:
+      - **(B)** nested/inferred struct literals — already fail-loud; a feature gap
+        (011 follow-up). Series 032 / task #20.
+      - **(D)** `ParenthesizedExpression` — already fail-loud; *masks* the 026
+        precedence gap (parens + precedence-aware printing must land together; see
+        026 doc). Folds into 026.
 - [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
       `.clone()`, move-through-store) and nested-scope shadowing (blocked on
       control flow — no block scopes exist yet). Read-only-string `&str` params
       are done (`strings.ts`).
-- [ ] Extend the dialect validator (`validate.ts` exists; rejects `any`/`unknown`):
+- [ ] Extend the dialect validator further (default-deny landed in series 024 —
+      rejects `any`/`unknown`, generators, `for await`, `using`, decorators,
+      `abstract`, `declare`, and any unmodeled node type): still open are
       missing-annotation enforcement (with the trivial-literal exception), class
       `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
+- [ ] Formal plans drafted (docs/work/025–029, design-only, spec-first when
+      picked up). **Recommended sequence** (decided 2026-07-06):
+      1. **025** esoteric *support* — `using`→`Drop` first, then param-properties,
+         `enum`, sync generators→`Iterator`. Independent, ready. Async-iteration
+         deferred; **decorators permanently rejected** (stay `DialectError`).
+      2. **closures** — value-position arrows (`xs.map(x => …)`). The hard gate
+         for 027; likely an existing deferred arrow item. Land before 027's
+         iteration methods.
+      3. **027 + 029** — `tslib` (hybrid native-vs-`tslib` routing) once closures
+         exist; the no-closure subset (array access, string, Map/Set) can precede
+         the gate. 029 catalog is always ready to refine.
+      4. **`"use panic"`** (part of 028) — independent, ripe now (inverse of the
+         021–023 fallibility fixpoint); drop in whenever, even ahead of 027.
+      5. **026** Rust-AST + pretty-printer — *downstream of 027* by dependency
+         order (it cleans up 027's nested/chained output); build signal is an
+         oracle-caught precedence defect on a fixture we write, not a schedule.
+      6. **`"use rc"` / `"use arena"`** (rest of 028) — after the ownership/borrow
+         pass matures (`"use rc"` bridges its give-ups to `Rc<RefCell>`;
+         `"use arena"` = bumpalo, needs lifetime plumbing + escape analysis).
 - [ ] Control-flow refinements (deferred, revisit as needed): or-pattern
       (`1 | 2 =>`) and string/range literal `match` arms; native `continue`-in-range,
       downward/non-unit-step and bound-driven `i64` ranges; for…of element
