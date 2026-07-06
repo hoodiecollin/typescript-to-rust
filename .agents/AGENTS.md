@@ -1,5 +1,24 @@
 # Custom Rules
 
+## The backlog lives in GitHub Issues
+
+"What to do next" is `gh issue list` on `hoodiecollin/typescript-to-rust`, **not**
+`docs/plan.md`'s "Next" section (that's now the historical status log). See the
+root `CLAUDE.md` for the label legend. Each issue body carries its task checklist;
+`needs-design` issues start with a design + impl-plan step, `has-design` issues
+name an existing `docs/work/**` doc to follow.
+
+## Get Collin's input before designing dialect-shape / deferral-graduation work
+
+Many "graduate a fail-loud deferral" issues (label `deferral-graduation`, and
+especially `needs-user-input`) are **dialect-semantics decisions, not mechanical
+work** — how nullability, inheritance, error enums, module boundaries, etc. map
+onto Rust. For these: investigate, draft the **options with tradeoffs**, then
+**pause and ask Collin for a decision before writing the final `design.md` or any
+implementation.** A wrong guess ripples through the validator, HIR, and emitter and
+is expensive to unwind. Purely mechanical slices (no new dialect surface, no
+semantics choice) can proceed straight through the spec-first flow below.
+
 ## Development Flow: TDD against the verification oracle
 
 This project uses strict **Test-Driven Development**, but the test oracle is a
