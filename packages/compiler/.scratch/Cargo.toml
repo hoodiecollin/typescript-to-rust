@@ -17,11 +17,20 @@ publish = false
 
 [dependencies]
 ts-primitives = { path = "../../../crates/ts-primitives" }
+# tslib owns JS-behavioral fidelity for quirk-heavy library methods the emitter
+# routes to it (series 027) — `Array.at` negative indexing, `String.padStart`…
+# Present-but-unused when generated output stays native (costs nothing at check).
+tslib = { path = "../../../crates/tslib" }
 # Async lowering targets tokio: TS `async function` → `async fn`, and the
 # generated `main` becomes `#[tokio::main]`. Pinned so the offline cache stays
 # warm; the harness fetches it online on a cold cache. Unused by non-async
 # output (a present-but-unused dependency costs nothing at check time).
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# bumpalo backs the `"use arena"` directive (series 028c): a `"use arena"` scope
+# builds its `Vec`s from a bump arena (`bumpalo::vec![in &arena; …]`), freed all
+# at once at scope exit. `collections` enables `bumpalo::vec!`/`bumpalo::collections::Vec`.
+# Present-but-unused by non-arena output (costs nothing at check time).
+bumpalo = { version = "3", features = ["collections"] }
 
 [lib]
 name = "ttr_scratch"

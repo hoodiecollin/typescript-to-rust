@@ -1,0 +1,10 @@
+# tslib — the JS-behavioral-fidelity runtime the translator targets for methods
+# whose semantics diverge from the obvious Rust (series 027). The emitter routes
+# a *quirk-heavy* method to a `tslib` symbol (fn-first) instead of open-coding the
+# behavior inline; clean-mapping methods still emit native idiomatic Rust.
+[package]
+name = "tslib"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
