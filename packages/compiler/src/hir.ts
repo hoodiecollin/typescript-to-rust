@@ -50,6 +50,18 @@ export type RustType =
    * class is declared (series 022), so `?` composes across every fallible fn.
    */
   | { kind: "boxError" }
+  /**
+   * `Rc<RefCell<inner>>` — shared, interior-mutable ownership (series 028b, the
+   * `"use rc"` directive). The sanctioned Option-B fallback for shared mutable
+   * aliasing the idiomatic borrow model can't express; produced only by the
+   * `refineRc` pass over a `"use rc"` scope.
+   */
+  | { kind: "rc"; inner: RustType }
+  /**
+   * `impl Iterator<Item = item>` — the return type of a sync generator
+   * (`function*`, series 025d). Only valid in return position (an opaque type).
+   */
+  | { kind: "implIterator"; item: RustType }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -73,7 +85,11 @@ export type HirExpr =
   | { kind: "string"; value: string }
   | { kind: "bool"; value: boolean }
   | { kind: "ident"; name: string }
+  /** A Rust path like `Color::Red` (an enum variant). Segments are `::`-joined. */
+  | { kind: "path"; segments: string[] }
   | { kind: "binary"; op: string; left: HirExpr; right: HirExpr }
+  /** A prefix unary: `-x` (negation) or `!x` (logical not). */
+  | { kind: "unary"; op: string; operand: HirExpr }
   | { kind: "assign"; op: string; target: HirExpr; value: HirExpr }
   /** Direct call to a known function; args carry their borrow. */
   | { kind: "call"; callee: string; args: HirArg[] }
@@ -102,7 +118,36 @@ export type HirExpr =
   /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */
   | { kind: "try"; expr: HirExpr }
   /** `expr.await` — suspend on a future (a call to an `async fn`) for its value. */
-  | { kind: "await"; expr: HirExpr };
+  | { kind: "await"; expr: HirExpr }
+  /**
+   * `xs.map(p => body)` → `xs.iter().map(|&p| body).collect::<Vec<_>>()` (027-cl).
+   * The `&p` pattern copies the element out of the `.iter()` borrow (Copy elems).
+   */
+  | { kind: "iterMap"; receiver: HirExpr; param: string; body: HirExpr }
+  /**
+   * `xs.filter(p => body)` →
+   * `xs.iter().filter(|&&p| body).copied().collect::<Vec<_>>()` (027-cl).
+   */
+  | { kind: "iterFilter"; receiver: HirExpr; param: string; body: HirExpr }
+  /**
+   * `Rc::new(RefCell::new(inner))` — construct a shared, interior-mutable value
+   * (series 028b). Wraps a class constructor call in a `"use rc"` scope.
+   */
+  | { kind: "rcNew"; inner: HirExpr }
+  /**
+   * `Rc::clone(&expr)` — a new shared handle to the same value (series 028b).
+   * Replaces a bare-move alias (`const b = a`) of an `rc` binding, so both
+   * handles stay live and observe each other's interior mutations.
+   */
+  | { kind: "rcClone"; expr: HirExpr }
+  /** `bumpalo::Bump::new()` — a bump arena for a `"use arena"` scope (series 028c). */
+  | { kind: "bumpNew" }
+  /**
+   * `bumpalo::vec![in &<arena>; <elements>]` — a `Vec` built from a bump arena
+   * (series 028c). Replaces a heap `array` literal in a `"use arena"` scope; the
+   * arena binding name is `arena`.
+   */
+  | { kind: "bumpVec"; arena: string; elements: HirExpr[] };
 
 // ── Statements ───────────────────────────────────────────────────────────────
 
@@ -156,8 +201,12 @@ export type HirStmt =
   | { kind: "match"; disc: HirExpr; arms: HirMatchArm[] }
   | { kind: "break" }
   | { kind: "continue" }
-  /** `throw new Error(msg)` → `return Err(value);` (`value` is the message). */
-  | { kind: "throw"; value: HirExpr }
+  /**
+   * `throw new Error(msg)` → `return Err(value);` (`value` is the message). Under
+   * a `"use panic"` scope (series 028a) `panic` is set and it emits
+   * `panic!("{}", value);` instead — no `Result`, no propagation.
+   */
+  | { kind: "throw"; value: HirExpr; panic?: boolean }
   /**
    * `try`/`catch`/`finally` — the recovery side of errors. Emitted as a
    * `Result`-returning IIFE closure (the `tryBody`, whose fallible calls/`throw`s
@@ -227,6 +276,12 @@ export interface HirClass {
   fields: { name: string; ty: RustType }[];
   ctor: HirFn | null;
   methods: HirFn[];
+  /**
+   * The lowered body of a `[Symbol.dispose]()` method (series 025), emitted as
+   * `impl Drop for Name { fn drop(&mut self) { … } }` — RAII for a `using` binding.
+   * `null` when the class is not disposable.
+   */
+  dispose?: HirStmt[] | null;
 }
 
 /**
@@ -240,8 +295,19 @@ export interface HirErrorClass {
   name: string;
 }
 
-/** A top-level Rust item: a function, a struct, a class, or a custom error type. */
-export type HirItem = HirFn | HirStruct | HirClass | HirErrorClass;
+/**
+ * A C-like `enum` (series 025). Variants are unit-only; `disc` carries an
+ * explicit discriminant (`A = 1`) when the source gave one, else `null`. Emitted
+ * with `#[derive(Clone, Copy, PartialEq)]` so a `switch`/guard can compare it.
+ */
+export interface HirEnum {
+  kind: "enum";
+  name: string;
+  variants: { name: string; disc: number | null }[];
+}
+
+/** A top-level Rust item: a function, a struct, a class, an enum, or an error type. */
+export type HirItem = HirFn | HirStruct | HirClass | HirErrorClass | HirEnum;
 
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level

@@ -250,6 +250,14 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
       eachExpr(e.left, fn);
       eachExpr(e.right, fn);
       break;
+    case "unary":
+      eachExpr(e.operand, fn);
+      break;
+    case "iterMap":
+    case "iterFilter":
+      eachExpr(e.receiver, fn);
+      eachExpr(e.body, fn);
+      break;
     case "assign":
       eachExpr(e.target, fn);
       eachExpr(e.value, fn);
@@ -298,6 +306,7 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
     case "string":
     case "bool":
     case "ident":
+    case "path":
       break;
   }
 }

@@ -17,6 +17,7 @@ import type { Program } from "./ast";
 import type {
   HirArg,
   HirClass,
+  HirEnum,
   HirErrorClass,
   HirExpr,
   HirFn,
@@ -148,21 +149,32 @@ export function emitModule(mod: HirModule): string {
     const asyncKw = mod.mainAsync ? "async " : "";
     parts.push(`${attr}${asyncKw}fn main()${ret} {\n${body}\n}`);
   }
-  const prelude = usesHashMap(mod) ? "use std::collections::HashMap;\n\n" : "";
+  // Std imports, deep-scanned from the HIR (the emitter is the sole producer of
+  // each, so each scan is exact). `Rc`/`RefCell` travel together (`"use rc"`).
+  const imports: string[] = [];
+  if (usesKind(mod, "hashmap")) imports.push("use std::collections::HashMap;");
+  if (
+    usesKind(mod, "rc") ||
+    usesKind(mod, "rcNew") ||
+    usesKind(mod, "rcClone")
+  ) {
+    imports.push("use std::rc::Rc;", "use std::cell::RefCell;");
+  }
+  const prelude = imports.length > 0 ? `${imports.join("\n")}\n\n` : "";
   return `${prelude}${parts.join("\n\n")}\n`;
 }
 
 /**
- * Does the module use a `HashMap` anywhere (a `hashmap` `RustType` or `HirExpr`)?
- * A generic deep-scan — every HIR node is a plain object tagged with `kind`, so
- * finding any `kind: "hashmap"` tells us to prepend the std import. The emitter is
- * the sole producer of `HashMap`, so this is exact.
+ * Does any HIR node in the tree carry `kind: <kind>`? A generic deep-scan — every
+ * HIR node is a plain object tagged with `kind` — used to decide which std `use`
+ * imports the module needs (`HashMap`, `Rc`/`RefCell`). The emitter is the sole
+ * producer of each, so the scan is exact.
  */
-function usesHashMap(node: unknown): boolean {
-  if (Array.isArray(node)) return node.some(usesHashMap);
+function usesKind(node: unknown, kind: string): boolean {
+  if (Array.isArray(node)) return node.some((n) => usesKind(n, kind));
   if (node !== null && typeof node === "object") {
-    if ((node as { kind?: string }).kind === "hashmap") return true;
-    return Object.values(node).some(usesHashMap);
+    if ((node as { kind?: string }).kind === kind) return true;
+    return Object.values(node).some((n) => usesKind(n, kind));
   }
   return false;
 }
@@ -179,7 +191,25 @@ function emitItem(item: HirItem): string {
       return emitClass(item);
     case "errorClass":
       return emitErrorClass(item);
+    case "enum":
+      return emitEnum(item);
   }
+}
+
+/**
+ * A C-like `enum` → `#[derive(Clone, Copy, PartialEq)]\nenum Name { A, B = 1, … }`.
+ * The derives make the value copyable and comparable (a `switch` guard needs
+ * `PartialEq`); an explicit `disc` renders as `= <n>`.
+ */
+function emitEnum(e: HirEnum): string {
+  const variants = e.variants
+    .map((v) =>
+      indent(
+        v.disc === null ? `${rid(v.name)},` : `${rid(v.name)} = ${v.disc},`,
+      ),
+    )
+    .join("\n");
+  return `#[derive(Clone, Copy, PartialEq)]\nenum ${rid(e.name)} {\n${variants}\n}`;
 }
 
 /**
@@ -217,12 +247,22 @@ function emitErrorClass(e: HirErrorClass): string {
   ].join("\n");
 }
 
-/** A `class` → its `struct` definition followed by an `impl` block. */
+/** A `class` → its `struct` definition, an `impl` block, and (if any) `Drop`. */
 function emitClass(c: HirClass): string {
   const struct = emitStruct({ kind: "struct", name: c.name, fields: c.fields });
   const fns = [c.ctor, ...c.methods].filter((f): f is HirFn => f !== null);
   const body = fns.map((f) => indent(emitFn(f))).join("\n");
-  return `${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`;
+  const parts = [`${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`];
+  // A `[Symbol.dispose]` method → `impl Drop` (RAII for `using`, series 025).
+  if (c.dispose) {
+    const dropBody = c.dispose
+      .map((s) => indent(indent(emitStmt(s))))
+      .join("\n");
+    parts.push(
+      `impl Drop for ${rid(c.name)} {\n${INDENT}fn drop(&mut self) {\n${dropBody}\n${INDENT}}\n}`,
+    );
+  }
+  return parts.join("\n\n");
 }
 
 /** `struct Name {\n    field: Ty,\n …\n}` (or `Name {}` when field-less). */
@@ -296,8 +336,11 @@ function emitStmt(stmt: HirStmt): string {
     case "continue":
       return "continue;";
     case "throw":
-      // A `throw` in the dialect is a propagated error: `return Err(msg);`.
-      return `return Err(${emitExpr(stmt.value)});`;
+      // Default: a propagated error `return Err(msg);`. Under `"use panic"`
+      // (028a) it aborts with the message instead — no `Result`.
+      return stmt.panic
+        ? `panic!("{}", ${emitExpr(stmt.value)});`
+        : `return Err(${emitExpr(stmt.value)});`;
     case "tryCatch": {
       // The `try` block is a `Result`-returning IIFE so its `?`/`throw`s
       // short-circuit to the closure; `catch` matches on the result; `finally`
@@ -334,6 +377,52 @@ const BINARY_OPS: Record<string, string> = {
   "!=": "!=",
 };
 
+/**
+ * Rust binary-operator precedence (higher binds tighter) — the table that drives
+ * automatic parenthesization (series 026). Only relative ordering matters. The
+ * `===`/`!==` source ops share their `==`/`!=` level. A non-binary operand is
+ * atomic (effectively infinite precedence), so it never needs wrapping.
+ */
+const BINARY_PREC: Record<string, number> = {
+  "*": 7,
+  "/": 7,
+  "%": 7,
+  "+": 6,
+  "-": 6,
+  "<": 3,
+  ">": 3,
+  "<=": 3,
+  ">=": 3,
+  "==": 2,
+  "!=": 2,
+  "===": 2,
+  "!==": 2,
+  // Logical operators bind looser than comparison/equality (Rust: `&&` above
+  // `||`, both below `==`). `||` at 0 coincides with the atomic fallback, which
+  // is harmless — every emitted binary op is in this table.
+  "&&": 1,
+  "||": 0,
+};
+
+/**
+ * Emit a binary operand, parenthesizing it when precedence/associativity demand
+ * it. Rust binary operators are left-associative, so a same-precedence operand on
+ * the **right** must be wrapped (`a - (b - c)`), while the left may stay bare
+ * (`(a - b) - c` = `a - b - c`). A non-binary operand is atomic → never wrapped.
+ */
+function emitOperand(
+  child: HirExpr,
+  parentPrec: number,
+  side: "l" | "r",
+): string {
+  const s = emitExpr(child);
+  if (child.kind !== "binary") return s;
+  const childPrec = BINARY_PREC[child.op] ?? 0;
+  const needsParen =
+    side === "l" ? childPrec < parentPrec : childPrec <= parentPrec;
+  return needsParen ? `(${s})` : s;
+}
+
 function emitExpr(expr: HirExpr): string {
   switch (expr.kind) {
     case "number":
@@ -349,8 +438,21 @@ function emitExpr(expr: HirExpr): string {
       return expr.value ? "true" : "false";
     case "ident":
       return rid(expr.name);
-    case "binary":
-      return `${emitExpr(expr.left)} ${BINARY_OPS[expr.op] ?? expr.op} ${emitExpr(expr.right)}`;
+    case "path":
+      return expr.segments.map(rid).join("::");
+    case "binary": {
+      const prec = BINARY_PREC[expr.op] ?? 0;
+      const op = BINARY_OPS[expr.op] ?? expr.op;
+      return `${emitOperand(expr.left, prec, "l")} ${op} ${emitOperand(expr.right, prec, "r")}`;
+    }
+    case "unary": {
+      // A prefix unary binds tighter than any binary, so a binary/unary operand
+      // needs parens (`-(a + b)`); an atomic operand does not.
+      const inner = emitExpr(expr.operand);
+      const wrap =
+        expr.operand.kind === "binary" || expr.operand.kind === "unary";
+      return `${expr.op}${wrap ? `(${inner})` : inner}`;
+    }
     case "assign":
       return `${emitExpr(expr.target)} ${expr.op} ${emitExpr(expr.value)}`;
     case "array":
@@ -392,6 +494,18 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.expr)}?`;
     case "await":
       return `${emitExpr(expr.expr)}.await`;
+    case "iterMap":
+      return `${emitExpr(expr.receiver)}.iter().map(|&${rid(expr.param)}| ${emitExpr(expr.body)}).collect::<Vec<_>>()`;
+    case "iterFilter":
+      return `${emitExpr(expr.receiver)}.iter().filter(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied().collect::<Vec<_>>()`;
+    case "rcNew":
+      return `Rc::new(RefCell::new(${emitExpr(expr.inner)}))`;
+    case "rcClone":
+      return `Rc::clone(&${emitExpr(expr.expr)})`;
+    case "bumpNew":
+      return "bumpalo::Bump::new()";
+    case "bumpVec":
+      return `bumpalo::vec![in &${rid(expr.arena)}; ${expr.elements.map(emitExpr).join(", ")}]`;
   }
 }
 
@@ -445,6 +559,10 @@ function emitType(ty: RustType): string {
       return `Result<${emitType(ty.ok)}, ${emitType(ty.err)}>`;
     case "boxError":
       return "Box<dyn std::error::Error>";
+    case "rc":
+      return `Rc<RefCell<${emitType(ty.inner)}>>`;
+    case "implIterator":
+      return `impl Iterator<Item = ${emitType(ty.item)}>`;
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
   }
