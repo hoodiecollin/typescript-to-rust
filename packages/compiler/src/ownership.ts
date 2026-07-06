@@ -1,21 +1,30 @@
 /**
- * Ownership refinement — inter-procedural moves, first increment (series 034):
- * **use-after-move → `.clone()`**.
+ * Ownership refinement — inter-procedural moves via **CFG + backward liveness**
+ * (series 037a; supersedes the straight-line 034 heuristic).
  *
- * A post-lowering HIR → HIR pass (like `numeric.ts`/`strings.ts`). Option A emits
- * plain moves; a non-Copy value that is *moved* (bound to another `let`, or
- * passed as an owned call/ctor argument) and then **used again** would be a Rust
- * E0382 (use of moved value). This pass inserts a `.clone()` at every move site
- * that has a later use in the same body, leaving the textually-last use a bare
- * move (no needless clone).
+ * Option A emits plain moves. A non-Copy value that is *moved* (bound to another
+ * `let`, or passed as an owned call/ctor argument) and then **used again** is a
+ * Rust `E0382` (use of moved value). This pass inserts a `.clone()` at exactly the
+ * move sites whose moved-from binding is still **live** after the move — where
+ * "live" is computed by real liveness over the body's control-flow graph, so a
+ * loop back-edge (a use reached next iteration) and a branch join (a use on some
+ * path after the merge) are both accounted for. The last dynamic use on every path
+ * is left a bare move — no needless clone.
  *
- * Scope of this increment: straight-line reasoning over a body in document order.
- * Only `Clone`-able non-Copy types participate — `String` and `Vec`/`HashMap` of
- * Clone-able elements. Structs are excluded (no `#[derive(Clone)]` yet); a move of
- * a non-cloneable value is left bare and the oracle (cargo) flags it — loud, never
- * a silent miscompile. Loops (a move live across iterations) and nested-scope
- * shadowing are deferred to later increments; being conservative there means a
- * cargo error, not a wrong value.
+ * The engine is syntax-directed: the HIR is structured (the only non-lexical edges
+ * are `break`/`continue`, both lexically scoped to the nearest loop), so the CFG's
+ * edges are encoded directly in the per-statement transfer functions rather than a
+ * materialised basic-block graph. Loops are solved to a fixpoint (monotone, finite
+ * lattice bounded by the movable set → terminates). Liveness is a *may*-analysis
+ * (union at joins), so it over-approximates live-ness — it errs toward *more*
+ * clones, never fewer. Worst case is therefore a needless clone (slower, still
+ * correct) or, for a shape it still can't prove (structs without a Clone derive,
+ * partial moves), a bare move that cargo rejects **loudly** — never a wrong value.
+ * This preserves the project's #1 fail-loud contract.
+ *
+ * Scope of this slice: `Clone`-able non-Copy types only — `String` and
+ * `Vec`/`HashMap` of scalar/`String`. Structs join the movable set in 037b (once
+ * they carry a `Clone` derive). Partial moves / move-out-of-borrow are deferred.
  */
 
 import type {
@@ -27,7 +36,7 @@ import type {
   RustType,
 } from "./hir";
 
-export function refineMoves(module: HirModule): HirModule {
+export function refineOwnership(module: HirModule): HirModule {
   for (const item of module.items) {
     if (item.kind === "fn") {
       refineBody(item.params, item.body);
@@ -77,191 +86,496 @@ function cloneOf(e: HirExpr): HirExpr {
   return { kind: "method", receiver: e, name: "clone", args: [] };
 }
 
-interface MoveSite {
-  name: string;
-  seq: number;
-  /** Rewrite this site's operand to a `.clone()`. */
-  apply: () => void;
+// ── Set helpers ──────────────────────────────────────────────────────────────
+
+type Live = Set<string>;
+
+function union(...sets: Live[]): Live {
+  const out: Live = new Set();
+  for (const s of sets) for (const n of s) out.add(n);
+  return out;
 }
 
-/**
- * Walk a body in document order. `movable` holds the names whose type is a
- * cloneable non-Copy (params + `let` bindings). For each such name we record the
- * sequence number of its last occurrence and every move site; a move site with a
- * later occurrence is then cloned.
- */
+function setEq(a: Live, b: Live): boolean {
+  if (a.size !== b.size) return false;
+  for (const n of a) if (!b.has(n)) return false;
+  return true;
+}
+
+// ── Body driver ──────────────────────────────────────────────────────────────
+
 function refineBody(params: HirParam[], body: HirStmt[]): void {
-  const movable = new Set<string>();
+  const movable: Live = new Set();
   for (const p of params) if (isCloneableMovable(p.ty)) movable.add(p.name);
   collectLetBindings(body, movable);
   if (movable.size === 0) return;
 
+  // liveOut per statement — the CFG liveness solution.
+  const liveOut = new Map<HirStmt, Live>();
+  liveInOfSeq(
+    body,
+    new Set(),
+    { brk: new Set(), cont: new Set() },
+    movable,
+    liveOut,
+  );
+
+  placeSeq(body, movable, liveOut);
+}
+
+// ── Backward liveness ────────────────────────────────────────────────────────
+
+/** Loop-jump targets: the live-sets a `break` / `continue` transfers to. */
+interface JumpCtx {
+  brk: Live;
+  cont: Live;
+}
+
+/**
+ * Process a statement list backward, returning its `liveIn`. Records `liveOut`
+ * (the live-set flowing *out* of each statement toward its successor) into `map`
+ * for every statement, including nested ones.
+ */
+function liveInOfSeq(
+  stmts: HirStmt[],
+  liveAfter: Live,
+  ctx: JumpCtx,
+  movable: Live,
+  map: Map<HirStmt, Live>,
+): Live {
+  let live = liveAfter;
+  for (let i = stmts.length - 1; i >= 0; i--) {
+    const s = stmts[i];
+    if (s) live = transfer(s, live, ctx, movable, map);
+  }
+  return live;
+}
+
+function transfer(
+  s: HirStmt,
+  liveAfter: Live,
+  ctx: JumpCtx,
+  movable: Live,
+  map: Map<HirStmt, Live>,
+): Live {
+  switch (s.kind) {
+    case "let": {
+      map.set(s, liveAfter);
+      const out = new Set(liveAfter);
+      if (movable.has(s.name)) out.delete(s.name); // the binding (re)defines its name
+      return union(exprUses(s.init, movable), out);
+    }
+    case "expr": {
+      map.set(s, liveAfter);
+      if (s.expr.kind === "assign")
+        return assignTransfer(s.expr, liveAfter, movable);
+      return union(exprUses(s.expr, movable), liveAfter);
+    }
+    case "return": {
+      map.set(s, new Set()); // a return jumps to the body exit — nothing lives after
+      return s.value ? exprUses(s.value, movable) : new Set();
+    }
+    case "throw": {
+      map.set(s, new Set());
+      return exprUses(s.value, movable);
+    }
+    case "break": {
+      map.set(s, new Set(ctx.brk));
+      return new Set(ctx.brk);
+    }
+    case "continue": {
+      map.set(s, new Set(ctx.cont));
+      return new Set(ctx.cont);
+    }
+    case "block": {
+      map.set(s, liveAfter);
+      return liveInOfSeq(s.body, liveAfter, ctx, movable, map);
+    }
+    case "if": {
+      map.set(s, liveAfter);
+      const cIn = liveInOfSeq(s.conseq, liveAfter, ctx, movable, map);
+      const aIn = s.alt
+        ? liveInOfSeq(s.alt, liveAfter, ctx, movable, map)
+        : liveAfter;
+      return union(exprUses(s.cond, movable), cIn, aIn);
+    }
+    case "while":
+      return loopTransfer(
+        exprUses(s.cond, movable),
+        s.body,
+        liveAfter,
+        ctx,
+        movable,
+        map,
+        s,
+      );
+    case "forRange":
+      return loopTransfer(
+        union(exprUses(s.start, movable), exprUses(s.end, movable)),
+        s.body,
+        liveAfter,
+        ctx,
+        movable,
+        map,
+        s,
+      );
+    case "forIn":
+      return loopTransfer(
+        exprUses(s.iter, movable),
+        s.body,
+        liveAfter,
+        ctx,
+        movable,
+        map,
+        s,
+      );
+    case "match": {
+      map.set(s, liveAfter);
+      const armIns: Live[] = s.arms.map((arm) => {
+        let al = liveInOfSeq(arm.body, liveAfter, ctx, movable, map);
+        if (arm.guard) al = union(al, exprUses(arm.guard, movable));
+        return al;
+      });
+      return union(exprUses(s.disc, movable), ...armIns);
+    }
+    case "tryCatch": {
+      map.set(s, liveAfter);
+      const finLive = s.finallyBody
+        ? liveInOfSeq(s.finallyBody, liveAfter, ctx, movable, map)
+        : liveAfter;
+      const catchIn = liveInOfSeq(s.catchBody, finLive, ctx, movable, map);
+      // The try body can reach either the catch (on error) or the finally/after
+      // (on success) — both are possible successors.
+      return liveInOfSeq(s.tryBody, union(finLive, catchIn), ctx, movable, map);
+    }
+  }
+}
+
+/**
+ * A plain `x = v` kills `x`'s prior liveness (the old value is dead); a compound
+ * `x += v` reads `x` first, so it stays live. A non-ident target (`arr[i] = v`,
+ * `o.f = v`) reads its sub-expressions and kills nothing.
+ */
+function assignTransfer(
+  a: Extract<HirExpr, { kind: "assign" }>,
+  liveAfter: Live,
+  movable: Live,
+): Live {
+  const rhs = exprUses(a.value, movable);
+  if (a.target.kind === "ident" && a.op === "=") {
+    const out = new Set(liveAfter);
+    if (movable.has(a.target.name)) out.delete(a.target.name);
+    return union(rhs, out);
+  }
+  return union(rhs, exprUses(a.target, movable), liveAfter);
+}
+
+/**
+ * Liveness through a loop, to a fixpoint. `headerUses` are the movable reads in
+ * the loop's own header (condition / range bounds / iterable), evaluated once per
+ * iteration. The body's `continue` target is the header's `liveIn` (the back-edge);
+ * its `break` target is `liveAfter` (past the loop). Iterating until the header set
+ * stops growing makes a value used at the top of the body live at the bottom — the
+ * whole point of the CFG.
+ */
+function loopTransfer(
+  headerUses: Live,
+  body: HirStmt[],
+  liveAfter: Live,
+  _ctx: JumpCtx,
+  movable: Live,
+  map: Map<HirStmt, Live>,
+  self: HirStmt,
+): Live {
+  map.set(self, liveAfter);
+  let headerIn = union(headerUses, liveAfter);
+  // Bounded by |movable| growth; the +2 guards against an off-by-one on the
+  // convergence check. Sets only grow, so this always converges.
+  for (let guard = 0; guard <= movable.size + 2; guard++) {
+    const bodyCtx: JumpCtx = { brk: liveAfter, cont: headerIn };
+    const bodyIn = liveInOfSeq(body, headerIn, bodyCtx, movable, map);
+    const next = union(headerUses, liveAfter, bodyIn);
+    if (setEq(next, headerIn)) break; // converged; the last pass wrote `map` with the fixpoint
+    headerIn = next;
+  }
+  return headerIn;
+}
+
+// ── Uses collection ──────────────────────────────────────────────────────────
+
+/** The set of movable names *read* anywhere in an expression. */
+function exprUses(e: HirExpr, movable: Live): Live {
+  const out: Live = new Set();
+  collectUses(e, movable, out);
+  return out;
+}
+
+function collectUses(e: HirExpr, movable: Live, out: Live): void {
+  switch (e.kind) {
+    case "ident":
+      if (movable.has(e.name)) out.add(e.name);
+      return;
+    case "binary":
+      collectUses(e.left, movable, out);
+      collectUses(e.right, movable, out);
+      return;
+    case "unary":
+      collectUses(e.operand, movable, out);
+      return;
+    case "assign":
+      collectUses(e.target, movable, out);
+      collectUses(e.value, movable, out);
+      return;
+    case "call":
+      for (const a of e.args) collectUses(a.expr, movable, out);
+      return;
+    case "println":
+      for (const a of e.args) collectUses(a, movable, out);
+      return;
+    case "method":
+      collectUses(e.receiver, movable, out);
+      for (const a of e.args) collectUses(a, movable, out);
+      return;
+    case "index":
+      collectUses(e.object, movable, out);
+      collectUses(e.index, movable, out);
+      return;
+    case "field":
+    case "len":
+      collectUses(e.object, movable, out);
+      return;
+    case "array":
+      for (const el of e.elements) collectUses(el, movable, out);
+      return;
+    case "hashmap":
+      for (const en of e.entries) {
+        collectUses(en.key, movable, out);
+        collectUses(en.value, movable, out);
+      }
+      return;
+    case "structLit":
+      for (const f of e.fields) collectUses(f.value, movable, out);
+      return;
+    case "ok":
+      if (e.value) collectUses(e.value, movable, out);
+      return;
+    case "try":
+    case "await":
+    case "rcNew":
+      collectUses(e.kind === "rcNew" ? e.inner : e.expr, movable, out);
+      return;
+    case "rcClone":
+      collectUses(e.expr, movable, out);
+      return;
+    case "iterMap":
+    case "iterFilter":
+      collectUses(e.receiver, movable, out);
+      collectUses(e.body, movable, out);
+      return;
+    case "bumpVec":
+      for (const el of e.elements) collectUses(el, movable, out);
+      return;
+    // Leaves: number, string, bool, path, bumpNew.
+  }
+}
+
+// ── Clone placement ──────────────────────────────────────────────────────────
+
+/**
+ * Walk each statement and clone the move sites the liveness result proves are
+ * followed by a use. A statement's `liveOut` (from `map`) covers uses *after* it;
+ * uses *within* the same expression are handled by an ordered intra-expression
+ * scan. Header positions (a loop/if condition, a `match` discriminant, range
+ * bounds, an iterable) get the whole `movable` set as their live-after — a
+ * maximally-conservative over-approximation for the exotic case of an owned-arg
+ * move inside a condition (never under-clones; at worst a needless clone).
+ */
+function placeSeq(
+  stmts: HirStmt[],
+  movable: Live,
+  map: Map<HirStmt, Live>,
+): void {
+  for (const s of stmts) placeStmt(s, movable, map);
+}
+
+function placeStmt(s: HirStmt, movable: Live, map: Map<HirStmt, Live>): void {
+  const lo = map.get(s) ?? new Set<string>();
+  switch (s.kind) {
+    case "let": {
+      // A `let b = a` where `a` is a bare movable ident is a move of `a`.
+      if (s.init.kind === "ident" && movable.has(s.init.name)) {
+        if (lo.has(s.init.name)) s.init = cloneOf(s.init);
+      } else {
+        placeInExpr(s.init, lo, movable);
+      }
+      return;
+    }
+    case "expr":
+      placeInExpr(s.expr, lo, movable);
+      return;
+    case "return":
+      if (s.value) placeInExpr(s.value, lo, movable);
+      return;
+    case "throw":
+      placeInExpr(s.value, lo, movable);
+      return;
+    case "if":
+      placeInExpr(s.cond, movable, movable);
+      placeSeq(s.conseq, movable, map);
+      if (s.alt) placeSeq(s.alt, movable, map);
+      return;
+    case "while":
+      placeInExpr(s.cond, movable, movable);
+      placeSeq(s.body, movable, map);
+      return;
+    case "block":
+      placeSeq(s.body, movable, map);
+      return;
+    case "forIn":
+      placeInExpr(s.iter, movable, movable);
+      placeSeq(s.body, movable, map);
+      return;
+    case "forRange":
+      placeInExpr(s.start, movable, movable);
+      placeInExpr(s.end, movable, movable);
+      placeSeq(s.body, movable, map);
+      return;
+    case "match":
+      placeInExpr(s.disc, movable, movable);
+      for (const arm of s.arms) {
+        if (arm.guard) placeInExpr(arm.guard, movable, movable);
+        placeSeq(arm.body, movable, map);
+      }
+      return;
+    case "tryCatch":
+      placeSeq(s.tryBody, movable, map);
+      placeSeq(s.catchBody, movable, map);
+      if (s.finallyBody) placeSeq(s.finallyBody, movable, map);
+      return;
+    // break / continue: no operands.
+  }
+}
+
+interface MoveSite {
+  name: string;
+  seq: number;
+  apply: () => void;
+}
+
+/**
+ * Clone the owned-argument move sites in a single expression whose moved-from
+ * binding is used later — either later within this same expression (an ordered
+ * intra-expression scan) or after the enclosing statement (`liveOut`).
+ */
+function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
   let seq = 0;
   const lastUse = new Map<string, number>();
   const moves: MoveSite[] = [];
 
-  const useIdent = (name: string): number => {
-    seq += 1;
-    lastUse.set(name, seq);
-    return seq;
-  };
-
-  const visitExpr = (e: HirExpr): void => {
-    switch (e.kind) {
+  const visit = (x: HirExpr): void => {
+    switch (x.kind) {
       case "ident":
-        if (movable.has(e.name)) useIdent(e.name);
+        if (movable.has(x.name)) {
+          seq += 1;
+          lastUse.set(x.name, seq);
+        }
         return;
       case "binary":
-        visitExpr(e.left);
-        visitExpr(e.right);
+        visit(x.left);
+        visit(x.right);
         return;
       case "unary":
-        visitExpr(e.operand);
+        visit(x.operand);
         return;
       case "assign":
-        visitExpr(e.target);
-        visitExpr(e.value);
+        visit(x.target);
+        visit(x.value);
         return;
       case "call":
-        for (const a of e.args) {
+        for (const a of x.args) {
           if (
             a.borrow === "owned" &&
             a.expr.kind === "ident" &&
             movable.has(a.expr.name)
           ) {
             const arg = a;
-            const at = useIdent(a.expr.name);
+            const name = a.expr.name;
+            seq += 1;
+            lastUse.set(name, seq);
             moves.push({
-              name: (a.expr as { name: string }).name,
-              seq: at,
+              name,
+              seq,
               apply: () => {
                 arg.expr = cloneOf(arg.expr);
               },
             });
           } else {
-            visitExpr(a.expr);
+            visit(a.expr);
           }
         }
         return;
       case "println":
-        for (const a of e.args) visitExpr(a);
+        for (const a of x.args) visit(a);
         return;
       case "method":
-        visitExpr(e.receiver);
-        for (const a of e.args) visitExpr(a);
+        visit(x.receiver);
+        for (const a of x.args) visit(a);
         return;
       case "index":
-        visitExpr(e.object);
-        visitExpr(e.index);
+        visit(x.object);
+        visit(x.index);
         return;
       case "field":
       case "len":
-        visitExpr(e.object);
+        visit(x.object);
         return;
       case "array":
-        for (const el of e.elements) visitExpr(el);
+        for (const el of x.elements) visit(el);
         return;
       case "hashmap":
-        for (const en of e.entries) {
-          visitExpr(en.key);
-          visitExpr(en.value);
+        for (const en of x.entries) {
+          visit(en.key);
+          visit(en.value);
         }
         return;
       case "structLit":
-        for (const f of e.fields) visitExpr(f.value);
+        for (const f of x.fields) visit(f.value);
         return;
       case "ok":
-        if (e.value) visitExpr(e.value);
+        if (x.value) visit(x.value);
         return;
       case "try":
       case "await":
-        visitExpr(e.expr);
+        visit(x.expr);
+        return;
+      case "rcNew":
+        visit(x.inner);
+        return;
+      case "rcClone":
+        visit(x.expr);
         return;
       case "iterMap":
       case "iterFilter":
-        visitExpr(e.receiver);
-        visitExpr(e.body);
+        visit(x.receiver);
+        visit(x.body);
         return;
-      // Leaves: number, string, bool, path.
+      case "bumpVec":
+        for (const el of x.elements) visit(el);
+        return;
+      // Leaves: number, string, bool, path, bumpNew.
     }
   };
 
-  const visitStmt = (s: HirStmt): void => {
-    switch (s.kind) {
-      case "let": {
-        // A `let b = a` where `a` is a bare movable ident is a move of `a`.
-        const init = s.init;
-        if (init.kind === "ident" && movable.has(init.name)) {
-          const at = useIdent(init.name);
-          moves.push({
-            name: init.name,
-            seq: at,
-            apply: () => {
-              s.init = cloneOf(s.init);
-            },
-          });
-        } else {
-          visitExpr(init);
-        }
-        return;
-      }
-      case "return":
-        if (s.value) visitExpr(s.value);
-        return;
-      case "expr":
-        visitExpr(s.expr);
-        return;
-      case "if":
-        visitExpr(s.cond);
-        s.conseq.forEach(visitStmt);
-        if (s.alt) s.alt.forEach(visitStmt);
-        return;
-      case "while":
-        visitExpr(s.cond);
-        s.body.forEach(visitStmt);
-        return;
-      case "block":
-        s.body.forEach(visitStmt);
-        return;
-      case "forIn":
-        visitExpr(s.iter);
-        s.body.forEach(visitStmt);
-        return;
-      case "forRange":
-        visitExpr(s.start);
-        visitExpr(s.end);
-        s.body.forEach(visitStmt);
-        return;
-      case "match":
-        visitExpr(s.disc);
-        for (const arm of s.arms) {
-          if (arm.guard) visitExpr(arm.guard);
-          if (arm.pat) visitExpr(arm.pat);
-          arm.body.forEach(visitStmt);
-        }
-        return;
-      case "throw":
-        visitExpr(s.value);
-        return;
-      case "tryCatch":
-        s.tryBody.forEach(visitStmt);
-        s.catchBody.forEach(visitStmt);
-        if (s.finallyBody) s.finallyBody.forEach(visitStmt);
-        return;
-      // break / continue: no operands.
-    }
-  };
+  visit(e);
 
-  body.forEach(visitStmt);
-
-  // Clone a move that is not the binding's last use.
   for (const mv of moves) {
-    if (mv.seq < (lastUse.get(mv.name) ?? mv.seq)) mv.apply();
+    const laterInExpr = (lastUse.get(mv.name) ?? mv.seq) > mv.seq;
+    if (laterInExpr || liveOut.has(mv.name)) mv.apply();
   }
 }
 
 /** Add every `let`-bound name with a cloneable-movable type to `movable`. */
-function collectLetBindings(body: HirStmt[], movable: Set<string>): void {
+function collectLetBindings(body: HirStmt[], movable: Live): void {
   for (const s of body) {
     switch (s.kind) {
       case "let":

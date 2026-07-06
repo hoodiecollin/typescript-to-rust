@@ -72,7 +72,7 @@ import type {
   SelfRecv,
 } from "./hir";
 import { refineNumerics } from "./numeric";
-import { refineMoves } from "./ownership";
+import { refineOwnership } from "./ownership";
 import { refineRc } from "./rc";
 import { refineStrings } from "./strings";
 import { validate } from "./validate";
@@ -181,7 +181,7 @@ export function lower(program: Program): HirModule {
   // then `"use arena"` scopes → `bumpalo` bump allocation (028c).
   return refineArena(
     refineRc(
-      refineMoves(
+      refineOwnership(
         refineStrings(refineNumerics({ items, main, mainRet, mainAsync })),
       ),
       { rcScopes: analysis.rcScopes, classes: analysis.classes },
