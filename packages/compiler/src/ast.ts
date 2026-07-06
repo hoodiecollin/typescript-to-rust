@@ -267,6 +267,22 @@ export interface PropertyDefinition extends Span {
   static: boolean;
 }
 
+/**
+ * A parameter property: `constructor(public x: T)`. TS shorthand that both
+ * declares a field and assigns it from the argument. `parameter` is the wrapped
+ * binding (a typed `Identifier`); `accessibility`/`readonly` don't affect the
+ * Rust target (fields are plain). Desugars in lowering to a field + `this.x = x`.
+ */
+export interface TSParameterProperty extends Span {
+  type: "TSParameterProperty";
+  accessibility: "public" | "private" | "protected" | null;
+  readonly: boolean;
+  parameter: Identifier;
+}
+
+/** A constructor/method param: an ordinary binding or a parameter property. */
+export type Param = Identifier | TSParameterProperty;
+
 export interface MethodDefinition extends Span {
   type: "MethodDefinition";
   key: Identifier;
@@ -323,6 +339,28 @@ export interface ContinueStatement extends Span {
   label: Identifier | null;
 }
 
+/** One `Name` or `Name = <init>` member of an `enum` body. */
+export interface TSEnumMember extends Span {
+  type: "TSEnumMember";
+  id: Identifier;
+  initializer: Expression | null;
+  computed: boolean;
+}
+
+export interface TSEnumBody extends Span {
+  type: "TSEnumBody";
+  members: TSEnumMember[];
+}
+
+/** `enum E { A, B = 1 }` — a C-like enum (`const`/`declare` rejected in lowering). */
+export interface TSEnumDeclaration extends Span {
+  type: "TSEnumDeclaration";
+  id: Identifier;
+  body: TSEnumBody;
+  const: boolean;
+  declare: boolean;
+}
+
 export type Statement =
   | VariableDeclaration
   | FunctionDeclaration
@@ -339,6 +377,7 @@ export type Statement =
   | ThrowStatement
   | TryStatement
   | TSInterfaceDeclaration
+  | TSEnumDeclaration
   | ClassDeclaration
   | ({ type: string } & Span);
 

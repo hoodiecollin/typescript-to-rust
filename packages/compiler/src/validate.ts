@@ -66,10 +66,16 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "PropertyDefinition",
   "MethodDefinition",
   "FunctionExpression",
+  "TSParameterProperty",
+  "TSEnumDeclaration",
+  "TSEnumBody",
+  "TSEnumMember",
   // Expressions
   "Identifier",
   "Literal",
   "BinaryExpression",
+  "LogicalExpression",
+  "UnaryExpression",
   "AssignmentExpression",
   "CallExpression",
   "MemberExpression",
@@ -79,8 +85,10 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "ThisExpression",
   "Super",
   "NewExpression",
+  "ParenthesizedExpression",
   "AwaitExpression",
   "ArrowFunctionExpression",
+  "YieldExpression",
   // Types
   "TSTypeAnnotation",
   "TSTypeReference",
@@ -117,16 +125,25 @@ function checkForbiddenFlags(n: AnyNode): void {
     (n.type === "FunctionDeclaration" || n.type === "FunctionExpression") &&
     n.generator === true
   ) {
-    throw new DialectError("generator functions (`function*` / `yield`)");
+    // Async generators need `Stream` (out of std) → forbidden. A generator
+    // *method*/expression isn't modeled. A top-level sync `function*` declaration
+    // is supported for the finite-yield subset (series 025d) — its shape is
+    // enforced in lowering (`UnsupportedError` for the un-handled shapes), so it
+    // passes this flag gate.
+    if (n.async === true) {
+      throw new DialectError("async generator functions (`async function*`)");
+    }
+    if (n.type === "FunctionExpression") {
+      throw new DialectError("generator methods / expressions (`function*`)");
+    }
   }
   if (n.type === "ForOfStatement" && n.await === true) {
     throw new DialectError("`for await` async iteration");
   }
-  if (
-    n.type === "VariableDeclaration" &&
-    (n.kind === "using" || n.kind === "await using")
-  ) {
-    throw new DialectError("`using` explicit resource management");
+  // `await using` needs async disposal, which stable Rust's `Drop` can't express;
+  // it stays forbidden. Sync `using` → `Drop` is supported (series 025).
+  if (n.type === "VariableDeclaration" && n.kind === "await using") {
+    throw new DialectError("`await using` (async resource disposal)");
   }
   if (Array.isArray(n.decorators) && n.decorators.length > 0) {
     throw new DialectError("decorators (`@decorator`)");
