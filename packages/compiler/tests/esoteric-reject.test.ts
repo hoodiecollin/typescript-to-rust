@@ -23,9 +23,14 @@ function compile(src: string): string {
 }
 
 describe("024: forbidden flags → DialectError", () => {
-  test("EF1 sync generator is rejected", () => {
+  // EF1: sync generators graduated to supported in series 025d — a straight-line
+  // finite-yield `function*` → `impl Iterator` (see generators.test.ts). This
+  // shape (a non-yield body, no `Generator<T>` annotation) is still fail-loud,
+  // but now as an `UnsupportedError` (unimplemented shape), not a `DialectError`
+  // (forbidden). Async generators (EF2) remain forbidden.
+  test("EF1 sync generator with an unsupported shape is still rejected", () => {
     expect(() => compile(`function* g(): void { console.log("x"); }`)).toThrow(
-      DialectError,
+      UnsupportedError,
     );
   });
 
@@ -43,10 +48,12 @@ describe("024: forbidden flags → DialectError", () => {
     ).toThrow(DialectError);
   });
 
-  test("EF4 `using` declaration is rejected", () => {
+  // EF4: sync `using` graduated to supported in series 025 (→ `Drop`); see
+  // esoteric.test.ts. Only `await using` (async disposal) remains forbidden.
+  test("EF4 sync `using` is now accepted (025 → Drop)", () => {
     expect(() =>
       compile(`function f(): void { using r = acquire(); }`),
-    ).toThrow(DialectError);
+    ).not.toThrow(DialectError);
   });
 
   test("EF5 `await using` declaration is rejected", () => {
@@ -79,18 +86,20 @@ describe("024: forbidden flags → DialectError", () => {
 });
 
 describe("024: default-deny on unmodeled node type → UnsupportedError", () => {
-  test("EF10 enum is not implemented", () => {
-    expect(() => compile(`enum E { A, B }`)).toThrow(UnsupportedError);
+  // EF10/EF12: `enum` and parameter properties graduated to supported in series
+  // 025; see esoteric.test.ts for their behavioral specs.
+  test("EF10 enum is now accepted (025 → Rust enum)", () => {
+    expect(() => compile(`enum E { A, B }`)).not.toThrow();
   });
 
   test("EF11 namespace is not implemented", () => {
     expect(() => compile(`namespace N {}`)).toThrow(UnsupportedError);
   });
 
-  test("EF12 parameter property is not implemented", () => {
+  test("EF12 parameter property is now accepted (025)", () => {
     expect(() =>
       compile(`class C { constructor(public x: number) {} }`),
-    ).toThrow(UnsupportedError);
+    ).not.toThrow();
   });
 });
 
