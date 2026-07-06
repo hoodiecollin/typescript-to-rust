@@ -24,6 +24,7 @@
  */
 
 import type { FunctionDeclaration, Program, Statement } from "./ast";
+import type { RustType } from "./hir";
 
 /** JS array/collection methods that mutate the receiver in place. */
 const MUTATING_METHODS = new Set([
@@ -61,8 +62,21 @@ export interface ModuleAnalysis {
   mut: Map<string, Set<string>>;
   /** names of declared `interface`s/`class`es — resolved to nominal `struct` types */
   structs: Set<string>;
+  /**
+   * Struct name → its lowered field types (series 032). Lets a struct object
+   * literal recurse into a field whose declared type is *itself* a struct
+   * (nested literals) or a `Vec` of struct (struct literals inside an array).
+   * Populated by `lower()` after analysis (needs `lowerType`); empty here.
+   */
+  structFields: Map<string, { name: string; ty: RustType }[]>;
   /** names of class methods that mutate `this` (→ a `&mut self` receiver) */
   mutatingMethods: Set<string>;
+  /**
+   * All declared class **method names**. A method call whose name is here is a
+   * user method (native call), so it is *not* hijacked by the library-method
+   * routing (`map`/`filter`/`at`/… → closures/`tslib`, series 027/033).
+   */
+  methodNames: Set<string>;
   /**
    * Names of top-level functions that are *fallible* — they `throw` directly or
    * (transitively) call a fallible function, so their return type wraps in
@@ -94,10 +108,68 @@ export interface ModuleAnalysis {
    * `#[tokio::main] async fn main()` when the script `await`s.
    */
   asyncFns: Set<string>;
+  /**
+   * Names of declared `enum`s (series 025). Like `structs`, they resolve to a
+   * nominal type; distinct from `structs` so a member access `E.Variant` lowers
+   * to a Rust path `E::Variant` (a variant), not a struct field read.
+   */
+  enums: Set<string>;
+  /**
+   * Scope keys (free-fn names + `SCRIPT_SCOPE`) that carry a leading `"use panic"`
+   * directive (series 028a). In such a scope a `throw` becomes `panic!` and the
+   * scope is treated as **infallible** — it never enters `fallible`, so its
+   * signature stays non-`Result` and callers do not `?`-propagate.
+   */
+  panicScopes: Set<string>;
+  /**
+   * Names of declared (non-error) `class`es — the subset of `structs` that has an
+   * `impl` (a constructor / methods), i.e. objects with identity. In a `"use rc"`
+   * scope (series 028b) a binding of a class type is wrapped in `Rc<RefCell<…>>`;
+   * `refineRc` uses this to distinguish class instances from plain interface data.
+   */
+  classes: Set<string>;
+  /**
+   * Scope keys (free-fn names + `SCRIPT_SCOPE`) carrying a leading `"use rc"`
+   * directive (series 028b). In such a scope, class-typed bindings translate under
+   * `Rc<RefCell<T>>` (shared, interior-mutable) instead of plain moves, so
+   * shared-mutable aliasing the borrow model can't express compiles.
+   */
+  rcScopes: Set<string>;
+  /**
+   * Scope keys (free-fn names + `SCRIPT_SCOPE`) carrying a leading `"use arena"`
+   * directive (series 028c). In such a scope, `Vec` literals are built from a
+   * bump arena (`bumpalo`), freed at scope exit. An arena value that escapes the
+   * scope is a lifetime error the oracle (cargo) rejects — cargo is the escape
+   * check, so this stays fail-loud without a bespoke analysis.
+   */
+  arenaScopes: Set<string>;
+  /**
+   * Names of top-level sync generator functions (`function* g()`, series 025d).
+   * A generator lowers to a `fn -> impl Iterator`; a `for (const x of g())` over
+   * such a call consumes the iterator directly (no `.iter()`, bound by value).
+   */
+  generators: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
 export const SCRIPT_SCOPE = "<script>";
+
+/**
+ * The leading string-literal *directives* of a statement list (the `"use strict"`
+ * position): each leading `ExpressionStatement` whose expression is a string
+ * `Literal`. The scan stops at the first non-directive statement (series 028).
+ */
+export function leadingDirectives(stmts: Statement[] | undefined): string[] {
+  const out: string[] = [];
+  for (const s of stmts ?? []) {
+    if (s.type !== "ExpressionStatement") break;
+    const e = (s as { expression?: { type?: string; value?: unknown } })
+      .expression;
+    if (e?.type !== "Literal" || typeof e.value !== "string") break;
+    out.push(e.value);
+  }
+  return out;
+}
 
 // ── Generic AST walk ─────────────────────────────────────────────────────────
 
@@ -163,10 +235,16 @@ function assignmentTarget(node: AnyNode): string | null {
 
 // ── Type classification ──────────────────────────────────────────────────────
 
-function isCopyType(annotation: unknown): boolean {
+function isCopyType(annotation: unknown, enums: ReadonlySet<string>): boolean {
   const inner = isNode(annotation) ? annotation.typeAnnotation : undefined;
   const t = isNode(inner) ? inner.type : undefined;
-  return t === "TSNumberKeyword" || t === "TSBooleanKeyword";
+  if (t === "TSNumberKeyword" || t === "TSBooleanKeyword") return true;
+  // A C-like `enum` derives `Copy`, so it too passes by value (series 025).
+  if (t === "TSTypeReference" && isNode(inner)) {
+    const name = (inner.typeName as { name?: string } | undefined)?.name;
+    return typeof name === "string" && enums.has(name);
+  }
+  return false;
 }
 
 // ── Parameter ownership ──────────────────────────────────────────────────────
@@ -188,9 +266,12 @@ function classifyParam(
   return mutated ? "refMut" : read ? "ref" : "move";
 }
 
-function analyzeFunction(fn: FunctionDeclaration): FnInfo {
+function analyzeFunction(
+  fn: FunctionDeclaration,
+  enums: ReadonlySet<string>,
+): FnInfo {
   const params = fn.params.map((p) => {
-    const isCopy = isCopyType(p.typeAnnotation);
+    const isCopy = isCopyType(p.typeAnnotation, enums);
     return {
       name: p.name,
       ownership: classifyParam(p.name, fn.body, isCopy),
@@ -465,6 +546,7 @@ function classFallScopes(program: Program): {
 function analyzeFallible(
   program: Program,
   script: Statement[],
+  panicScopes: ReadonlySet<string>,
 ): {
   fallible: Set<string>;
   fallibleMethods: Set<string>;
@@ -500,7 +582,10 @@ function analyzeFallible(
   }
 
   const fallible = new Set<string>();
-  for (const s of scopes) if (s.throws) fallible.add(s.key);
+  // A `"use panic"` scope's own `throw`s become `panic!`, so they do not make it
+  // fallible; it also never *becomes* fallible via propagation (excluded below).
+  for (const s of scopes)
+    if (s.throws && !panicScopes.has(s.key)) fallible.add(s.key);
   for (;;) {
     const methodNames = new Set<string>();
     const ctorClasses = new Set<string>();
@@ -511,7 +596,7 @@ function analyzeFallible(
     }
     let changed = false;
     for (const s of scopes) {
-      if (fallible.has(s.key)) continue;
+      if (fallible.has(s.key) || panicScopes.has(s.key)) continue;
       const hit =
         [...s.callsFree].some((c) => fallible.has(c)) ||
         [...s.callsMethod].some((m) => methodNames.has(m)) ||
@@ -548,12 +633,21 @@ function namedFunction(
 }
 
 export function analyzeModule(program: Program): ModuleAnalysis {
+  // Declared `enum`s — collected first so param-ownership (`isCopyType`) sees them.
+  const enums = new Set<string>();
+  for (const stmt of program.body) {
+    if (stmt.type === "TSEnumDeclaration") {
+      const id = (stmt as { id?: { name?: string } }).id;
+      if (id?.name) enums.add(id.name);
+    }
+  }
+
   const fns = new Map<string, FnInfo>();
   const script: Statement[] = [];
 
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
-    if (named) fns.set(named.name, analyzeFunction(named.fn));
+    if (named) fns.set(named.name, analyzeFunction(named.fn, enums));
     else script.push(stmt);
   }
 
@@ -562,6 +656,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   // fixpoint — calls another self-mutating method on `this` (so `pay` that calls
   // `this.withdraw()` is itself `&mut self`).
   const methods = classMethods(program);
+  const methodNames = new Set<string>(methods.map((m) => m.name));
   const mutatingMethods = new Set<string>();
   for (const m of methods) if (mutatesThis(m.body)) mutatingMethods.add(m.name);
   for (;;) {
@@ -602,7 +697,10 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   }
 
   // Declared nominal types: interfaces and (non-error) classes resolve to a `struct`.
+  // `classes` is the class-only subset (objects with an `impl` — identity), used
+  // by `refineRc` to decide which bindings a `"use rc"` scope wraps in `Rc`.
   const structs = new Set<string>();
+  const classes = new Set<string>();
   for (const stmt of program.body) {
     if (
       stmt.type === "TSInterfaceDeclaration" ||
@@ -611,11 +709,55 @@ export function analyzeModule(program: Program): ModuleAnalysis {
       const id = (stmt as { id?: { name?: string } }).id;
       if (id?.name) structs.add(id.name);
     }
+    if (stmt.type === "ClassDeclaration" && !isErrorSubclass(stmt)) {
+      const id = (stmt as { id?: { name?: string } }).id;
+      if (id?.name) classes.add(id.name);
+    }
+  }
+
+  // Scopes carrying a leading `"use panic"` directive (series 028a). Detected
+  // before fallibility so `analyzeFallible` can treat them as infallible.
+  const panicScopes = new Set<string>();
+  for (const stmt of program.body) {
+    const named = namedFunction(stmt);
+    if (named && leadingDirectives(named.fn.body?.body).includes("use panic")) {
+      panicScopes.add(named.name);
+    }
+  }
+  if (leadingDirectives(script).includes("use panic")) {
+    panicScopes.add(SCRIPT_SCOPE);
+  }
+
+  // Scopes carrying a leading `"use rc"` directive (series 028b) — the same
+  // detection as `"use panic"`, in the `"use strict"` prologue position.
+  const rcScopes = new Set<string>();
+  for (const stmt of program.body) {
+    const named = namedFunction(stmt);
+    if (named && leadingDirectives(named.fn.body?.body).includes("use rc")) {
+      rcScopes.add(named.name);
+    }
+  }
+  if (leadingDirectives(script).includes("use rc")) {
+    rcScopes.add(SCRIPT_SCOPE);
+  }
+
+  // Scopes carrying a leading `"use arena"` directive (series 028c) — same
+  // detection as `"use panic"`/`"use rc"`, in the prologue position.
+  const arenaScopes = new Set<string>();
+  for (const stmt of program.body) {
+    const named = namedFunction(stmt);
+    if (named && leadingDirectives(named.fn.body?.body).includes("use arena")) {
+      arenaScopes.add(named.name);
+    }
+  }
+  if (leadingDirectives(script).includes("use arena")) {
+    arenaScopes.add(SCRIPT_SCOPE);
   }
 
   const { fallible, fallibleMethods, fallibleCtors } = analyzeFallible(
     program,
     script,
+    panicScopes,
   );
 
   // Top-level `async` function declarations (drives the `await`-target check and
@@ -623,19 +765,41 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   const asyncFns = new Set<string>();
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
-    if (named && named.fn.async) asyncFns.add(named.name);
+    if (named?.fn.async) asyncFns.add(named.name);
+  }
+
+  // Top-level sync generator declarations (series 025d) — a `for-of` over a call
+  // to one consumes the returned `impl Iterator` directly.
+  const generators = new Set<string>();
+  for (const stmt of program.body) {
+    if (
+      stmt.type === "FunctionDeclaration" &&
+      (stmt as { generator?: boolean }).generator === true
+    ) {
+      const id = (stmt as { id?: { name?: string } }).id;
+      if (id?.name) generators.add(id.name);
+    }
   }
 
   return {
     fns,
     mut,
     structs,
+    // Field types are filled in by `lower()` (they need `lowerType`); empty here.
+    structFields: new Map(),
     mutatingMethods,
+    methodNames,
     fallible,
     fallibleMethods,
     fallibleCtors,
     errorClasses,
     asyncFns,
+    enums,
+    panicScopes,
+    classes,
+    rcScopes,
+    arenaScopes,
+    generators,
   };
 }
 

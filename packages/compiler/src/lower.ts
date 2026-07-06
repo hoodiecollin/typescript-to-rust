@@ -15,7 +15,9 @@ import {
   analyzeModule,
   isErrorSubclass,
 } from "./analysis";
+import { refineArena } from "./arena";
 import type {
+  ArrayExpression,
   ArrowFunctionExpression,
   AssignmentExpression,
   AwaitExpression,
@@ -37,11 +39,13 @@ import type {
   MethodDefinition,
   NewExpression,
   ObjectExpression,
+  Param,
   Program,
   PropertyDefinition,
   ReturnStatement,
   Statement,
   SwitchStatement,
+  TSEnumDeclaration,
   TSInterfaceDeclaration,
   TSType,
   ThrowStatement,
@@ -54,6 +58,7 @@ import type {
   Borrow,
   HirArg,
   HirClass,
+  HirEnum,
   HirErrorClass,
   HirExpr,
   HirFn,
@@ -67,6 +72,8 @@ import type {
   SelfRecv,
 } from "./hir";
 import { refineNumerics } from "./numeric";
+import { refineMoves } from "./ownership";
+import { refineRc } from "./rc";
 import { refineStrings } from "./strings";
 import { validate } from "./validate";
 
@@ -105,16 +112,31 @@ export function lower(program: Program): HirModule {
   // it identically to a `function` (see normalizeArrows).
   const normalized = normalizeArrows(program);
   const analysis = analyzeModule(normalized);
+  // Enum names are nominal types too — resolve them like structs in `lowerType`
+  // (the emitter renders both as the bare name). They stay in `analysis.enums`
+  // as well, so a member access `E.Variant` still lowers to a path, not a field.
+  for (const e of analysis.enums) analysis.structs.add(e);
+  // Struct field types (series 032) — a pre-pass so a struct object literal can
+  // recurse into a struct-typed field / array element wherever it appears.
+  analysis.structFields = collectStructFields(normalized, analysis.structs);
   const items: HirItem[] = [];
   const script: Statement[] = [];
 
   for (const stmt of normalized.body) {
     if (stmt.type === "FunctionDeclaration") {
-      items.push(lowerFunction(stmt as FunctionDeclaration, analysis));
+      // A sync generator (`function* g()`, series 025d) lowers to a
+      // `fn -> impl Iterator`; a plain function to a normal `fn`.
+      items.push(
+        (stmt as { generator?: boolean }).generator === true
+          ? lowerGenerator(stmt as FunctionDeclaration, analysis)
+          : lowerFunction(stmt as FunctionDeclaration, analysis),
+      );
     } else if (stmt.type === "TSInterfaceDeclaration") {
       items.push(
         lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs),
       );
+    } else if (stmt.type === "TSEnumDeclaration") {
+      items.push(lowerEnum(stmt as TSEnumDeclaration));
     } else if (stmt.type === "ClassDeclaration") {
       // A `class X extends Error` is a custom error type, not a data class.
       items.push(
@@ -137,7 +159,11 @@ export function lower(program: Program): HirModule {
         type: "top-level statements alongside a user-defined main()",
       });
     }
-    main = lowerStatements(script, analysis, SCRIPT_SCOPE);
+    main = lowerStatements(
+      takeDirectives(script, { panicAllowed: true }),
+      analysis,
+      SCRIPT_SCOPE,
+    );
     // A script that propagates a throwing call (or throws) makes `main` fallible:
     // `fn main() -> Result<(), String>`, returns wrapped in `Ok`, trailing `Ok(())`.
     if (analysis.fallible.has(SCRIPT_SCOPE)) {
@@ -150,8 +176,18 @@ export function lower(program: Program): HirModule {
   }
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
-  // read-only `string` params (`&String`) → the idiomatic `&str`.
-  return refineStrings(refineNumerics({ items, main, mainRet, mainAsync }));
+  // read-only `string` params (`&String`) → the idiomatic `&str`, then
+  // use-after-move → `.clone()`, then `"use rc"` scopes → `Rc<RefCell<T>>` (028b),
+  // then `"use arena"` scopes → `bumpalo` bump allocation (028c).
+  return refineArena(
+    refineRc(
+      refineMoves(
+        refineStrings(refineNumerics({ items, main, mainRet, mainAsync })),
+      ),
+      { rcScopes: analysis.rcScopes, classes: analysis.classes },
+    ),
+    analysis.arenaScopes,
+  );
 }
 
 // ── Arrow normalization ──────────────────────────────────────────────────────
@@ -227,6 +263,70 @@ function topLevelConstArrow(
   return { name: d.id, arrow };
 }
 
+// ── Directives (series 028) ──────────────────────────────────────────────────
+
+/**
+ * Consume the leading string-literal *directives* of a scope, validating each,
+ * and return the remaining statements. `"use panic"` (028a) is consumed here —
+ * its semantics already live in `analysis.panicScopes` — as are `"use rc"` (028b,
+ * `analysis.rcScopes`, applied by `refineRc`), `"use arena"` (028c,
+ * `analysis.arenaScopes`, applied by `refineArena`), and the JS-standard
+ * `"use strict"` no-op. Any other `"use …"` string fails loud (`DialectError`,
+ * never a silent no-op). A non-`use` leading string is not a directive and is
+ * left in place.
+ *
+ * @throws {DialectError} on an unrecognized `"use …"` directive.
+ * @throws {UnsupportedError} on a strategy directive (`"use panic"`/`"use rc"`/
+ *   `"use arena"`) outside a free fn / script.
+ */
+function takeDirectives(
+  stmts: Statement[],
+  opts?: { panicAllowed?: boolean },
+): Statement[] {
+  let i = 0;
+  for (; i < stmts.length; i++) {
+    const s = stmts[i];
+    if (!s || s.type !== "ExpressionStatement") break;
+    const e = (s as ExpressionStatement).expression;
+    if (e.type !== "Literal" || typeof (e as Literal).value !== "string") break;
+    const d = (e as Literal).value as string;
+    if (d === "use panic") {
+      if (!opts?.panicAllowed) {
+        throw new UnsupportedError({
+          type: "`use panic` outside a free function or the top-level script",
+        });
+      }
+      continue;
+    }
+    if (d === "use strict") continue; // JS prologue, a no-op for us
+    if (d === "use rc") {
+      // 028b: consumed here — its semantics live in `analysis.rcScopes`, applied
+      // by the `refineRc` pass. Like `"use panic"`, only on a free fn / script.
+      if (!opts?.panicAllowed) {
+        throw new UnsupportedError({
+          type: "`use rc` outside a free function or the top-level script",
+        });
+      }
+      continue;
+    }
+    if (d === "use arena") {
+      // 028c: consumed here — semantics live in `analysis.arenaScopes`, applied
+      // by the `refineArena` pass. Like `"use rc"`, only on a free fn / script.
+      if (!opts?.panicAllowed) {
+        throw new UnsupportedError({
+          type: "`use arena` outside a free function or the top-level script",
+        });
+      }
+      continue;
+    }
+    if (d.startsWith("use ")) {
+      throw new DialectError(`unrecognized directive "${d}"`);
+    }
+    break; // a non-`use` leading string literal is not a directive
+  }
+  return stmts.slice(i);
+}
+
 // ── Items ────────────────────────────────────────────────────────────────────
 
 function lowerFunction(
@@ -246,8 +346,14 @@ function lowerFunction(
 
   if (!func.body)
     throw new UnsupportedError({ type: "function without a body" });
-  // The function name is its own scope key for mutability lookups.
-  const body = lowerStatements(func.body.body, analysis, name);
+  // The function name is its own scope key for mutability lookups. Leading
+  // directives (`"use panic"`, 028a) are consumed here — panic semantics already
+  // live in `analysis.panicScopes`; stripping keeps the string out of the body.
+  const body = lowerStatements(
+    takeDirectives(func.body.body, { panicAllowed: true }),
+    analysis,
+    name,
+  );
 
   // A fallible function (it throws, or calls something that throws) returns
   // `Result<ret, String>`: wrap its returns in `Ok`, keep its `throw`s as `Err`.
@@ -265,6 +371,96 @@ function lowerFunction(
   }
 
   return { kind: "fn", name, isAsync: func.async, params, ret, body };
+}
+
+/**
+ * Lower a sync generator (`function* g(): Generator<T> { yield a; yield b; … }`,
+ * series 025d) to a `fn g(…) -> impl Iterator<Item = T>` that returns a fixed
+ * sequence: `vec![a, b, …].into_iter()`. This first slice handles the
+ * **straight-line finite-yield** shape — a body that is exactly a sequence of
+ * `yield <expr>;` statements. Anything else (a `yield` inside a loop / `if` /
+ * `switch`, a `yield*` delegation, a non-`yield` statement, an `async` generator,
+ * or a missing/again-`Generator` return annotation) is a real state-machine
+ * transform and stays fail-loud (`UnsupportedError`) until a later increment.
+ *
+ * The item type comes from the `Generator<T>` / `IterableIterator<T>` return
+ * annotation; `for (const x of g())` consumes the result directly (see
+ * `lowerForOf`).
+ */
+function lowerGenerator(
+  func: FunctionDeclaration,
+  analysis: ModuleAnalysis,
+): HirFn {
+  if (!func.id) throw new UnsupportedError(func);
+  const name = func.id.name;
+  const info = analysis.fns.get(name);
+  const params = func.params.map((p, i) =>
+    lowerParam(p, info?.params[i], analysis.structs),
+  );
+
+  // The element type is the first type argument of the `Generator<T>` /
+  // `IterableIterator<T>` return annotation. A bare/absent annotation is fail-loud
+  // — an item type can't be inferred soundly for `impl Iterator`.
+  const ann = func.returnType?.typeAnnotation;
+  const ref =
+    ann?.type === "TSTypeReference"
+      ? (ann as Extract<TSType, { type: "TSTypeReference" }>)
+      : null;
+  const genNames = new Set(["Generator", "IterableIterator", "Iterable"]);
+  if (!ref || !genNames.has(ref.typeName.name)) {
+    throw new UnsupportedError({
+      type: "generator without a `Generator<T>` / `IterableIterator<T>` return annotation",
+    });
+  }
+  const itemAnn = ref.typeArguments?.params?.[0];
+  if (!itemAnn)
+    throw new UnsupportedError({ type: "generator without an item type" });
+  const item = lowerType(itemAnn, analysis.structs);
+
+  if (!func.body)
+    throw new UnsupportedError({ type: "generator without a body" });
+  // Straight-line finite yields only: every statement must be a bare `yield e;`.
+  const elements: HirExpr[] = func.body.body.map((s) => {
+    const expr =
+      s.type === "ExpressionStatement"
+        ? (s as ExpressionStatement).expression
+        : null;
+    if (!expr || expr.type !== "YieldExpression") {
+      throw new UnsupportedError({
+        type: "generator body is not a straight-line sequence of `yield` (state-machine generators are a later slice)",
+      });
+    }
+    const y = expr as unknown as { delegate?: boolean; argument?: Expression };
+    if (y.delegate) {
+      throw new UnsupportedError({ type: "`yield*` delegation" });
+    }
+    if (!y.argument) {
+      throw new UnsupportedError({ type: "bare `yield` (no value)" });
+    }
+    return lowerExpr(y.argument, analysis);
+  });
+
+  // `vec![e1, …].into_iter()` is an idiomatic `impl Iterator<Item = T>` — no
+  // state machine needed for the finite case.
+  const body: HirStmt[] = [
+    {
+      kind: "return",
+      value: {
+        kind: "method",
+        receiver: { kind: "array", elements },
+        name: "into_iter",
+        args: [],
+      },
+    },
+  ];
+  return {
+    kind: "fn",
+    name,
+    isAsync: false,
+    params,
+    ret: { kind: "implIterator", item },
+    body,
+  };
 }
 
 // ── Fallibility (throw / Result propagation) ─────────────────────────────────
@@ -291,9 +487,16 @@ const ERROR_CLASSES = new Set([
  * lowers as an expression, so a string literal becomes a `String` and `Err`
  * carries it.
  */
-function lowerThrow(stmt: ThrowStatement, analysis: ModuleAnalysis): HirStmt {
+function lowerThrow(
+  stmt: ThrowStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
   const arg = stmt.argument;
   const errTy = programErrType(analysis);
+  // In a `"use panic"` scope (028a) a throw aborts with its message; the class
+  // (built-in or custom) is erased, exactly as under the `String` error type.
+  const panic = analysis.panicScopes.has(scope);
   if (arg.type === "NewExpression") {
     const nw = arg as NewExpression;
     if (nw.callee.type !== "Identifier") {
@@ -315,6 +518,7 @@ function lowerThrow(stmt: ThrowStatement, analysis: ModuleAnalysis): HirStmt {
       });
     }
     const msg = lowerExpr(message, analysis);
+    if (panic) return { kind: "throw", value: msg, panic: true };
     // A custom error is boxed: `Box::new(<X>::new(msg))`. A built-in `Error` /
     // string throw carries the message; under a boxed program error type it
     // converts with `.into()` (the `From<String>` for `Box<dyn Error>`).
@@ -337,10 +541,9 @@ function lowerThrow(stmt: ThrowStatement, analysis: ModuleAnalysis): HirStmt {
   }
   // `throw "literal"` — a bare string literal is thrown as its own message.
   if (arg.type === "Literal" && typeof (arg as Literal).value === "string") {
-    return {
-      kind: "throw",
-      value: boxIfNeeded(lowerExpr(arg, analysis), errTy),
-    };
+    const msg = lowerExpr(arg, analysis);
+    if (panic) return { kind: "throw", value: msg, panic: true };
+    return { kind: "throw", value: boxIfNeeded(msg, errTy) };
   }
   throw new UnsupportedError({
     type: "throw of a non-Error, non-string-literal value",
@@ -609,6 +812,46 @@ function lowerInterface(
 }
 
 /**
+ * Lower `enum E { A, B = 1 }` to a `HirEnum` (a C-like Rust enum). Variants must
+ * be plain identifiers; an initializer, if present, must be an integer literal
+ * (an explicit discriminant). `const enum` (compile-time inlining) and
+ * string-valued members are rejected — each a later slice.
+ */
+function lowerEnum(decl: TSEnumDeclaration): HirEnum {
+  if (decl.const) {
+    throw new UnsupportedError({
+      type: "`const enum` (compile-time inlining)",
+    });
+  }
+  const variants = decl.body.members.map((m) => {
+    if (m.computed || m.id.type !== "Identifier") {
+      throw new UnsupportedError({ type: "computed enum member" });
+    }
+    let disc: number | null = null;
+    if (m.initializer) {
+      const init = m.initializer;
+      if (
+        init.type !== "Literal" ||
+        typeof (init as Literal).value !== "number"
+      ) {
+        throw new UnsupportedError({
+          type: "enum member initializer must be an integer literal (string enums unsupported)",
+        });
+      }
+      const v = (init as Literal).value as number;
+      if (!Number.isInteger(v)) {
+        throw new UnsupportedError({
+          type: "enum member with a fractional discriminant",
+        });
+      }
+      disc = v;
+    }
+    return { name: m.id.name, disc };
+  });
+  return { kind: "enum", name: decl.id.name, variants };
+}
+
+/**
  * Lower a `class` to a `HirClass` (a `struct` + `impl`). Fields come from
  * `PropertyDefinition`s; the constructor becomes an associated `new`; each method
  * becomes an `fn` with a `self` receiver. Inheritance (`extends`/`implements`),
@@ -646,10 +889,45 @@ function lowerClass(
       };
     });
 
+  // Parameter properties (`constructor(public x: T)`) each contribute a field,
+  // appended after the explicit ones (declaration order within the ctor params).
+  const ctorMember = decl.body.body.find(
+    (m): m is MethodDefinition =>
+      m.type === "MethodDefinition" && m.kind === "constructor",
+  );
+  if (ctorMember) {
+    for (const p of ctorMember.value.params as unknown as Param[]) {
+      if (p.type !== "TSParameterProperty") continue;
+      const inner = p.parameter;
+      if (!inner.typeAnnotation) {
+        throw new UnsupportedError({
+          type: `parameter property '${inner.name}' without a type`,
+        });
+      }
+      fields.push({
+        name: inner.name,
+        ty: lowerType(inner.typeAnnotation.typeAnnotation, structs),
+      });
+    }
+  }
+
   let ctor: HirFn | null = null;
+  let dispose: HirStmt[] | null = null;
   const methods: HirFn[] = [];
   for (const member of decl.body.body) {
     if (member.type !== "MethodDefinition") continue;
+    // A `[Symbol.dispose]() { … }` method → the class's `Drop` impl (series 025).
+    if (isDisposeMethod(member)) {
+      if (!member.value.body) {
+        throw new UnsupportedError({ type: "[Symbol.dispose] without a body" });
+      }
+      dispose = lowerStatements(
+        member.value.body.body,
+        analysis,
+        `${name}.drop`,
+      );
+      continue;
+    }
     if (member.static || member.computed) {
       throw new UnsupportedError({ type: "static/computed class method" });
     }
@@ -669,7 +947,21 @@ function lowerClass(
   // Throwing / `?`-propagation inside methods and constructors is supported
   // (series 023): the fallibility fixpoint types the method/ctor as `Result` and
   // `?`-propagates fallible method/`new` calls.
-  return { kind: "class", name, fields, ctor, methods };
+  return { kind: "class", name, fields, ctor, methods, dispose };
+}
+
+/** Is this a `[Symbol.dispose]() { … }` method (→ the class's `Drop` impl)? */
+function isDisposeMethod(member: MethodDefinition): boolean {
+  if (!member.computed) return false;
+  const key = member.key as unknown as Expression;
+  if (key.type !== "MemberExpression") return false;
+  const m = key as MemberExpression;
+  return (
+    m.object.type === "Identifier" &&
+    (m.object as Identifier).name === "Symbol" &&
+    m.property.type === "Identifier" &&
+    (m.property as Identifier).name === "dispose"
+  );
 }
 
 /**
@@ -686,7 +978,20 @@ function lowerConstructor(
   analysis: ModuleAnalysis,
 ): HirFn {
   const structs = analysis.structs;
-  const params = fn.params.map((p) => lowerParam(p, undefined, structs));
+  // A parameter property (`public x: T`) both declares a field (added in
+  // `lowerClass`) and initializes it from the moved-in argument — seed that
+  // field-init here and unwrap the binding to an ordinary param.
+  const assigned = new Map<string, HirExpr>();
+  const params = (fn.params as unknown as Param[]).map((p) => {
+    if (p.type === "TSParameterProperty") {
+      assigned.set(p.parameter.name, {
+        kind: "ident",
+        name: p.parameter.name,
+      });
+      return lowerParam(p.parameter, undefined, structs);
+    }
+    return lowerParam(p, undefined, structs);
+  });
   if (!fn.body) {
     throw new UnsupportedError({ type: "constructor without a body" });
   }
@@ -694,7 +999,6 @@ function lowerConstructor(
   // Field-init assignments are folded into the returned struct literal; any other
   // statement is a *guard* (`if (…) throw …`), allowed only in a fallible ctor
   // (which returns `Result`), emitted as leading statements before the return.
-  const assigned = new Map<string, HirExpr>();
   const leading: HirStmt[] = [];
   for (const stmt of fn.body.body) {
     const init = constructorFieldInit(stmt, analysis);
@@ -828,7 +1132,11 @@ function lowerMethod(
     ? lowerType(fn.returnType.typeAnnotation, structs)
     : UNIT;
   if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
-  const body = lowerStatements(fn.body.body, analysis, `${className}.${name}`);
+  const body = lowerStatements(
+    takeDirectives(fn.body.body),
+    analysis,
+    `${className}.${name}`,
+  );
   // `&mut self` when the method mutates `self` — directly or transitively (it
   // calls another self-mutating method); `analysis.mutatingMethods` is the
   // fixpoint of both. A fallible method (throws or propagates) returns `Result`.
@@ -892,16 +1200,13 @@ function lowerStatement(
       const arg = (stmt as { argument: Expression | null }).argument;
       return [{ kind: "return", value: arg ? lowerExpr(arg, analysis) : null }];
     }
-    case "ExpressionStatement":
-      return [
-        {
-          kind: "expr",
-          expr: lowerExpr(
-            (stmt as { expression: Expression }).expression,
-            analysis,
-          ),
-        },
-      ];
+    case "ExpressionStatement": {
+      const e = (stmt as { expression: Expression }).expression;
+      // `xs.forEach(p => …)` lowers to a `for` loop (a statement), not an expr.
+      const forEach = tryForEach(e, analysis, scope);
+      if (forEach) return forEach;
+      return [{ kind: "expr", expr: lowerExpr(e, analysis) }];
+    }
     case "IfStatement":
       return [lowerIf(stmt as IfStatement, analysis, scope)];
     case "WhileStatement": {
@@ -933,7 +1238,7 @@ function lowerStatement(
       return [{ kind: "continue" }];
     }
     case "ThrowStatement":
-      return [lowerThrow(stmt as ThrowStatement, analysis)];
+      return [lowerThrow(stmt as ThrowStatement, analysis, scope)];
     case "TryStatement":
       return [lowerTry(stmt as TryStatement, analysis, scope)];
     default:
@@ -1108,12 +1413,24 @@ function lowerForOf(
   if (!decl || stmt.left.declarations.length !== 1) {
     throw new UnsupportedError({ type: "for-of with a non-single binding" });
   }
-  const iter: HirExpr = {
-    kind: "method",
-    receiver: lowerExpr(stmt.right, analysis),
-    name: "iter",
-    args: [],
-  };
+  // A `for (const x of g())` over a call to a sync generator (series 025d)
+  // consumes the returned `impl Iterator` directly — no `.iter()`, and the
+  // binding is `x` by value (`Item = T`). Everything else iterates by reference
+  // (`.iter()`, binding `&T`), sound whether the iterable is owned or borrowed.
+  const overGenerator =
+    stmt.right.type === "CallExpression" &&
+    (stmt.right as CallExpression).callee.type === "Identifier" &&
+    analysis.generators.has(
+      ((stmt.right as CallExpression).callee as Identifier).name,
+    );
+  const iter: HirExpr = overGenerator
+    ? lowerExpr(stmt.right, analysis)
+    : {
+        kind: "method",
+        receiver: lowerExpr(stmt.right, analysis),
+        name: "iter",
+        args: [],
+      };
   return {
     kind: "forIn",
     pat: decl.id.name,
@@ -1216,17 +1533,11 @@ function lowerVarDecl(
     const ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
-    // An object literal is interpreted from its binding's type: a `hashmap`
-    // annotation makes it a `HashMap::from([…])` construction, a `struct` a
-    // `Name { … }` literal. A bare object literal (neither) stays unsupported.
-    let init: HirExpr;
-    if (ty?.kind === "hashmap" && d.init.type === "ObjectExpression") {
-      init = lowerHashMapLiteral(d.init as ObjectExpression, analysis);
-    } else if (ty?.kind === "struct" && d.init.type === "ObjectExpression") {
-      init = lowerStructLiteral(d.init as ObjectExpression, ty.name, analysis);
-    } else {
-      init = lowerExpr(d.init, analysis);
-    }
+    // An object/array literal is interpreted from its binding's type: a `hashmap`
+    // → `HashMap::from([…])`, a `struct` → `Name { … }`, a `vec<struct>` →
+    // `vec![Name { … }, …]`, recursing into nested literals (series 032). A bare
+    // object literal (no struct/record type) stays unsupported (via `lowerExpr`).
+    const init = lowerTyped(d.init, ty, analysis);
     return {
       kind: "let",
       name: d.id.name,
@@ -1269,6 +1580,10 @@ function lowerStructLiteral(
   name: string,
   analysis: ModuleAnalysis,
 ): HirExpr {
+  // The struct's declared field types drive recursion into nested struct / array
+  // literals (series 032). An unknown struct has no entry — values lower plainly
+  // (the cargo oracle catches a mismatch).
+  const fieldTypes = analysis.structFields.get(name);
   const fields = obj.properties.map((p) => {
     if (p.type !== "Property" || p.computed) {
       throw new UnsupportedError({
@@ -1279,9 +1594,106 @@ function lowerStructLiteral(
     if (key.kind !== "string") {
       throw new UnsupportedError({ type: "struct field name must be static" });
     }
-    return { name: key.value, value: lowerExpr(p.value, analysis) };
+    const declared = fieldTypes?.find((f) => f.name === key.value)?.ty ?? null;
+    return { name: key.value, value: lowerTyped(p.value, declared, analysis) };
   });
   return { kind: "structLit", name, fields };
+}
+
+/**
+ * Lower an initializer *against a declared target type* (series 032). This is
+ * what turns an object/array literal into the right Rust shape by its context:
+ *   - `struct` + object literal → a nested `structLit` (recursing into fields);
+ *   - `hashmap` + object literal → a `HashMap::from([…])`;
+ *   - `vec` + array literal → an array whose elements lower against the elem type
+ *     (so a `Array<Point>` of object literals becomes `vec![Point { … }, …]`).
+ * Anything else lowers as a plain expression.
+ */
+function lowerTyped(
+  expr: Expression,
+  ty: RustType | null,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  if (ty?.kind === "struct" && expr.type === "ObjectExpression") {
+    return lowerStructLiteral(expr as ObjectExpression, ty.name, analysis);
+  }
+  if (ty?.kind === "hashmap" && expr.type === "ObjectExpression") {
+    return lowerHashMapLiteral(expr as ObjectExpression, analysis);
+  }
+  if (ty?.kind === "vec" && expr.type === "ArrayExpression") {
+    return {
+      kind: "array",
+      elements: (expr as ArrayExpression).elements.map((e) =>
+        lowerTyped(e, ty.elem, analysis),
+      ),
+    };
+  }
+  return lowerExpr(expr, analysis);
+}
+
+/**
+ * Collect each declared struct's field types (interfaces + non-error classes,
+ * including parameter properties) — a lenient pre-pass for series 032. Malformed
+ * members are skipped here; the real lowering (`lowerInterface`/`lowerClass`)
+ * still fails loud on them.
+ */
+function collectStructFields(
+  program: Program,
+  structs: Set<string>,
+): Map<string, { name: string; ty: RustType }[]> {
+  const map = new Map<string, { name: string; ty: RustType }[]>();
+  for (const stmt of program.body) {
+    if (stmt.type === "TSInterfaceDeclaration") {
+      const decl = stmt as TSInterfaceDeclaration;
+      if (decl.extends && decl.extends.length > 0) continue;
+      const fields: { name: string; ty: RustType }[] = [];
+      for (const m of decl.body.body) {
+        if (
+          m.type === "TSPropertySignature" &&
+          !m.computed &&
+          !m.optional &&
+          m.typeAnnotation
+        ) {
+          fields.push({
+            name: m.key.name,
+            ty: lowerType(m.typeAnnotation.typeAnnotation, structs),
+          });
+        }
+      }
+      map.set(decl.id.name, fields);
+    } else if (stmt.type === "ClassDeclaration" && !isErrorSubclass(stmt)) {
+      const decl = stmt as ClassDeclaration;
+      if (!decl.id) continue;
+      const fields: { name: string; ty: RustType }[] = [];
+      for (const m of decl.body.body) {
+        if (
+          m.type === "PropertyDefinition" &&
+          !m.static &&
+          !m.computed &&
+          m.typeAnnotation
+        ) {
+          fields.push({
+            name: m.key.name,
+            ty: lowerType(m.typeAnnotation.typeAnnotation, structs),
+          });
+        }
+      }
+      const ctor = decl.body.body.find(
+        (m): m is MethodDefinition =>
+          m.type === "MethodDefinition" && m.kind === "constructor",
+      );
+      for (const p of (ctor?.value.params ?? []) as unknown as Param[]) {
+        if (p.type === "TSParameterProperty" && p.parameter.typeAnnotation) {
+          fields.push({
+            name: p.parameter.name,
+            ty: lowerType(p.parameter.typeAnnotation.typeAnnotation, structs),
+          });
+        }
+      }
+      map.set(decl.id.name, fields);
+    }
+  }
+  return map;
 }
 
 /** A record key: a string literal or a bare identifier, both a `String`. */
@@ -1301,6 +1713,13 @@ function lowerKey(key: Expression): HirExpr {
 
 function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
   switch (expr.type) {
+    case "ParenthesizedExpression":
+      // Source parens are structural only — the grouping is already encoded in
+      // the tree. Unwrap; the emitter re-parenthesizes from precedence (026).
+      return lowerExpr(
+        (expr as unknown as { expression: Expression }).expression,
+        analysis,
+      );
     case "Literal":
       return lowerLiteral(expr as Literal);
     case "Identifier":
@@ -1316,6 +1735,41 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         op: b.operator,
         left: lowerExpr(b.left, analysis),
         right: lowerExpr(b.right, analysis),
+      };
+    }
+    case "LogicalExpression": {
+      // `&&` / `||` map directly to Rust's short-circuit operators (a `binary`
+      // HIR node; the emitter's `BINARY_PREC` parenthesizes them). `??` (nullish
+      // coalescing) needs `Option` semantics the dialect doesn't model (a bare
+      // `null` is already fail-loud) — so it stays fail-loud, never guessed.
+      const l = expr as unknown as {
+        operator: string;
+        left: Expression;
+        right: Expression;
+      };
+      if (l.operator !== "&&" && l.operator !== "||") {
+        throw new UnsupportedError({
+          type: `logical operator '${l.operator}' (nullish coalescing needs Option)`,
+        });
+      }
+      return {
+        kind: "binary",
+        op: l.operator,
+        left: lowerExpr(l.left, analysis),
+        right: lowerExpr(l.right, analysis),
+      };
+    }
+    case "UnaryExpression": {
+      const u = expr as unknown as { operator: string; argument: Expression };
+      // `-x` (negation) and `!x` (logical not) map directly. `+x`, `~x`,
+      // `typeof`/`void`/`delete` have no clean typed target — fail loud.
+      if (u.operator !== "-" && u.operator !== "!") {
+        throw new UnsupportedError({ type: `unary operator '${u.operator}'` });
+      }
+      return {
+        kind: "unary",
+        op: u.operator,
+        operand: lowerExpr(u.argument, analysis),
       };
     }
     case "AssignmentExpression": {
@@ -1474,6 +1928,32 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // A user-declared class method of this name is a native call — never hijack
+    // it with the library-method routing below (map/filter/at/pad*, 027/033).
+    const isUserMethod = analysis.methodNames.has(methodName);
+    // Value-position closures over arrays (027-cl): `xs.map/filter(arrow)` →
+    // iterator chains. `forEach` is a statement (see `tryForEach`).
+    if (
+      !isUserMethod &&
+      (methodName === "map" || methodName === "filter") &&
+      call.arguments.length === 1 &&
+      call.arguments[0]?.type === "ArrowFunctionExpression"
+    ) {
+      const cl = arrowExprClosure(
+        call.arguments[0] as ArrowFunctionExpression,
+        analysis,
+      );
+      const receiver = lowerExpr(m.object, analysis);
+      return methodName === "map"
+        ? { kind: "iterMap", receiver, param: cl.param, body: cl.body }
+        : { kind: "iterFilter", receiver, param: cl.param, body: cl.body };
+    }
+    // Quirk-heavy library methods route to the `tslib` fidelity crate (027);
+    // clean-mapping methods fall through to the native `method` call below.
+    const routed = isUserMethod
+      ? null
+      : tryTslibMethod(methodName, m, call, analysis);
+    if (routed) return routed;
     const methodExpr: HirExpr = {
       kind: "method",
       receiver: lowerExpr(m.object, analysis),
@@ -1488,6 +1968,143 @@ function lowerCall(
   }
 
   throw new UnsupportedError(call);
+}
+
+/**
+ * Extract a single-param, expression-bodied arrow closure's param name and
+ * lowered body (series 027-cl). The body is the arrow's expression, or a block of
+ * exactly one `return <expr>`. Multi-param (index/array), `async`, and
+ * multi-statement bodies are fail-loud (later slices).
+ */
+function arrowExprClosure(
+  arrow: ArrowFunctionExpression,
+  analysis: ModuleAnalysis,
+): { param: string; body: HirExpr } {
+  if (arrow.async) {
+    throw new UnsupportedError({ type: "async arrow closure" });
+  }
+  if (arrow.params.length !== 1) {
+    throw new UnsupportedError({
+      type: "closure must take exactly one parameter (index/array params not yet supported)",
+    });
+  }
+  const param = arrow.params[0]?.name;
+  if (!param) throw new UnsupportedError({ type: "closure parameter binding" });
+  let bodyExpr: Expression;
+  if (arrow.expression) {
+    bodyExpr = arrow.body as Expression;
+  } else {
+    const b = arrow.body as BlockStatement;
+    const only = b.body.length === 1 ? b.body[0] : undefined;
+    const ret =
+      only?.type === "ReturnStatement" ? (only as ReturnStatement) : null;
+    if (ret?.argument) {
+      bodyExpr = ret.argument;
+    } else {
+      throw new UnsupportedError({
+        type: "map/filter closure body must be an expression or a single return",
+      });
+    }
+  }
+  return { param, body: lowerExpr(bodyExpr, analysis) };
+}
+
+/**
+ * `xs.forEach(p => body)` → `for &p in xs.iter() { body }` (series 027-cl) — a
+ * statement, so it is recognized here (before generic expression lowering) rather
+ * than in `lowerCall`. The `&p` pattern copies each Copy element out of the
+ * `.iter()` borrow. Returns null when `stmt` is not a `forEach` call.
+ */
+function tryForEach(
+  expr: Expression,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt[] | null {
+  if (expr.type !== "CallExpression") return null;
+  const call = expr as CallExpression;
+  if (call.callee.type !== "MemberExpression") return null;
+  const m = call.callee as MemberExpression;
+  if (m.property.type !== "Identifier") return null;
+  if ((m.property as Identifier).name !== "forEach") return null;
+  // A user-declared `forEach` method is a native call, not the array HOF.
+  if (analysis.methodNames.has("forEach")) return null;
+  if (
+    call.arguments.length !== 1 ||
+    call.arguments[0]?.type !== "ArrowFunctionExpression"
+  ) {
+    return null;
+  }
+  const arrow = call.arguments[0] as ArrowFunctionExpression;
+  if (arrow.async)
+    throw new UnsupportedError({ type: "async forEach closure" });
+  if (arrow.params.length !== 1) {
+    throw new UnsupportedError({
+      type: "forEach closure must take exactly one parameter",
+    });
+  }
+  const param = arrow.params[0]?.name;
+  if (!param) throw new UnsupportedError({ type: "closure parameter binding" });
+  const body: HirStmt[] = arrow.expression
+    ? [{ kind: "expr", expr: lowerExpr(arrow.body as Expression, analysis) }]
+    : lowerStatements((arrow.body as BlockStatement).body, analysis, scope);
+  const iter: HirExpr = {
+    kind: "method",
+    receiver: lowerExpr(m.object, analysis),
+    name: "iter",
+    args: [],
+  };
+  return [{ kind: "forIn", pat: `&${param}`, iter, body }];
+}
+
+/**
+ * Route a *quirk-heavy* library method to the `tslib` fidelity crate (series
+ * 027), or return null to leave it as a native `method` call. The emitter's
+ * hybrid rule: emit native idiomatic Rust where a JS method maps cleanly, and
+ * confine JS-quirk semantics (negative `at`, `padStart`/`padEnd`) to `tslib`.
+ * Numeric args are passed as owned `f64` — `tslib` floors them, so the runtime
+ * coercion lives in the audited crate, not a codegen `as usize` cast.
+ */
+function tryTslibMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const recvRef = (): HirArg => ({
+    borrow: "ref",
+    expr: lowerExpr(m.object, analysis),
+  });
+  const args = call.arguments;
+  // `xs.at(i)` → `tslib::array::at(&xs, i)` (JS negative-from-end indexing).
+  if (methodName === "at" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::array::at",
+      args: [
+        recvRef(),
+        { borrow: "owned", expr: lowerExpr(args[0], analysis) },
+      ],
+    };
+  }
+  // `s.padStart(n, pad)` / `s.padEnd(n, pad)` → `tslib::string::pad_{start,end}`.
+  if (
+    (methodName === "padStart" || methodName === "padEnd") &&
+    args.length === 2 &&
+    args[0] &&
+    args[1]
+  ) {
+    const fn = methodName === "padStart" ? "pad_start" : "pad_end";
+    return {
+      kind: "call",
+      callee: `tslib::string::${fn}`,
+      args: [
+        recvRef(),
+        { borrow: "owned", expr: lowerExpr(args[0], analysis) },
+        { borrow: "ref", expr: lowerExpr(args[1], analysis) },
+      ],
+    };
+  }
+  return null;
 }
 
 /** `new C(args)` → `C::new(args)`. Constructor params are owned (args by value). */
@@ -1523,6 +2140,16 @@ function lowerMember(
     // `.length` is a property in TS but a method in Rust.
     if (prop === "length")
       return { kind: "len", object: lowerExpr(member.object, analysis) };
+    // `E.Variant` (member of a declared enum) → the Rust path `E::Variant`.
+    if (
+      member.object.type === "Identifier" &&
+      analysis.enums.has((member.object as Identifier).name)
+    ) {
+      return {
+        kind: "path",
+        segments: [(member.object as Identifier).name, prop],
+      };
+    }
     return {
       kind: "field",
       object: lowerExpr(member.object, analysis),
