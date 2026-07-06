@@ -14,6 +14,11 @@
  */
 
 import type { Program } from "./ast";
+import {
+  type StructTable,
+  buildStructTable,
+  structDeriveClause,
+} from "./derives";
 import type {
   HirArg,
   HirClass,
@@ -138,7 +143,10 @@ export function emit(program: Program): string {
 
 /** Emit a complete Rust module from already-lowered HIR. */
 export function emitModule(mod: HirModule): string {
-  const parts = mod.items.map(emitItem);
+  // A struct table (interface + class field shapes) drives on-demand trait
+  // derivation (`derives.ts`); threaded through item emission.
+  const structs = buildStructTable(mod.items);
+  const parts = mod.items.map((item) => emitItem(item, structs));
   if (mod.main.length > 0) {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
     // A fallible script makes `main` return `Result<(), String>` (its trailing
@@ -181,14 +189,14 @@ function usesKind(node: unknown, kind: string): boolean {
 
 // ── Items ────────────────────────────────────────────────────────────────────
 
-function emitItem(item: HirItem): string {
+function emitItem(item: HirItem, structs: StructTable): string {
   switch (item.kind) {
     case "fn":
       return emitFn(item);
     case "struct":
-      return emitStruct(item);
+      return emitStruct(item, structs);
     case "class":
-      return emitClass(item);
+      return emitClass(item, structs);
     case "errorClass":
       return emitErrorClass(item);
     case "enum":
@@ -248,8 +256,11 @@ function emitErrorClass(e: HirErrorClass): string {
 }
 
 /** A `class` → its `struct` definition, an `impl` block, and (if any) `Drop`. */
-function emitClass(c: HirClass): string {
-  const struct = emitStruct({ kind: "struct", name: c.name, fields: c.fields });
+function emitClass(c: HirClass, structs: StructTable): string {
+  const struct = emitStruct(
+    { kind: "struct", name: c.name, fields: c.fields },
+    structs,
+  );
   const fns = [c.ctor, ...c.methods].filter((f): f is HirFn => f !== null);
   const body = fns.map((f) => indent(emitFn(f))).join("\n");
   const parts = [`${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`];
@@ -265,13 +276,18 @@ function emitClass(c: HirClass): string {
   return parts.join("\n\n");
 }
 
-/** `struct Name {\n    field: Ty,\n …\n}` (or `Name {}` when field-less). */
-function emitStruct(s: HirStruct): string {
-  if (s.fields.length === 0) return `struct ${rid(s.name)} {}`;
+/**
+ * `[#[derive(...)]\n]struct Name {\n    field: Ty,\n …\n}` (or `Name {}` when
+ * field-less). The derive clause is computed on-demand from field eligibility
+ * (`derives.ts`) — `Clone` (for the ownership pass) + `Debug` (for `console.log`).
+ */
+function emitStruct(s: HirStruct, structs: StructTable): string {
+  const derive = structDeriveClause(s, structs);
+  if (s.fields.length === 0) return `${derive}struct ${rid(s.name)} {}`;
   const fields = s.fields
     .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
     .join("\n");
-  return `struct ${rid(s.name)} {\n${fields}\n}`;
+  return `${derive}struct ${rid(s.name)} {\n${fields}\n}`;
 }
 
 function emitFn(fn: HirFn): string {

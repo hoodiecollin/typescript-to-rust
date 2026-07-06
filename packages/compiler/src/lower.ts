@@ -176,17 +176,21 @@ export function lower(program: Program): HirModule {
   }
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
-  // read-only `string` params (`&String`) → the idiomatic `&str`, then
-  // use-after-move → `.clone()`, then `"use rc"` scopes → `Rc<RefCell<T>>` (028b),
-  // then `"use arena"` scopes → `bumpalo` bump allocation (028c).
-  return refineArena(
-    refineRc(
-      refineOwnership(
+  // read-only `string` params (`&String`) → the idiomatic `&str`, then the
+  // ownership-model directives — `"use rc"` scopes → `Rc<RefCell<T>>` (028b) and
+  // `"use arena"` scopes → `bumpalo` bump allocation (028c) — and *finally*
+  // use-after-move → `.clone()`. Ownership runs **last** so it sees the HIR after
+  // the directives have imposed their own ownership model: an `rc` alias is already
+  // `Rc::clone` (not a bare move) and an arena `Vec` is already un-annotated, so the
+  // clone pass leaves both alone and only fills the remaining plain-move gaps (037).
+  return refineOwnership(
+    refineArena(
+      refineRc(
         refineStrings(refineNumerics({ items, main, mainRet, mainAsync })),
+        { rcScopes: analysis.rcScopes, classes: analysis.classes },
       ),
-      { rcScopes: analysis.rcScopes, classes: analysis.classes },
+      analysis.arenaScopes,
     ),
-    analysis.arenaScopes,
   );
 }
 

@@ -27,6 +27,12 @@
  * they carry a `Clone` derive). Partial moves / move-out-of-borrow are deferred.
  */
 
+import {
+  type StructTable,
+  buildStructTable,
+  isStructCloneable,
+  isTypeCloneable,
+} from "./derives";
 import type {
   HirExpr,
   HirFn,
@@ -37,45 +43,45 @@ import type {
 } from "./hir";
 
 export function refineOwnership(module: HirModule): HirModule {
+  // The struct table lets a struct-typed binding join the movable set exactly when
+  // it carries a `Clone` derive (037b) — kept in lockstep with the emitter via the
+  // shared `derives.ts` cloneability test.
+  const structs = buildStructTable(module.items);
   for (const item of module.items) {
     if (item.kind === "fn") {
-      refineBody(item.params, item.body);
+      refineBody(item.params, item.body, structs);
     } else if (item.kind === "class") {
-      if (item.ctor) refineBody(item.ctor.params, item.ctor.body);
-      for (const method of item.methods) refineBody(method.params, method.body);
+      if (item.ctor) refineBody(item.ctor.params, item.ctor.body, structs);
+      for (const method of item.methods) {
+        refineBody(method.params, method.body, structs);
+      }
     }
   }
-  refineBody([], module.main);
+  refineBody([], module.main, structs);
   return module;
 }
 
-/** A `Clone`-able non-Copy type: cloning is both needed (non-Copy) and legal. */
-function isCloneableMovable(ty: RustType | null): boolean {
+/**
+ * A `Clone`-able non-Copy type: cloning is both needed (non-Copy) and legal.
+ * `String`, `Vec`/`HashMap` of cloneable elements, and a `struct` whose fields are
+ * all cloneable (037b). Copy scalars need no clone; refs can't move.
+ */
+function isCloneableMovable(
+  ty: RustType | null,
+  structs: StructTable,
+): boolean {
   if (!ty) return false;
   switch (ty.kind) {
     case "String":
       return true;
     case "vec":
-      return isCloneScalarOrString(ty.elem);
+      return isTypeCloneable(ty.elem, structs);
     case "hashmap":
-      return isCloneScalarOrString(ty.key) && isCloneScalarOrString(ty.value);
-    // Copy scalars need no clone; refs can't move; structs have no Clone derive.
-    default:
-      return false;
-  }
-}
-
-/** Cloneable leaf/element types (excludes struct, which has no Clone derive). */
-function isCloneScalarOrString(ty: RustType): boolean {
-  switch (ty.kind) {
-    case "String":
-    case "f64":
-    case "usize":
-    case "i64":
-    case "bool":
-      return true;
-    case "vec":
-      return isCloneScalarOrString(ty.elem);
+      return (
+        isTypeCloneable(ty.key, structs) && isTypeCloneable(ty.value, structs)
+      );
+    case "struct":
+      return isStructCloneable(ty.name, structs);
     default:
       return false;
   }
@@ -104,10 +110,16 @@ function setEq(a: Live, b: Live): boolean {
 
 // ── Body driver ──────────────────────────────────────────────────────────────
 
-function refineBody(params: HirParam[], body: HirStmt[]): void {
+function refineBody(
+  params: HirParam[],
+  body: HirStmt[],
+  structs: StructTable,
+): void {
   const movable: Live = new Set();
-  for (const p of params) if (isCloneableMovable(p.ty)) movable.add(p.name);
-  collectLetBindings(body, movable);
+  for (const p of params) {
+    if (isCloneableMovable(p.ty, structs)) movable.add(p.name);
+  }
+  collectLetBindings(body, movable, structs);
   if (movable.size === 0) return;
 
   // liveOut per statement — the CFG liveness solution.
@@ -575,29 +587,34 @@ function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
 }
 
 /** Add every `let`-bound name with a cloneable-movable type to `movable`. */
-function collectLetBindings(body: HirStmt[], movable: Live): void {
+function collectLetBindings(
+  body: HirStmt[],
+  movable: Live,
+  structs: StructTable,
+): void {
   for (const s of body) {
     switch (s.kind) {
       case "let":
-        if (isCloneableMovable(s.ty)) movable.add(s.name);
+        if (isCloneableMovable(s.ty, structs)) movable.add(s.name);
         break;
       case "if":
-        collectLetBindings(s.conseq, movable);
-        if (s.alt) collectLetBindings(s.alt, movable);
+        collectLetBindings(s.conseq, movable, structs);
+        if (s.alt) collectLetBindings(s.alt, movable, structs);
         break;
       case "while":
       case "block":
       case "forIn":
       case "forRange":
-        collectLetBindings(s.body, movable);
+        collectLetBindings(s.body, movable, structs);
         break;
       case "match":
-        for (const arm of s.arms) collectLetBindings(arm.body, movable);
+        for (const arm of s.arms)
+          collectLetBindings(arm.body, movable, structs);
         break;
       case "tryCatch":
-        collectLetBindings(s.tryBody, movable);
-        collectLetBindings(s.catchBody, movable);
-        if (s.finallyBody) collectLetBindings(s.finallyBody, movable);
+        collectLetBindings(s.tryBody, movable, structs);
+        collectLetBindings(s.catchBody, movable, structs);
+        if (s.finallyBody) collectLetBindings(s.finallyBody, movable, structs);
         break;
     }
   }
