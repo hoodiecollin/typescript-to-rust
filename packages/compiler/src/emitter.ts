@@ -17,6 +17,7 @@ import type { Program } from "./ast";
 import type {
   HirArg,
   HirClass,
+  HirErrorClass,
   HirExpr,
   HirFn,
   HirItem,
@@ -89,7 +90,44 @@ function emitItem(item: HirItem): string {
       return emitStruct(item);
     case "class":
       return emitClass(item);
+    case "errorClass":
+      return emitErrorClass(item);
   }
+}
+
+/**
+ * A custom error class → `struct <Name> { message: String }`, an associated
+ * `new`, and the `Display`/`Debug`/`Error` impls that make it usable as a
+ * `Box<dyn std::error::Error>`. All paths are fully-qualified, so no `use`
+ * prelude is needed.
+ */
+function emitErrorClass(e: HirErrorClass): string {
+  const n = e.name;
+  return [
+    `struct ${n} {`,
+    `${INDENT}message: String,`,
+    `}`,
+    ``,
+    `impl ${n} {`,
+    `${INDENT}fn new(message: String) -> ${n} {`,
+    `${INDENT}${INDENT}${n} { message }`,
+    `${INDENT}}`,
+    `}`,
+    ``,
+    `impl std::fmt::Display for ${n} {`,
+    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {`,
+    `${INDENT}${INDENT}write!(f, "{}", self.message)`,
+    `${INDENT}}`,
+    `}`,
+    ``,
+    `impl std::fmt::Debug for ${n} {`,
+    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {`,
+    `${INDENT}${INDENT}write!(f, "{}", self.message)`,
+    `${INDENT}}`,
+    `}`,
+    ``,
+    `impl std::error::Error for ${n} {}`,
+  ].join("\n");
 }
 
 /** A `class` → its `struct` definition followed by an `impl` block. */
@@ -112,7 +150,8 @@ function emitStruct(s: HirStruct): string {
 function emitFn(fn: HirFn): string {
   const asyncKw = fn.isAsync ? "async " : "";
   // A method's `self` receiver leads the parameter list; free/associated fns omit it.
-  const self = fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
+  const self =
+    fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
   const rest = fn.params.map((p) => `${p.name}: ${emitType(p.ty)}`);
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
@@ -172,6 +211,17 @@ function emitStmt(stmt: HirStmt): string {
     case "throw":
       // A `throw` in the dialect is a propagated error: `return Err(msg);`.
       return `return Err(${emitExpr(stmt.value)});`;
+    case "tryCatch": {
+      // The `try` block is a `Result`-returning IIFE so its `?`/`throw`s
+      // short-circuit to the closure; `catch` matches on the result; `finally`
+      // runs after (divergence past it is rejected in lowering, so this is exact).
+      const binder = stmt.catchParam ?? "_";
+      const closure = `(|| -> Result<(), ${emitType(stmt.errTy)}> ${block(stmt.tryBody)})()`;
+      const head = `if let Err(${binder}) = ${closure} ${block(stmt.catchBody)}`;
+      if (!stmt.finallyBody) return head;
+      const fin = stmt.finallyBody.map(emitStmt).join("\n");
+      return `${head}\n${fin}`;
+    }
   }
 }
 
@@ -306,6 +356,8 @@ function emitType(ty: RustType): string {
       return ty.name;
     case "result":
       return `Result<${emitType(ty.ok)}, ${emitType(ty.err)}>`;
+    case "boxError":
+      return "Box<dyn std::error::Error>";
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
   }

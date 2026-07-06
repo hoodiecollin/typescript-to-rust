@@ -45,6 +45,11 @@ export type RustType =
   | { kind: "struct"; name: string }
   /** A fallible function's return type: `Result<ok, err>` (`err` is `String` today). */
   | { kind: "result"; ok: RustType; err: RustType }
+  /**
+   * `Box<dyn std::error::Error>` — the program error type when any custom error
+   * class is declared (series 022), so `?` composes across every fallible fn.
+   */
+  | { kind: "boxError" }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -152,7 +157,23 @@ export type HirStmt =
   | { kind: "break" }
   | { kind: "continue" }
   /** `throw new Error(msg)` → `return Err(value);` (`value` is the message). */
-  | { kind: "throw"; value: HirExpr };
+  | { kind: "throw"; value: HirExpr }
+  /**
+   * `try`/`catch`/`finally` — the recovery side of errors. Emitted as a
+   * `Result`-returning IIFE closure (the `tryBody`, whose fallible calls/`throw`s
+   * short-circuit *to the closure*), matched by `if let Err(<catchParam>) = … {
+   * catchBody }`, with `finallyBody` (when present) emitted as sibling statements
+   * after. `errTy` is the program error type the closure's `Result` carries
+   * (`String`, or `Box<dyn Error>` under series 022).
+   */
+  | {
+      kind: "tryCatch";
+      tryBody: HirStmt[];
+      catchParam: string | null;
+      catchBody: HirStmt[];
+      finallyBody: HirStmt[] | null;
+      errTy: RustType;
+    };
 
 /**
  * One `match` arm. `guard` is `disc == case` (`null` is the wildcard `_`). When
@@ -208,8 +229,19 @@ export interface HirClass {
   methods: HirFn[];
 }
 
-/** A top-level Rust item: a function, a struct, or a class (struct + impl). */
-export type HirItem = HirFn | HirStruct | HirClass;
+/**
+ * A custom error class (`class X extends Error { constructor(message) {…} }`) —
+ * emitted as a `struct X { message: String }` with an associated `new` and
+ * `Display`/`Debug`/`std::error::Error` impls (series 022). The shape is fixed,
+ * so the item carries only the name.
+ */
+export interface HirErrorClass {
+  kind: "errorClass";
+  name: string;
+}
+
+/** A top-level Rust item: a function, a struct, a class, or a custom error type. */
+export type HirItem = HirFn | HirStruct | HirClass | HirErrorClass;
 
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level

@@ -295,6 +295,24 @@ export interface ThrowStatement extends Span {
   argument: Expression;
 }
 
+/** `catch (param) { body }` — `param` is `null` for a binding-less `catch { … }`. */
+export interface CatchClause extends Span {
+  type: "CatchClause";
+  param: Identifier | null;
+  body: BlockStatement;
+}
+
+/**
+ * `try { block } [catch (…) { … }] [finally { … }]`. In the dialect a `catch`
+ * handler is required (a `try`/`finally`-only form is rejected in lowering).
+ */
+export interface TryStatement extends Span {
+  type: "TryStatement";
+  block: BlockStatement;
+  handler: CatchClause | null;
+  finalizer: BlockStatement | null;
+}
+
 export interface BreakStatement extends Span {
   type: "BreakStatement";
   label: Identifier | null;
@@ -319,6 +337,7 @@ export type Statement =
   | BreakStatement
   | ContinueStatement
   | ThrowStatement
+  | TryStatement
   | TSInterfaceDeclaration
   | ClassDeclaration
   | ({ type: string } & Span);
