@@ -18,13 +18,18 @@
  * lattice bounded by the movable set → terminates). Liveness is a *may*-analysis
  * (union at joins), so it over-approximates live-ness — it errs toward *more*
  * clones, never fewer. Worst case is therefore a needless clone (slower, still
- * correct) or, for a shape it still can't prove (structs without a Clone derive,
- * partial moves), a bare move that cargo rejects **loudly** — never a wrong value.
- * This preserves the project's #1 fail-loud contract.
+ * correct) or, for a shape it still can't prove, a bare move that cargo rejects
+ * **loudly** — never a wrong value. This preserves the project's #1 fail-loud
+ * contract.
  *
- * Scope of this slice: `Clone`-able non-Copy types only — `String` and
- * `Vec`/`HashMap` of scalar/`String`. Structs join the movable set in 037b (once
- * they carry a `Clone` derive). Partial moves / move-out-of-borrow are deferred.
+ * Coverage (epic #1): moves of a bare **name** into a `let`, an owned call/method
+ * argument, a struct/array/hashmap literal element, or an assignment value
+ * (move-through-store); and non-Copy **projection** reads (`obj.field`, `arr[i]`)
+ * that move out of a place they can't be moved from — an index, a borrowed param,
+ * or a reused owned base (move-out-of-place / partial moves, 038). Structs join the
+ * movable set once they carry a `Clone` derive (037b). `Clone`-able types only
+ * (`String`, `Vec`/`HashMap` of cloneable elements, cloneable structs); a
+ * non-cloneable move stays bare → cargo-loud.
  */
 
 import {
@@ -120,7 +125,6 @@ function refineBody(
     if (isCloneableMovable(p.ty, structs)) movable.add(p.name);
   }
   collectLetBindings(body, movable, structs);
-  if (movable.size === 0) return;
 
   // liveOut per statement — the CFG liveness solution.
   const liveOut = new Map<HirStmt, Live>();
@@ -132,7 +136,60 @@ function refineBody(
     liveOut,
   );
 
-  placeSeq(body, movable, liveOut);
+  // Type environment + which params sit behind a reference — needed for the
+  // move-out-of-place (projection) clone decisions (038). A projection clone can
+  // be required even when no *name* is movable (e.g. returning a field of a
+  // borrowed struct param), so we do not early-return on an empty movable set.
+  const env = buildEnv(params, body);
+  const refParams = new Set(
+    params.filter((p) => p.ty.kind === "ref").map((p) => p.name),
+  );
+  placeSeq(body, { movable, map: liveOut, structs, env, refParams });
+}
+
+/** Per-body placement context: the movable set, liveness, types, and ref-params. */
+interface PlaceCtx {
+  movable: Live;
+  map: Map<HirStmt, Live>;
+  structs: StructTable;
+  env: Map<string, RustType>;
+  refParams: Set<string>;
+}
+
+/** Declared value types of every param and `let` binding in the body. */
+function buildEnv(params: HirParam[], body: HirStmt[]): Map<string, RustType> {
+  const env = new Map<string, RustType>();
+  for (const p of params) env.set(p.name, p.ty);
+  collectLetTypes(body, env);
+  return env;
+}
+
+function collectLetTypes(body: HirStmt[], env: Map<string, RustType>): void {
+  for (const s of body) {
+    switch (s.kind) {
+      case "let":
+        if (s.ty) env.set(s.name, s.ty);
+        break;
+      case "if":
+        collectLetTypes(s.conseq, env);
+        if (s.alt) collectLetTypes(s.alt, env);
+        break;
+      case "while":
+      case "block":
+      case "forIn":
+      case "forRange":
+        collectLetTypes(s.body, env);
+        break;
+      case "match":
+        for (const arm of s.arms) collectLetTypes(arm.body, env);
+        break;
+      case "tryCatch":
+        collectLetTypes(s.tryBody, env);
+        collectLetTypes(s.catchBody, env);
+        if (s.finallyBody) collectLetTypes(s.finallyBody, env);
+        break;
+    }
+  }
 }
 
 // ── Backward liveness ────────────────────────────────────────────────────────
@@ -402,67 +459,135 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
  * maximally-conservative over-approximation for the exotic case of an owned-arg
  * move inside a condition (never under-clones; at worst a needless clone).
  */
-function placeSeq(
-  stmts: HirStmt[],
-  movable: Live,
-  map: Map<HirStmt, Live>,
-): void {
-  for (const s of stmts) placeStmt(s, movable, map);
+function placeSeq(stmts: HirStmt[], ctx: PlaceCtx): void {
+  for (const s of stmts) placeStmt(s, ctx);
 }
 
-function placeStmt(s: HirStmt, movable: Live, map: Map<HirStmt, Live>): void {
-  const lo = map.get(s) ?? new Set<string>();
+/** The base identifier of a projection chain (`a.b[c].d` → `a`), or `null`. */
+function rootIdent(e: HirExpr): string | null {
+  let cur = e;
+  while (cur.kind === "field" || cur.kind === "index") cur = cur.object;
+  return cur.kind === "ident" ? cur.name : null;
+}
+
+/** Strip a leading borrow to reach the value type. */
+function unwrapRef(t: RustType): RustType {
+  return t.kind === "ref" ? t.inner : t;
+}
+
+/** The value type of a projection (`ident` / `field` / `index`), or null if unknown. */
+function projType(e: HirExpr, ctx: PlaceCtx): RustType | null {
+  switch (e.kind) {
+    case "ident": {
+      const t = ctx.env.get(e.name);
+      return t ? unwrapRef(t) : null;
+    }
+    case "field": {
+      const bt = projType(e.object, ctx);
+      if (!bt || bt.kind !== "struct") return null;
+      const f = ctx.structs.get(bt.name)?.find((fld) => fld.name === e.name);
+      return f ? f.ty : null;
+    }
+    case "index": {
+      const bt = projType(e.object, ctx);
+      if (bt?.kind === "vec") return bt.elem;
+      if (bt?.kind === "hashmap") return bt.value;
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Does a projection chain pass through an index (never movable → `E0507`)? */
+function pathHasIndex(e: HirExpr): boolean {
+  let cur = e;
+  while (cur.kind === "field" || cur.kind === "index") {
+    if (cur.kind === "index") return true;
+    cur = cur.object;
+  }
+  return false;
+}
+
+/**
+ * Reading a non-Copy projection (`obj.field` / `arr[i]`) *by value* moves out of
+ * its base. That is illegal — and so must be cloned — when the base can't be moved
+ * from: through an index (never movable), out of a borrowed param (behind a
+ * shared/`mut` reference), or out of an owned base that is used again (a partial
+ * move that would break the later use, `liveOut`). An owned local whose base is not
+ * reused is a legal partial move → left bare. A Copy or unknown-typed projection is
+ * never cloned.
+ */
+function projectionMovesOut(e: HirExpr, liveOut: Live, ctx: PlaceCtx): boolean {
+  if (e.kind !== "field" && e.kind !== "index") return false;
+  const t = projType(e, ctx);
+  if (!t || !isCloneableMovable(t, ctx.structs)) return false;
+  if (pathHasIndex(e)) return true;
+  const root = rootIdent(e);
+  if (root === null) return true;
+  if (ctx.refParams.has(root)) return true;
+  return liveOut.has(root);
+}
+
+function placeStmt(s: HirStmt, ctx: PlaceCtx): void {
+  const lo = ctx.map.get(s) ?? new Set<string>();
+  const all = ctx.movable; // header positions: treat everything as live (conservative)
   switch (s.kind) {
     case "let": {
       // A `let b = a` where `a` is a bare movable ident is a move of `a`.
-      if (s.init.kind === "ident" && movable.has(s.init.name)) {
+      if (s.init.kind === "ident" && ctx.movable.has(s.init.name)) {
         if (lo.has(s.init.name)) s.init = cloneOf(s.init);
+      } else if (projectionMovesOut(s.init, lo, ctx)) {
+        s.init = cloneOf(s.init);
       } else {
-        placeInExpr(s.init, lo, movable);
+        placeInExpr(s.init, lo, ctx);
       }
       return;
     }
     case "expr":
-      placeInExpr(s.expr, lo, movable);
+      placeInExpr(s.expr, lo, ctx);
       return;
     case "return":
-      if (s.value) placeInExpr(s.value, lo, movable);
+      if (s.value) {
+        if (projectionMovesOut(s.value, lo, ctx)) s.value = cloneOf(s.value);
+        else placeInExpr(s.value, lo, ctx);
+      }
       return;
     case "throw":
-      placeInExpr(s.value, lo, movable);
+      placeInExpr(s.value, lo, ctx);
       return;
     case "if":
-      placeInExpr(s.cond, movable, movable);
-      placeSeq(s.conseq, movable, map);
-      if (s.alt) placeSeq(s.alt, movable, map);
+      placeInExpr(s.cond, all, ctx);
+      placeSeq(s.conseq, ctx);
+      if (s.alt) placeSeq(s.alt, ctx);
       return;
     case "while":
-      placeInExpr(s.cond, movable, movable);
-      placeSeq(s.body, movable, map);
+      placeInExpr(s.cond, all, ctx);
+      placeSeq(s.body, ctx);
       return;
     case "block":
-      placeSeq(s.body, movable, map);
+      placeSeq(s.body, ctx);
       return;
     case "forIn":
-      placeInExpr(s.iter, movable, movable);
-      placeSeq(s.body, movable, map);
+      placeInExpr(s.iter, all, ctx);
+      placeSeq(s.body, ctx);
       return;
     case "forRange":
-      placeInExpr(s.start, movable, movable);
-      placeInExpr(s.end, movable, movable);
-      placeSeq(s.body, movable, map);
+      placeInExpr(s.start, all, ctx);
+      placeInExpr(s.end, all, ctx);
+      placeSeq(s.body, ctx);
       return;
     case "match":
-      placeInExpr(s.disc, movable, movable);
+      placeInExpr(s.disc, all, ctx);
       for (const arm of s.arms) {
-        if (arm.guard) placeInExpr(arm.guard, movable, movable);
-        placeSeq(arm.body, movable, map);
+        if (arm.guard) placeInExpr(arm.guard, all, ctx);
+        placeSeq(arm.body, ctx);
       }
       return;
     case "tryCatch":
-      placeSeq(s.tryBody, movable, map);
-      placeSeq(s.catchBody, movable, map);
-      if (s.finallyBody) placeSeq(s.finallyBody, movable, map);
+      placeSeq(s.tryBody, ctx);
+      placeSeq(s.catchBody, ctx);
+      if (s.finallyBody) placeSeq(s.finallyBody, ctx);
       return;
     // break / continue: no operands.
   }
@@ -475,16 +600,37 @@ interface MoveSite {
 }
 
 /**
- * Clone the owned-argument move sites in a single expression whose moved-from
- * binding is used later — either later within this same expression (an ordered
- * intra-expression scan) or after the enclosing statement (`liveOut`).
+ * Clone the move sites in a single expression whose moved-from binding is used
+ * later — either later within this same expression (an ordered intra-expression
+ * scan) or after the enclosing statement (`liveOut`). A move site is a bare movable
+ * ident in an **owning position**: an owned call argument, a by-value method
+ * argument, an element of a struct/array/hashmap literal, or the value of an
+ * assignment — anything that consumes the value by move (move-through-store, 038).
  */
-function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
+function placeInExpr(e: HirExpr, liveOut: Live, ctx: PlaceCtx): void {
+  const movable = ctx.movable;
   let seq = 0;
   const lastUse = new Map<string, number>();
   const moves: MoveSite[] = [];
 
-  const visit = (x: HirExpr): void => {
+  // Handle `sub` in an owning position. A bare movable ident is a deferred move
+  // site (cloned iff used later). A non-Copy projection that moves out of a place
+  // it can't be moved from is cloned immediately (move-out-of-place, 038).
+  // Otherwise recurse. `set` rewrites the operand to a `.clone()`.
+  function owning(sub: HirExpr, set: (c: HirExpr) => void): void {
+    if (sub.kind === "ident" && movable.has(sub.name)) {
+      const name = sub.name;
+      seq += 1;
+      lastUse.set(name, seq);
+      moves.push({ name, seq, apply: () => set(cloneOf(sub)) });
+    } else if (projectionMovesOut(sub, liveOut, ctx)) {
+      set(cloneOf(sub));
+    } else {
+      visit(sub);
+    }
+  }
+
+  function visit(x: HirExpr): void {
     switch (x.kind) {
       case "ident":
         if (movable.has(x.name)) {
@@ -501,25 +647,17 @@ function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
         return;
       case "assign":
         visit(x.target);
-        visit(x.value);
+        // `place = <movable>` moves the value into the target place.
+        owning(x.value, (c) => {
+          x.value = c;
+        });
         return;
       case "call":
         for (const a of x.args) {
-          if (
-            a.borrow === "owned" &&
-            a.expr.kind === "ident" &&
-            movable.has(a.expr.name)
-          ) {
-            const arg = a;
-            const name = a.expr.name;
-            seq += 1;
-            lastUse.set(name, seq);
-            moves.push({
-              name,
-              seq,
-              apply: () => {
-                arg.expr = cloneOf(arg.expr);
-              },
+          // Only an owned argument moves; a `ref`/`refMut` arg borrows.
+          if (a.borrow === "owned") {
+            owning(a.expr, (c) => {
+              a.expr = c;
             });
           } else {
             visit(a.expr);
@@ -527,11 +665,17 @@ function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
         }
         return;
       case "println":
+        // `println!` borrows its args (`{}`), so they are never moved.
         for (const a of x.args) visit(a);
         return;
       case "method":
+        // Method args emit by-value (`recv.m(a)`), so each is an owning position.
         visit(x.receiver);
-        for (const a of x.args) visit(a);
+        x.args.forEach((_, i) => {
+          owning(x.args[i] as HirExpr, (c) => {
+            x.args[i] = c;
+          });
+        });
         return;
       case "index":
         visit(x.object);
@@ -542,19 +686,36 @@ function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
         visit(x.object);
         return;
       case "array":
-        for (const el of x.elements) visit(el);
+        x.elements.forEach((_, i) => {
+          owning(x.elements[i] as HirExpr, (c) => {
+            x.elements[i] = c;
+          });
+        });
         return;
       case "hashmap":
         for (const en of x.entries) {
-          visit(en.key);
-          visit(en.value);
+          owning(en.key, (c) => {
+            en.key = c;
+          });
+          owning(en.value, (c) => {
+            en.value = c;
+          });
         }
         return;
       case "structLit":
-        for (const f of x.fields) visit(f.value);
+        for (const f of x.fields) {
+          owning(f.value, (c) => {
+            f.value = c;
+          });
+        }
         return;
       case "ok":
-        if (x.value) visit(x.value);
+        if (x.value) {
+          const ok = x;
+          owning(x.value, (c) => {
+            ok.value = c;
+          });
+        }
         return;
       case "try":
       case "await":
@@ -572,11 +733,15 @@ function placeInExpr(e: HirExpr, liveOut: Live, movable: Live): void {
         visit(x.body);
         return;
       case "bumpVec":
-        for (const el of x.elements) visit(el);
+        x.elements.forEach((_, i) => {
+          owning(x.elements[i] as HirExpr, (c) => {
+            x.elements[i] = c;
+          });
+        });
         return;
       // Leaves: number, string, bool, path, bumpNew.
     }
-  };
+  }
 
   visit(e);
 
