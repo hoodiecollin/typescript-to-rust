@@ -26,7 +26,7 @@
  * range promotion, which rewrites structure and threads the new body back.
  */
 
-import type { HirExpr, HirModule, HirParam, HirStmt } from "./hir";
+import type { HirExpr, HirModule, HirParam, HirStmt, RustType } from "./hir";
 import { UnsupportedError } from "./lower";
 
 /** Arithmetic operators that keep both operands in the same numeric type. */
@@ -44,6 +44,7 @@ export function refineNumerics(module: HirModule): HirModule {
   }
   module.main = refineBody([], module.main);
   promoteIntegerMatches(module);
+  propagateIntegerParams(module);
   return module;
 }
 
@@ -466,6 +467,156 @@ function isIntegerSafe(name: string, stmts: HirStmt[]): boolean {
     });
   }
   return safe;
+}
+
+// ── Integer parameter propagation across call boundaries (series 031, gap A) ──
+
+/**
+ * After inference retypes an index-forced parameter to `usize` (and a `switch`
+ * discriminant to `i64`), the *arguments* at those positions still carry `f64` —
+ * so `fn f(i: usize)` called `f(1.0)` is rejected by Rust (E0308). The
+ * `promoteIntegerMatches` path already reconciles its own `i64` call args; this
+ * pass generalizes that reconciliation to **every** `usize`/`i64` parameter, and
+ * to methods and constructors as well as free functions.
+ *
+ * Per integer parameter position: an integer-literal argument is retyped to
+ * match (the fix); a fractional/negative literal, or a non-literal that we cannot
+ * prove is already that integer type, fails loud (`UnsupportedError`) — honest,
+ * because propagating integer-ness *backward* into a caller's variables is real
+ * inter-procedural inference (a separate series), not a literal retag. A
+ * `usize`-typed identifier passed to a `usize` parameter is already sound and
+ * passes through untouched.
+ */
+function propagateIntegerParams(module: HirModule): void {
+  // Callee signatures: free functions and constructors keyed by callee string
+  // (`f`, `Class::new` — matching lowering); methods keyed by class then name.
+  const fnSigs = new Map<string, RustType[]>();
+  const classMethods = new Map<string, Map<string, RustType[]>>();
+  for (const item of module.items) {
+    if (item.kind === "fn") {
+      fnSigs.set(item.name, item.params.map(paramType));
+    } else if (item.kind === "class") {
+      if (item.ctor) {
+        fnSigs.set(`${item.name}::new`, item.ctor.params.map(paramType));
+      }
+      const methods = new Map<string, RustType[]>();
+      for (const m of item.methods)
+        methods.set(m.name, m.params.map(paramType));
+      classMethods.set(item.name, methods);
+    }
+  }
+
+  const bodies: {
+    stmts: HirStmt[];
+    params: HirParam[];
+    selfClass?: string;
+  }[] = [];
+  for (const item of module.items) {
+    if (item.kind === "fn") {
+      bodies.push({ stmts: item.body, params: item.params });
+    } else if (item.kind === "class") {
+      if (item.ctor) {
+        bodies.push({
+          stmts: item.ctor.body,
+          params: item.ctor.params,
+          selfClass: item.name,
+        });
+      }
+      for (const m of item.methods) {
+        bodies.push({ stmts: m.body, params: m.params, selfClass: item.name });
+      }
+    }
+  }
+  bodies.push({ stmts: module.main, params: [] });
+
+  for (const body of bodies) {
+    const all = flattenStmts(body.stmts);
+    const usize = computeUsizeNames(all);
+    // ident → struct class name, so a method receiver resolves to its signature.
+    const structOf = new Map<string, string>();
+    for (const p of body.params) {
+      if (p.ty.kind === "struct") structOf.set(p.name, p.ty.name);
+    }
+    for (const s of all) {
+      if (s.kind === "let" && s.ty?.kind === "struct") {
+        structOf.set(s.name, s.ty.name);
+      }
+    }
+
+    for (const stmt of all) {
+      eachStmtExpr(stmt, (e) => {
+        if (e.kind === "call") {
+          const sig = fnSigs.get(e.callee);
+          if (sig) {
+            reconcileArgs(
+              e.args.map((a) => a.expr),
+              sig,
+              usize,
+            );
+          }
+        } else if (e.kind === "method") {
+          const cls = receiverClass(e.receiver, structOf, body.selfClass);
+          const sig = cls ? classMethods.get(cls)?.get(e.name) : undefined;
+          if (sig) reconcileArgs(e.args, sig, usize);
+        }
+      });
+    }
+  }
+}
+
+function paramType(p: HirParam): RustType {
+  return p.ty;
+}
+
+/** Resolve a method receiver to its class name, or `undefined` if not statically known. */
+function receiverClass(
+  recv: HirExpr,
+  structOf: Map<string, string>,
+  selfClass: string | undefined,
+): string | undefined {
+  if (recv.kind !== "ident") return undefined;
+  if (recv.name === "self") return selfClass;
+  return structOf.get(recv.name);
+}
+
+/**
+ * Reconcile positional arguments against a callee's parameter types, acting only
+ * on `usize`/`i64` parameters (see `propagateIntegerParams`).
+ * @throws {UnsupportedError} on a fractional/negative literal or a non-literal
+ * that isn't a matching `usize` identifier.
+ */
+function reconcileArgs(
+  args: HirExpr[],
+  sig: RustType[],
+  usize: Set<string>,
+): void {
+  for (let i = 0; i < args.length; i++) {
+    const pty = sig[i];
+    if (!pty || (pty.kind !== "usize" && pty.kind !== "i64")) continue;
+    const arg = args[i];
+    if (!arg) continue;
+    if (arg.kind === "number") {
+      if (
+        !Number.isInteger(arg.value) ||
+        (pty.kind === "usize" && arg.value < 0)
+      ) {
+        throw new UnsupportedError({
+          type: `non-integer literal ${arg.value} passed to a ${pty.kind} parameter`,
+        });
+      }
+      arg.ty = pty.kind;
+    } else if (
+      arg.kind === "ident" &&
+      pty.kind === "usize" &&
+      usize.has(arg.name)
+    ) {
+      // A caller-side `usize` binding passed to a `usize` parameter is sound.
+    } else {
+      throw new UnsupportedError({
+        type: `inter-procedural integer inference: a non-literal value passed to a ${pty.kind} parameter is not yet supported (pass an integer literal, or index within the callee)`,
+      });
+    }
+  }
 }
 
 // ── `for i in a..b` range promotion (series 020) ─────────────────────────────

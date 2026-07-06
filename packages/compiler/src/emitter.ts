@@ -40,6 +40,93 @@ function indent(block: string): string {
     .join("\n");
 }
 
+// ── Identifier hygiene (series 031, gap C) ────────────────────────────────────
+
+/** Rust keywords (strict + reserved) that collide with a bare identifier. */
+const RUST_KEYWORDS: ReadonlySet<string> = new Set([
+  "as",
+  "async",
+  "await",
+  "break",
+  "const",
+  "continue",
+  "crate",
+  "dyn",
+  "else",
+  "enum",
+  "extern",
+  "false",
+  "fn",
+  "for",
+  "if",
+  "impl",
+  "in",
+  "let",
+  "loop",
+  "match",
+  "mod",
+  "move",
+  "mut",
+  "pub",
+  "ref",
+  "return",
+  "self",
+  "Self",
+  "static",
+  "struct",
+  "super",
+  "trait",
+  "true",
+  "type",
+  "unsafe",
+  "use",
+  "where",
+  "while",
+  "abstract",
+  "become",
+  "box",
+  "do",
+  "final",
+  "gen",
+  "macro",
+  "override",
+  "priv",
+  "try",
+  "typeof",
+  "unsized",
+  "virtual",
+  "yield",
+  "union",
+]);
+
+/**
+ * Keywords that cannot be written as raw identifiers (`r#…`). `self` is exempt:
+ * lowering emits it for `this`, so it passes through — a *user* binding named
+ * `self` is a rare, cargo-caught residual, not worth failing every method on.
+ */
+const NON_RAW: ReadonlySet<string> = new Set(["crate", "super", "Self"]);
+
+/**
+ * Render a user identifier, escaping a Rust-keyword collision as a raw identifier
+ * (`box` → `r#box`). The handful that can't be raw fail loud.
+ * @throws {UnsupportedError} on `crate`/`super`/`Self`.
+ */
+function rid(name: string): string {
+  if (name === "self") return name;
+  if (!RUST_KEYWORDS.has(name)) return name;
+  if (NON_RAW.has(name)) {
+    throw new UnsupportedError({
+      type: `identifier \`${name}\` collides with a Rust keyword that cannot be a raw identifier`,
+    });
+  }
+  return `r#${name}`;
+}
+
+/** Render a possibly path-qualified callee (`f`, `Class::new`), escaping each segment. */
+function ridPath(callee: string): string {
+  return callee.split("::").map(rid).join("::");
+}
+
 /**
  * Emit a complete Rust module for `program`.
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
@@ -102,7 +189,7 @@ function emitItem(item: HirItem): string {
  * prelude is needed.
  */
 function emitErrorClass(e: HirErrorClass): string {
-  const n = e.name;
+  const n = rid(e.name);
   return [
     `struct ${n} {`,
     `${INDENT}message: String,`,
@@ -135,16 +222,16 @@ function emitClass(c: HirClass): string {
   const struct = emitStruct({ kind: "struct", name: c.name, fields: c.fields });
   const fns = [c.ctor, ...c.methods].filter((f): f is HirFn => f !== null);
   const body = fns.map((f) => indent(emitFn(f))).join("\n");
-  return `${struct}\n\nimpl ${c.name} {\n${body}\n}`;
+  return `${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`;
 }
 
 /** `struct Name {\n    field: Ty,\n …\n}` (or `Name {}` when field-less). */
 function emitStruct(s: HirStruct): string {
-  if (s.fields.length === 0) return `struct ${s.name} {}`;
+  if (s.fields.length === 0) return `struct ${rid(s.name)} {}`;
   const fields = s.fields
-    .map((f) => indent(`${f.name}: ${emitType(f.ty)},`))
+    .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
     .join("\n");
-  return `struct ${s.name} {\n${fields}\n}`;
+  return `struct ${rid(s.name)} {\n${fields}\n}`;
 }
 
 function emitFn(fn: HirFn): string {
@@ -152,10 +239,10 @@ function emitFn(fn: HirFn): string {
   // A method's `self` receiver leads the parameter list; free/associated fns omit it.
   const self =
     fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
-  const rest = fn.params.map((p) => `${p.name}: ${emitType(p.ty)}`);
+  const rest = fn.params.map((p) => `${rid(p.name)}: ${emitType(p.ty)}`);
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
-  return `${asyncKw}fn ${fn.name}(${params})${ret} ${block(fn.body)}`;
+  return `${asyncKw}fn ${rid(fn.name)}(${params})${ret} ${block(fn.body)}`;
 }
 
 /** Render a braced, indented statement block (`{\n …\n}`, or `{\n}` if empty). */
@@ -171,7 +258,7 @@ function emitStmt(stmt: HirStmt): string {
     case "let": {
       const mut = stmt.mut ? "mut " : "";
       const ty = stmt.ty ? `: ${emitType(stmt.ty)}` : "";
-      return `let ${mut}${stmt.name}${ty} = ${emitExpr(stmt.init)};`;
+      return `let ${mut}${rid(stmt.name)}${ty} = ${emitExpr(stmt.init)};`;
     }
     case "return":
       return stmt.value ? `return ${emitExpr(stmt.value)};` : "return;";
@@ -194,11 +281,11 @@ function emitStmt(stmt: HirStmt): string {
       // A bare scope-containing block; no trailing `;` as a statement.
       return block(stmt.body);
     case "forIn":
-      return `for ${stmt.pat} in ${emitExpr(stmt.iter)} ${block(stmt.body)}`;
+      return `for ${rid(stmt.pat)} in ${emitExpr(stmt.iter)} ${block(stmt.body)}`;
     case "forRange": {
       const dots = stmt.inclusive ? "..=" : "..";
       const range = `${emitExpr(stmt.start)}${dots}${emitExpr(stmt.end)}`;
-      return `for ${stmt.counter} in ${range} ${block(stmt.body)}`;
+      return `for ${rid(stmt.counter)} in ${range} ${block(stmt.body)}`;
     }
     case "match": {
       const arms = stmt.arms.map((arm) => indent(emitArm(arm))).join("\n");
@@ -215,7 +302,7 @@ function emitStmt(stmt: HirStmt): string {
       // The `try` block is a `Result`-returning IIFE so its `?`/`throw`s
       // short-circuit to the closure; `catch` matches on the result; `finally`
       // runs after (divergence past it is rejected in lowering, so this is exact).
-      const binder = stmt.catchParam ?? "_";
+      const binder = stmt.catchParam ? rid(stmt.catchParam) : "_";
       const closure = `(|| -> Result<(), ${emitType(stmt.errTy)}> ${block(stmt.tryBody)})()`;
       const head = `if let Err(${binder}) = ${closure} ${block(stmt.catchBody)}`;
       if (!stmt.finallyBody) return head;
@@ -261,7 +348,7 @@ function emitExpr(expr: HirExpr): string {
     case "bool":
       return expr.value ? "true" : "false";
     case "ident":
-      return expr.name;
+      return rid(expr.name);
     case "binary":
       return `${emitExpr(expr.left)} ${BINARY_OPS[expr.op] ?? expr.op} ${emitExpr(expr.right)}`;
     case "assign":
@@ -276,14 +363,14 @@ function emitExpr(expr: HirExpr): string {
       return `HashMap::from([${entries}])`;
     }
     case "structLit": {
-      if (expr.fields.length === 0) return `${expr.name} {}`;
+      if (expr.fields.length === 0) return `${rid(expr.name)} {}`;
       const fields = expr.fields
-        .map((f) => `${f.name}: ${emitExpr(f.value)}`)
+        .map((f) => `${rid(f.name)}: ${emitExpr(f.value)}`)
         .join(", ");
-      return `${expr.name} { ${fields} }`;
+      return `${rid(expr.name)} { ${fields} }`;
     }
     case "call":
-      return `${expr.callee}(${expr.args.map(emitArg).join(", ")})`;
+      return `${ridPath(expr.callee)}(${expr.args.map(emitArg).join(", ")})`;
     case "println": {
       const args = expr.args.map(emitExpr);
       const fmt = args.map(() => "{}").join(" ");
@@ -292,11 +379,11 @@ function emitExpr(expr: HirExpr): string {
         : "println!()";
     }
     case "method":
-      return `${emitExpr(expr.receiver)}.${expr.name}(${expr.args.map(emitExpr).join(", ")})`;
+      return `${emitExpr(expr.receiver)}.${rid(expr.name)}(${expr.args.map(emitExpr).join(", ")})`;
     case "len":
       return `${emitExpr(expr.object)}.len()`;
     case "field":
-      return `${emitExpr(expr.object)}.${expr.name}`;
+      return `${emitExpr(expr.object)}.${rid(expr.name)}`;
     case "index":
       return `${emitExpr(expr.object)}[${emitIndex(expr.index)}]`;
     case "ok":
@@ -353,7 +440,7 @@ function emitType(ty: RustType): string {
     case "hashmap":
       return `HashMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
     case "struct":
-      return ty.name;
+      return rid(ty.name);
     case "result":
       return `Result<${emitType(ty.ok)}, ${emitType(ty.err)}>`;
     case "boxError":

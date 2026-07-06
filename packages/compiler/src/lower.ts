@@ -776,6 +776,33 @@ function constructorFieldInit(
 }
 
 /**
+ * `m["k"] = v` — a `=` write to a *string-keyed* computed member — lowers to a
+ * HashMap insert `m.insert("k".to_string(), v)` (series 031, gap E): Rust's
+ * `Index` on `HashMap` is read-only, so an index-assign there is rejected. A
+ * numeric index (`arr[0] = v`) is a `Vec` write (valid via `IndexMut`) and
+ * returns `null` — left as an ordinary index-assign. A non-`=` operator likewise
+ * returns `null`. A non-literal key can't be told apart from a `Vec` index
+ * without a binding-type table, so it too stays an index-assign (a documented
+ * residual for the rarer HashMap-variable-key write).
+ */
+function tryHashMapInsert(
+  a: { operator: string; left: Expression; right: Expression },
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  if (a.operator !== "=" || a.left.type !== "MemberExpression") return null;
+  const m = a.left as MemberExpression;
+  if (!m.computed || m.property.type !== "Literal") return null;
+  const key = (m.property as { value: unknown }).value;
+  if (typeof key !== "string") return null; // numeric index → Vec, not HashMap
+  return {
+    kind: "method",
+    receiver: lowerExpr(m.object, analysis),
+    name: "insert",
+    args: [{ kind: "string", value: key }, lowerExpr(a.right, analysis)],
+  };
+}
+
+/**
  * Lower a class method to an `fn` with a `self` receiver. The receiver is
  * `&mut self` when the body assigns a `this.<field>`, else `&self`. Params are
  * taken by value (method-param borrow inference is deferred). `this` lowers to
@@ -1297,6 +1324,11 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         left: Expression;
         right: Expression;
       };
+      // A `=` write to a *string-keyed* computed member is a HashMap insert, not
+      // an index-assign — Rust's `Index` on `HashMap` is read-only (series 031,
+      // gap E). A numeric index is a `Vec` write and stays an index-assign.
+      const insert = tryHashMapInsert(a, analysis);
+      if (insert) return insert;
       return {
         kind: "assign",
         op: a.operator,
