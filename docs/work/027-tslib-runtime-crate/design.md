@@ -1,10 +1,14 @@
 # 027 — `tslib` runtime crate as a translation target (plan)
 
-> **Status: PLAN — BLOCKED on value-position closures.** The recommendation is
-> the **hybrid** model below, but the *first method sub-series* cannot start
-> until the blocker clears.
+> **Status: FIRST SLICE LANDED.** The `crates/tslib` fidelity crate exists and is
+> pinned into the generated crate; the emitter routes `Array.at`,
+> `String.padStart`/`padEnd` through it under the hybrid rule (native where clean,
+> `tslib` where quirky), guarded by `analysis.methodNames` so user methods aren't
+> hijacked. The closures blocker cleared (series 033). See `specs.md`,
+> `packages/compiler/tests/tslib.test.ts`, and `crates/tslib/`. Original plan
+> below.
 >
-> ⛔ **Hard prerequisite: value-position closures.** Arrows today only normalize
+> ⛔ **Hard prerequisite (CLEARED — series 033): value-position closures.** Arrows today only normalize
 > at top level (`const f = (…) => …` → a free `fn`); an arrow passed as an
 > *argument* (`xs.map(x => x*2)`) is not yet lowered — see the arrow deferrals in
 > plan.md. Every Tier-1 iteration method (`map`/`filter`/`reduce`/`forEach`/…)

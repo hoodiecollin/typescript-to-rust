@@ -1,10 +1,11 @@
 # 025 — Esoteric feature support (plan)
 
-> **Status: PLAN, not yet implemented.** Prerequisite: series 024 (fail-loud
-> validator) has landed, so all of these currently `DialectError`/`Unsupported`
-> rather than mistranslate. Each construct below graduates from "rejected" to
-> "supported" as its own sub-series; this doc ranks them and sketches the target
-> Rust shape. Pick them up one at a time, spec-first.
+> **Status: 025a/b/c LANDED** — parameter properties, `enum`, and `using`→`Drop`
+> ship; sync generators remain deferred (their own future slice). See `specs.md`
+> and `packages/compiler/tests/esoteric.test.ts`. Prerequisite: series 024
+> (fail-loud validator) has landed, so all of these previously
+> `DialectError`/`Unsupported` rather than mistranslate. The plan below is
+> preserved as the original ranking.
 
 ## The constructs (rejected by 024) and whether they earn support
 

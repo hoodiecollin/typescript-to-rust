@@ -1,6 +1,16 @@
 # 028 — Per-scope compiler directives (plan)
 
-> **Status: PLAN — split by readiness.** Inspired by React's `"use client"`/
+> **Status: ALL THREE DIRECTIVES LANDED (first slices).** 028a (`"use panic"`),
+> 028b (`"use rc"` → `Rc<RefCell<T>>`, `refineRc` in `src/rc.ts`), and 028c
+> (`"use arena"` → `bumpalo` bump allocation, `refineArena` in `src/arena.ts`,
+> designed in `arena-spike.md`). Each is a post-lowering HIR→HIR pass keyed off a
+> leading directive detected in analysis (`panicScopes`/`rcScopes`/`arenaScopes`),
+> gated to a free fn / top-level script. Specs: `directives.test.ts` (028a),
+> `rc-directive.test.ts` (028b), `arena-directive.test.ts` (028c). Each landed a
+> first slice with documented, cargo-loud deferral boundaries — see `specs.md` and
+> `arena-spike.md`. Original plan below.
+>
+> Inspired by React's `"use client"`/
 > `"use server"` and Vercel Workflow SDK's `"use workflow"`/`"use step"`: a
 > leading string-literal directive in a function/block body that switches the
 > translation strategy for that scope. An **explicit escape hatch** that keeps

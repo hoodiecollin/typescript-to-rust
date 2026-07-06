@@ -333,39 +333,90 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       (docs/work/_archive/031-fail-loud-lowering-holes): each now compiles+behaves
       for the common case and fails loud (`UnsupportedError`) on the residual
       instead of emitting broken Rust. Still open:
-      - **(B)** nested/inferred struct literals — already fail-loud; a feature gap
-        (011 follow-up). Series 032 / task #20.
-      - **(D)** `ParenthesizedExpression` — already fail-loud; *masks* the 026
-        precedence gap (parens + precedence-aware printing must land together; see
-        026 doc). Folds into 026.
-- [ ] Finish generalizing ownership: inter-procedural moves (use-after-move →
-      `.clone()`, move-through-store) and nested-scope shadowing (blocked on
-      control flow — no block scopes exist yet). Read-only-string `&str` params
+      - **(B)** nested/inferred struct literals — **CLOSED in series 032**
+        (docs/work/_archive/032-nested-struct-literals): `analysis.structFields`
+        + a `lowerTyped(expr, ty)` pass recurse an object/array literal into a
+        struct-typed field / `Vec` element by its declared type. Function-argument
+        struct literals (no binding annotation) remain the residual.
+      - **(D)** `ParenthesizedExpression` + precedence — **CLOSED (026 first
+        slice)**: the validator now models `ParenthesizedExpression`, lowering
+        unwraps it (grouping is structural), and the emitter parenthesizes a
+        `binary` operand from a `BINARY_PREC` table (left-assoc: right same-prec
+        operand wraps). The full rust-ast.ts/printer.ts rewrite stays deferred
+        (026 doc trigger: 027 method-chain nesting). Specs in precedence.test.ts.
+- [ ] Finish generalizing ownership. **First increment LANDED (series 034):**
+      use-after-move → `.clone()` — a post-lowering `refineMoves` pass
+      (`ownership.ts`, wired last in `lower()` beside `refineNumerics`/
+      `refineStrings`) clones every straight-line move site (`let b = a`, owned
+      call/ctor arg) that has a later textual use, leaving the last use a bare
+      move. Clone-able non-Copy only (`String`, `Vec`/`HashMap` of scalar/String;
+      structs excluded — no `Clone` derive yet). See
+      docs/work/_archive/034-ownership-clone-moves. **Still open:** loops (move
+      live across iterations), nested-scope shadowing, conditional moves (need the
+      CFG), struct `Clone`, and move-through-store. Read-only-string `&str` params
       are done (`strings.ts`).
 - [ ] Extend the dialect validator further (default-deny landed in series 024 —
-      rejects `any`/`unknown`, generators, `for await`, `using`, decorators,
-      `abstract`, `declare`, and any unmodeled node type): still open are
-      missing-annotation enforcement (with the trivial-literal exception), class
-      `extends` inheritance, dynamic object manipulation, escaping mutable aliasing.
+      rejects `any`/`unknown`, `for await`, `await using`, decorators, `abstract`,
+      `declare`, and any unmodeled node type; **sync finite-yield generators now
+      supported** — series 035 — while async/method generators stay rejected):
+      still open are missing-annotation enforcement (with the trivial-literal
+      exception), class `extends` inheritance, dynamic object manipulation,
+      escaping mutable aliasing.
+- [x] Logical operators `&&`/`||` → Rust short-circuit ops (series 036); `??`
+      stays fail-loud (needs `Option`). Rode the 026 `BINARY_PREC` table — no new
+      HIR. See docs/work/_archive/036-logical-operators.
 - [ ] Formal plans drafted (docs/work/025–029, design-only, spec-first when
       picked up). **Recommended sequence** (decided 2026-07-06):
-      1. **025** esoteric *support* — `using`→`Drop` first, then param-properties,
-         `enum`, sync generators→`Iterator`. Independent, ready. Async-iteration
-         deferred; **decorators permanently rejected** (stay `DialectError`).
-      2. **closures** — value-position arrows (`xs.map(x => …)`). The hard gate
-         for 027; likely an existing deferred arrow item. Land before 027's
-         iteration methods.
-      3. **027 + 029** — `tslib` (hybrid native-vs-`tslib` routing) once closures
-         exist; the no-closure subset (array access, string, Map/Set) can precede
-         the gate. 029 catalog is always ready to refine.
-      4. **`"use panic"`** (part of 028) — independent, ripe now (inverse of the
-         021–023 fallibility fixpoint); drop in whenever, even ahead of 027.
+      1. **025** esoteric *support* — **025a/b/c LANDED** (parameter properties →
+         field+assign; `enum` → C-like Rust enum with `Copy`/`PartialEq` +
+         `E.Variant`→`E::Variant` path + by-value enum params; `using` +
+         `[Symbol.dispose]` → `impl Drop`, reverse-order RAII). **Sync
+         generators→`impl Iterator` LANDED as series 035** — straight-line
+         finite-yield `function*` → `fn -> impl Iterator` via `vec![…].into_iter()`
+         (no state machine; `for-of` consumes it directly). Deferred: yield in a
+         loop/branch (state machine / adapter chain), `yield*`, non-`for-of`
+         consumption. Async-iteration and `await using` deferred; **decorators
+         permanently rejected**. See docs/work/_archive/025-esoteric-feature-support
+         and docs/work/_archive/035-sync-generators.
+      2. **closures** — **FIRST SLICE LANDED** (series 033): a single-param arrow
+         to `map`/`filter`/`forEach` over `Array<number>` → iterator chains
+         (`iterMap`/`iterFilter` HIR exprs; `forEach`→`forIn`). Deferred:
+         index/array params, non-Copy elements, `reduce`/`find`/…, closures in
+         non-method value positions (`Fn`/`FnMut` + capture analysis). See
+         docs/work/_archive/033-value-position-closures.
+      3. **027 + 029** — **027 FIRST SLICE LANDED**: `crates/tslib` fidelity
+         crate + hybrid routing (`Array.at` negative index, `String.padStart`/
+         `padEnd` → `tslib`; user methods guarded by `analysis.methodNames`).
+         Unary `-`/`!` added as the `at(-1)` prerequisite (also enables negative
+         literals). 029 catalog folded in the `Tf`/`Tm` route column. Next slices:
+         `reduce`/`find`/`sort`/`slice`, Object/JSON. See
+         docs/work/027-tslib-runtime-crate.
+      4. **`"use panic"`** (028a) — **LANDED**. A leading `"use panic"` directive
+         makes a free fn / script infallible: `throw` → `panic!("{}", msg)`, the
+         signature stays non-`Result`, callers don't `?`. `takeDirectives`
+         validates directives (unknown `"use …"` → `DialectError`; `"use rc"`/
+         `"use arena"` → `UnsupportedError` "not yet"). See
+         docs/work/028-compiler-directives.
       5. **026** Rust-AST + pretty-printer — *downstream of 027* by dependency
          order (it cleans up 027's nested/chained output); build signal is an
          oracle-caught precedence defect on a fixture we write, not a schedule.
-      6. **`"use rc"` / `"use arena"`** (rest of 028) — after the ownership/borrow
-         pass matures (`"use rc"` bridges its give-ups to `Rc<RefCell>`;
-         `"use arena"` = bumpalo, needs lifetime plumbing + escape analysis).
+      6. **`"use rc"`** (028b) — **FIRST SLICE LANDED**. A `"use rc"` scope
+         (free fn / script) wraps class-typed bindings in `Rc<RefCell<T>>`:
+         construct → `Rc::new(RefCell::new(C::new(…)))`, alias `const b = a` →
+         `Rc::clone(&a)`, read `a.f` → `a.borrow().f`, write → `a.borrow_mut().f`.
+         A post-lowering `refineRc` pass (`src/rc.ts`), unblocked by the 034
+         ownership increment. Deferred (cargo-loud): `rc` method calls, `rc`
+         fields/params, cross-call `rc` values. See
+         docs/work/028-compiler-directives + rc-directive.test.ts.
+      7. **`"use arena"`** (028c) — **FIRST SLICE LANDED**. A `"use arena"` scope
+         builds `Vec` literals from a bump arena: `let arena = bumpalo::Bump::new();`
+         + `bumpalo::vec![in &arena; …]` (type annotation dropped → lifetime
+         inferred, so no `'a` is written). A post-lowering `refineArena` pass
+         (`src/arena.ts`); `bumpalo` pinned in `.scratch/Cargo.toml`. **Soundness
+         by the oracle:** an escaping arena value is a cargo lifetime error —
+         cargo *is* the escape analysis, no bespoke pass needed. Deferred: arena
+         `String`/trees, arena values in signatures/fields, nested arenas. See
+         docs/work/028-compiler-directives/arena-spike.md + arena-directive.test.ts.
 - [ ] Control-flow refinements (deferred, revisit as needed): or-pattern
       (`1 | 2 =>`) and string/range literal `match` arms; native `continue`-in-range,
       downward/non-unit-step and bound-driven `i64` ranges; for…of element

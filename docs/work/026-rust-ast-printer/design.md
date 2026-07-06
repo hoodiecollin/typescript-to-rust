@@ -1,6 +1,35 @@
 # 026 — A structured Rust AST + pretty-printer (plan)
 
-> **Status: PLAN — downstream of 027, oracle-triggered.** This is an *emitter
+> **Status: FIRST SLICE LANDED (parens + precedence); full AST-printer rewrite
+> still deferred.** The concrete defect (gap D — parens + precedence-aware
+> printing) is **closed**: `ParenthesizedExpression` is now modeled (validator
+> allows it; lowering unwraps it — grouping is already structural in the tree),
+> and the emitter parenthesizes a `binary` operand from a `BINARY_PREC` table
+> (left-associative: same-precedence right operand wraps, left stays bare). Specs:
+> `packages/compiler/tests/precedence.test.ts` (all differential). The larger
+> **rust-ast.ts + printer.ts rewrite** below remains deferred under its own
+> trigger (027's method chains creating deeper nesting) — precedence correctness
+> no longer requires it.
+>
+> **Trigger re-checked (2026-07-06, task #22).** Probed the string emitter across
+> mixed arithmetic, `%`/`/` vs `-`, non-associative subtraction (`a - (b - c)`),
+> unary-on-parenthesized (`-(a + b)`), `!a === b`, nested `(a+b)*(c-d)`, and
+> comparison-with-arithmetic. **Every supported case renders correctly** — the
+> first-slice `BINARY_PREC` + `emitOperand` + unary parenthesization is sound for
+> the whole current dialect. **No triggering defect exists**, so the full rewrite
+> stays deferred by design (a speculative, benefit-free architectural refactor
+> today; it would risk regressing the passing corpus for no observable gain).
+> Method chains from 027 (`iterMap`/`iterFilter`) emit valid, if verbose, Rust —
+> a *readability* nit rustfmt largely absorbs, not a correctness defect. Revisit
+> only when the oracle actually flags a nesting/precedence bug.
+>
+> **Adjacent finding (not this series):** `&&`/`||`/`??` (`LogicalExpression`) are
+> *unimplemented* — fail-loud (`UnsupportedError`), never miscompiled, so the
+> contract holds, but they're a common gap worth a small dedicated slice
+> (`LogicalExpression` → `binary` with `&&`/`||` + two `BINARY_PREC` rows). That
+> is a dialect-surface addition, orthogonal to this emitter-architecture series.
+>
+> Original plan — downstream of 027, oracle-triggered: This is an *emitter
 > architecture* question, not a dialect-surface one. Two honest reasons to hold
 > it, neither of them "demand" (this project has no consumers): (1) **dependency
 > order** — 026 exists to clean up the nested/chained output that *027* produces,
