@@ -135,10 +135,18 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   refining a read-only `string` parameter's `&String` into the idiomatic `&str`.
   Owned params stay `String`, mutated stay `&mut String`; call sites are unchanged
   (`&String` coerces to `&str`).
-- **Dialect validation** (`src/validate.ts`): pipeline step 2, run first in
-  `lower()`. Rejects `any`/`unknown` with a `DialectError` — "forbidden input, fix
-  it" — now distinct from `UnsupportedError` ("in the dialect, not yet built").
-  Other forbidden categories and the annotation requirement are future slices.
+- **Dialect validation — default-deny** (`src/validate.ts`, series 024): pipeline
+  step 2, run first in `lower()`, now a whole-tree gate on the accepted node
+  vocabulary. Three rules: (a) forbidden *types* (`any`/`unknown`) → `DialectError`;
+  (b) forbidden *flags* on modeled nodes → `DialectError` — generators
+  (`function*`), `for await`, `using`/`await using`, decorators, `abstract`,
+  `declare` (these previously slipped through and were *silently mistranslated* —
+  the fail-loud hole 024 closes); (c) any node whose `type` is not in the
+  `MODELED` allowlist → `UnsupportedError` ("not implemented yet"). Adding a
+  construct to the dialect now requires adding its node type to `MODELED`,
+  mirroring the emitter's exhaustiveness guard. Both error classes moved to a
+  dependency-free `src/errors.ts` (so `validate` can throw `UnsupportedError`
+  without a cycle); re-exported from `lower.ts`, public surface unchanged.
 - **Control flow — complete** (`src/hir.ts`, `src/lower.ts`, `src/emitter.ts`):
   all five `02_control_flow` fixtures compile **and** behave (differential).
   `if`/`else if`/`else` and `while` are HIR `if`/`while` nodes with real block

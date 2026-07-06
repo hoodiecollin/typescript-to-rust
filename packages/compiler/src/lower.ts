@@ -49,6 +49,7 @@ import type {
   VariableDeclaration,
   WhileStatement,
 } from "./ast";
+import { DialectError, UnsupportedError } from "./errors";
 import type {
   Borrow,
   HirArg,
@@ -67,18 +68,11 @@ import type {
 } from "./hir";
 import { refineNumerics } from "./numeric";
 import { refineStrings } from "./strings";
-import { DialectError, validate } from "./validate";
+import { validate } from "./validate";
 
-export { DialectError };
-
-export class UnsupportedError extends Error {
-  constructor(
-    public readonly node: { type: string; start?: number; end?: number },
-  ) {
-    super(`Unsupported ${node.type} (the dialect does not implement this yet)`);
-    this.name = "UnsupportedError";
-  }
-}
+// Re-exported so existing importers (`from "./lower"`) and the emitter's own
+// re-export keep working; both classes now live in ./errors (see that file).
+export { DialectError, UnsupportedError };
 
 const UNIT: RustType = { kind: "unit" };
 /** The default fallible error type: the `Error` message as a `String`. */

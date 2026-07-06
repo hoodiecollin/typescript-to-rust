@@ -42,6 +42,35 @@ this file holds genuinely-open questions only.
    single-poll. Decide how faithfully to model this (e.g. whether `await`ing the
    same binding twice is rejected by the dialect) when implementing `07_async`.
 
+## Resolved / formalized 2026-07-06 (was: post-error-trio open questions 5–9)
+
+These five were investigated and turned into formal work. **Item 5 shipped** as
+series **024** (default-deny validator — esoteric flags/unknown types now fail
+loud; `src/errors.ts` extracted). Items 6–9 became **design-only plans** in
+docs/work, pending pickup as their own numbered series:
+- **025 — esoteric-feature *support*** (item 5's follow-on): `using`→`Drop` first,
+  then parameter-properties, `enum`, sync generators→`Iterator`; async-iteration
+  and decorators deferred/declined.
+- **026 — Rust-AST + pretty-printer** (item 6): recommendation is *defer* — keep
+  the string emitter + rustfmt until precedence/nesting makes a structured AST
+  worth it; doc records the trigger condition and the design when it fires.
+- **027 — `tslib` runtime crate** (item 8): **hybrid** — emit idiomatic native
+  Rust for clean-mapping methods, route quirk-heavy ones through `tslib`; gated on
+  value-position closures.
+- **028 — per-scope directives** (item 9): `"use panic"` (throw→`panic!`),
+  `"use rc"` (Option-B `Rc<RefCell>` bridge), `"use arena"` (bumpalo); unknown
+  directive → `DialectError`.
+- **029 — library-method catalog + rankings** (item 8's ranking, expanded): the
+  living master table (popularity × complexity × native/`tslib` route × dep) that
+  027 draws sub-series from.
+- **Item 7 (type inference) — answered, no series needed:** local `let`/`const`
+  initializers already need no annotation (Rust infers them); params/returns/
+  fields stay annotation-required (oxc is a parser, not a typechecker). Keeping
+  annotations is an accepted dialect constraint unless adoption friction demands
+  an inference pass.
+
+Original notes retained below for context.
+
 ## Open questions — raised 2026-07-06 (post error-recovery trio)
 
 5. **Fail-loud gap: esoteric features are silently *mistranslated*, not rejected.**
