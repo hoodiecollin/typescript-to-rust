@@ -52,11 +52,11 @@ governs 027):
 | `map` | ★5 | ★2 | N/Tf | native `.iter().map().collect()`; **Tf** if index/array arg used |
 | `filter` | ★5 | ★2 | N/Tf | `.iter().filter().cloned().collect()` |
 | `forEach` | ★4 | ★1 | N | `for x in &xs { … }` |
-| `reduce` | ★4 | ★3 | N/Tf | `.iter().fold(init, …)`; **Tf** if index used |
-| `find` | ★4 | ★2 | N | `.iter().find().cloned()` → `Option` |
-| `some` / `every` | ★3 | ★1 | N | `.iter().any()` / `.all()` |
+| `reduce` | ★4 | ★3 | N/Tf | **✓ landed (039)** `.iter().fold(init, …)` (explicit init); no-init/index → later |
+| `find` | ★4 | ★2 | N | `.iter().find().cloned()` → `Option` — **deferred** (needs `undefined` fidelity, #7) |
+| `some` / `every` | ★3 | ★1 | N | **✓ landed (039)** `.iter().any()` / `.all()` |
 | `flatMap` / `flat` | ★2 | ★3 | N/Tf | `.flat_map()`; deep `flat(n)` → **Tf** |
-| `sort` | ★4 | ★4 | **Tf** | default = lexicographic **string** compare, in place, returns self |
+| `sort` | ★4 | ★4 | **Tf** | **✓ landed (040)** default lexicographic **string** compare + comparator → `sort_by` |
 | `map` w/ index | ★3 | ★3 | **Tf** | `.enumerate()` under the hood |
 
 ### Array — access/mutation (Dep: —, some cl)
@@ -65,8 +65,8 @@ governs 027):
 | `push` / `pop` | ★5 | ★1 | N | direct |
 | `length` | ★5 | ★1 | N | `.len()` |
 | `includes` / `indexOf` | ★4 | ★1 | N | `.contains()` / `.position()` |
-| `slice` | ★4 | ★3 | **Tf** | negative + out-of-range indices clamp (JS quirk) |
-| `at` | ★3 | ★2 | **Tf** | negative index |
+| `slice` | ★4 | ★3 | **Tf** | **✓ landed (040)** negative + out-of-range clamp; `slice`/`slice_from` |
+| `at` | ★3 | ★2 | **Tf** | **✓ landed (027)** negative index |
 | `splice` | ★3 | ★4 | **Tf** | remove+insert, returns removed; no direct Rust analog |
 | `join` | ★4 | ★1 | N | `.join(sep)` (after `to_string` map) |
 | `concat` / spread | ★3 | ★2 | N | `.extend()` / chained |
