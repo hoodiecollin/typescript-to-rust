@@ -88,8 +88,9 @@ governs 027):
 ### Object / JSON (Dep: serde)
 | Method | Pop | Cx | Route | Notes |
 |---|---|---|---|---|
-| `Object.keys`/`values`/`entries` | ★4 | ★2 | N | over a `HashMap` |
-| `Object.assign` / spread | ★3 | ★3 | N/Tf | merge semantics |
+| `Object.keys`/`values` | ★4 | ★2 | N | **✓ landed (041)** over an `IndexMap` (insertion order); `.keys()`/`.values()` |
+| `Object.entries` | ★3 | ★3 | N | **deferred** — needs pair-*array* access over a Rust tuple |
+| `Object.assign` / spread | ★3 | ★3 | N/Tf | **deferred** — merge + variadic sources + returns-target |
 | `hasOwnProperty` / `in` | ★3 | ★1 | N | `.contains_key()` |
 | `JSON.stringify` | ★4 | ★4 | **Tf** | JS number/formatting rules; serde + custom |
 | `JSON.parse` | ★4 | ★3 | Tf | serde_json → typed target |
@@ -156,9 +157,10 @@ governs 027):
 
 ## Open questions
 
-- Insertion-order maps: adopt `IndexMap` to match JS `Map`/object key order, or
-  accept `HashMap`'s unordered semantics with a note? (Order is observable in JS;
-  leaning `IndexMap` where iteration order is used.)
+- ~~Insertion-order maps: adopt `IndexMap` … or accept `HashMap`'s unordered
+  semantics?~~ **Resolved (2026-07-06, series 041): adopt `IndexMap` uniformly for
+  `Record`/object types** — order is observable via `Object.keys`/`values`, so the
+  backing type preserves insertion order to match JS everywhere.
 - UTF-16 vs Rust `char`/byte indexing for strings: pick one model and document
   the divergence, or emulate UTF-16 in `tslib` for fidelity? (Leaning: document
   divergence; emulate only if a fixture demands it.)
