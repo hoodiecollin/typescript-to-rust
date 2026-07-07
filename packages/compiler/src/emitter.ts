@@ -160,7 +160,9 @@ export function emitModule(mod: HirModule): string {
   // Std imports, deep-scanned from the HIR (the emitter is the sole producer of
   // each, so each scan is exact). `Rc`/`RefCell` travel together (`"use rc"`).
   const imports: string[] = [];
-  if (usesKind(mod, "hashmap")) imports.push("use std::collections::HashMap;");
+  // `Record`/object types are backed by `IndexMap` (series 041) so key/value
+  // iteration matches JS's insertion order (`HashMap` does not preserve it).
+  if (usesKind(mod, "hashmap")) imports.push("use indexmap::IndexMap;");
   if (
     usesKind(mod, "rc") ||
     usesKind(mod, "rcNew") ||
@@ -474,11 +476,11 @@ function emitExpr(expr: HirExpr): string {
     case "array":
       return `vec![${expr.elements.map(emitExpr).join(", ")}]`;
     case "hashmap": {
-      if (expr.entries.length === 0) return "HashMap::new()";
+      if (expr.entries.length === 0) return "IndexMap::new()";
       const entries = expr.entries
         .map((e) => `(${emitExpr(e.key)}, ${emitExpr(e.value)})`)
         .join(", ");
-      return `HashMap::from([${entries}])`;
+      return `IndexMap::from([${entries}])`;
     }
     case "structLit": {
       if (expr.fields.length === 0) return `${rid(expr.name)} {}`;
@@ -514,6 +516,10 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.receiver)}.iter().map(|&${rid(expr.param)}| ${emitExpr(expr.body)}).collect::<Vec<_>>()`;
     case "iterFilter":
       return `${emitExpr(expr.receiver)}.iter().filter(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied().collect::<Vec<_>>()`;
+    case "objectKeys":
+      return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
+    case "objectValues":
+      return `${emitExpr(expr.map)}.values().cloned().collect::<Vec<_>>()`;
     case "iterAny":
       return `${emitExpr(expr.receiver)}.iter().any(|&${rid(expr.param)}| ${emitExpr(expr.body)})`;
     case "iterAll":
@@ -545,7 +551,7 @@ function emitArg(arg: HirArg): string {
 /**
  * The index inside `obj[...]`. A `Vec` index is `usize`: a literal integer is
  * unambiguously so and skips the `f64` `.0` suffix (variable indices need the
- * numeric-inference pass). A `HashMap<String, _>` lookup wants `&str`, so a
+ * numeric-inference pass). An `IndexMap<String, _>` lookup wants `&str`, so a
  * string-literal key renders bare (`map["a"]`), never `"a".to_string()`
  * (`String` is not a valid index — `Index<&Q>` takes a borrow).
  */
@@ -578,7 +584,7 @@ function emitType(ty: RustType): string {
     case "vec":
       return `Vec<${emitType(ty.elem)}>`;
     case "hashmap":
-      return `HashMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
+      return `IndexMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
     case "struct":
       return rid(ty.name);
     case "result":

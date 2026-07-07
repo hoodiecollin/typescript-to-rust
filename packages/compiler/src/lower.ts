@@ -1932,6 +1932,15 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // `Object.keys(m)` / `Object.values(m)` are static calls on the global
+    // `Object` (series 041), not a method on a value — handle before the
+    // value-method routing. `Object.<anything else>` is fail-loud.
+    if (
+      m.object.type === "Identifier" &&
+      (m.object as Identifier).name === "Object"
+    ) {
+      return lowerObjectStatic(methodName, call, analysis);
+    }
     // A user-declared class method of this name is a native call — never hijack
     // it with the library-method routing below (map/filter/at/pad*, 027/033).
     const isUserMethod = analysis.methodNames.has(methodName);
@@ -2225,6 +2234,32 @@ function tryTslibMethod(
     };
   }
   return null;
+}
+
+/**
+ * Lower a static call on the global `Object` (series 041). `keys`/`values` map
+ * to a native iteration of the `IndexMap`-backed record (insertion order matches
+ * JS); everything else — `entries` (needs pair-array access) and `assign` (merge
+ * + variadic sources) included — is fail-loud, a tracked residual.
+ */
+function lowerObjectStatic(
+  methodName: string,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  if (
+    (methodName === "keys" || methodName === "values") &&
+    call.arguments.length === 1 &&
+    call.arguments[0]
+  ) {
+    const map = lowerExpr(call.arguments[0], analysis);
+    return methodName === "keys"
+      ? { kind: "objectKeys", map }
+      : { kind: "objectValues", map };
+  }
+  throw new UnsupportedError({
+    type: `Object.${methodName} (only Object.keys/values are supported; entries/assign are later slices)`,
+  });
 }
 
 /** `new C(args)` → `C::new(args)`. Constructor params are owned (args by value). */

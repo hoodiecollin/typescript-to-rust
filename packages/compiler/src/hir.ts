@@ -39,7 +39,11 @@ export type RustType =
   | { kind: "bool" }
   | { kind: "unit" }
   | { kind: "vec"; elem: RustType }
-  /** `Record<string, V>` → `HashMap<String, V>`; `key` is always `String` today. */
+  /**
+   * `Record<string, V>` → `IndexMap<String, V>` (series 041; insertion-order
+   * preserving, matching JS). `key` is always `String` today. The HIR tag stays
+   * `hashmap` (the map node); only the emitted backing type is `IndexMap`.
+   */
   | { kind: "hashmap"; key: RustType; value: RustType }
   /** A named `struct` (from an `interface`); rendered as the bare name. */
   | { kind: "struct"; name: string }
@@ -105,7 +109,7 @@ export type HirExpr =
   | { kind: "len"; object: HirExpr }
   /** array literal → `vec![...]`. */
   | { kind: "array"; elements: HirExpr[] }
-  /** record object literal → `HashMap::from([(k, v), …])` (or `HashMap::new()`). */
+  /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */
   | { kind: "hashmap"; entries: { key: HirExpr; value: HirExpr }[] }
   /** struct object literal → `Name { field: value, … }`. */
   | {
@@ -129,6 +133,10 @@ export type HirExpr =
    * `xs.iter().filter(|&&p| body).copied().collect::<Vec<_>>()` (027-cl).
    */
   | { kind: "iterFilter"; receiver: HirExpr; param: string; body: HirExpr }
+  /** `Object.keys(m)` → `m.keys().cloned().collect::<Vec<_>>()` → `Vec<String>` (041). */
+  | { kind: "objectKeys"; map: HirExpr }
+  /** `Object.values(m)` → `m.values().cloned().collect::<Vec<_>>()` → `Vec<V>` (041). */
+  | { kind: "objectValues"; map: HirExpr }
   /** `xs.some(p => c)` → `xs.iter().any(|&p| c)` → `bool` (039). */
   | { kind: "iterAny"; receiver: HirExpr; param: string; body: HirExpr }
   /** `xs.every(p => c)` → `xs.iter().all(|&p| c)` → `bool` (039). */
