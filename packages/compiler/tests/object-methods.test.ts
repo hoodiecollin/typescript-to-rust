@@ -66,16 +66,12 @@ console.log(Object.keys(m).length);`,
   });
 });
 
-describe("041 Object.* deferred surfaces are fail-loud", () => {
-  test("OBJ5 Object.entries is fail-loud", () => {
+describe("041 Object.* — an unsupported static is fail-loud", () => {
+  // Object.entries graduated in series 043; Object.assign in 044. An unknown
+  // Object static stays fail-loud.
+  test("OBJ5 an unknown Object static is fail-loud", () => {
     expect(() =>
-      compile(`${REC3}\nconst es = Object.entries(m);`),
-    ).toThrow(UnsupportedError);
-  });
-
-  test("OBJ6 Object.assign is fail-loud", () => {
-    expect(() =>
-      compile(`${REC3}\nconst t = Object.assign(m, m);`),
+      compile(`${REC3}\nconst f = Object.freeze(m);`),
     ).toThrow(UnsupportedError);
   });
 });
