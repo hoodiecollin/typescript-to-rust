@@ -13,7 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
-import { UnsupportedError, emit } from "../src/emitter";
+import { emit } from "../src/emitter";
 import { runRust } from "../src/harness";
 
 function compile(src: string): string {
@@ -95,10 +95,9 @@ if (a || b) {
     );
   });
 
-  test("`??` (nullish coalescing) is fail-loud — needs Option", () => {
-    expect(() =>
-      compile(`const a: number = 1;
-console.log(a ?? 2);`),
-    ).toThrow(UnsupportedError);
+  test("`??` (nullish coalescing) → `.unwrap_or()` (graduated, series 042)", () => {
+    const rust = compile(`const a: number | undefined = 1;
+console.log(a ?? 2);`);
+    expect(rust).toContain(".unwrap_or(");
   });
 });

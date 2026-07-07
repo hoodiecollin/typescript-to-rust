@@ -140,7 +140,9 @@ describe("lowering: fail-loud gates (L11)", () => {
     expect(() => hir(`function f(a): void {}`)).toThrow(UnsupportedError);
   });
 
-  test("a null literal throws", () => {
-    expect(() => hir(`const x: number = null;`)).toThrow(UnsupportedError);
+  test("a union of two real types throws (nullability is Option, not enums)", () => {
+    // `null`/`undefined` now lower to `None` (series 042); a union of two *real*
+    // types is still fail-loud (enum/union territory, a separate decision).
+    expect(() => hir(`const x: number | string = 5;`)).toThrow(UnsupportedError);
   });
 });
