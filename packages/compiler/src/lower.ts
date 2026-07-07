@@ -1952,6 +1952,83 @@ function lowerCall(
         ? { kind: "iterMap", receiver, param: cl.param, body: cl.body }
         : { kind: "iterFilter", receiver, param: cl.param, body: cl.body };
     }
+    // `some`/`every` → native `.iter().any()`/`.all()` (039); same single-param
+    // predicate-closure shape as `filter`, but yielding a `bool`.
+    if (
+      !isUserMethod &&
+      (methodName === "some" || methodName === "every") &&
+      call.arguments.length === 1 &&
+      call.arguments[0]?.type === "ArrowFunctionExpression"
+    ) {
+      const cl = arrowExprClosure(
+        call.arguments[0] as ArrowFunctionExpression,
+        analysis,
+      );
+      const receiver = lowerExpr(m.object, analysis);
+      return methodName === "some"
+        ? { kind: "iterAny", receiver, param: cl.param, body: cl.body }
+        : { kind: "iterAll", receiver, param: cl.param, body: cl.body };
+    }
+    // `reduce((acc, x) => e, init)` → native `.iter().fold(init, |acc, &x| e)`
+    // (039). The two-param closure seeds `acc` from the required `init` arg; a
+    // no-init `reduce` is `Option`-typed (fail-loud, a later slice).
+    if (
+      !isUserMethod &&
+      methodName === "reduce" &&
+      call.arguments[0]?.type === "ArrowFunctionExpression"
+    ) {
+      if (call.arguments.length !== 2 || !call.arguments[1]) {
+        throw new UnsupportedError({
+          type: "reduce without an explicit initial value (Option-typed, a later slice)",
+        });
+      }
+      const cl = arrowClosureN(
+        call.arguments[0] as ArrowFunctionExpression,
+        analysis,
+        2,
+      );
+      const receiver = lowerExpr(m.object, analysis);
+      const init = lowerExpr(call.arguments[1], analysis);
+      return {
+        kind: "iterReduce",
+        receiver,
+        acc: cl.params[0] as string,
+        elem: cl.params[1] as string,
+        body: cl.body,
+        init,
+      };
+    }
+    // `sort` → `tslib` (040): default (0 args) is a lexicographic string compare;
+    // a comparator arrow uses the two-param closure shape. A non-arrow `sort`
+    // argument is fail-loud (there is no faithful native form).
+    if (!isUserMethod && methodName === "sort") {
+      if (call.arguments.length === 0) {
+        return {
+          kind: "iterSortDefault",
+          receiver: lowerExpr(m.object, analysis),
+        };
+      }
+      if (
+        call.arguments.length === 1 &&
+        call.arguments[0]?.type === "ArrowFunctionExpression"
+      ) {
+        const cl = arrowClosureN(
+          call.arguments[0] as ArrowFunctionExpression,
+          analysis,
+          2,
+        );
+        return {
+          kind: "iterSortBy",
+          receiver: lowerExpr(m.object, analysis),
+          a: cl.params[0] as string,
+          b: cl.params[1] as string,
+          body: cl.body,
+        };
+      }
+      throw new UnsupportedError({
+        type: "sort with a non-arrow comparator (pass `(a, b) => …` or no argument)",
+      });
+    }
     // Quirk-heavy library methods route to the `tslib` fidelity crate (027);
     // clean-mapping methods fall through to the native `method` call below.
     const routed = isUserMethod
@@ -1975,25 +2052,28 @@ function lowerCall(
 }
 
 /**
- * Extract a single-param, expression-bodied arrow closure's param name and
- * lowered body (series 027-cl). The body is the arrow's expression, or a block of
- * exactly one `return <expr>`. Multi-param (index/array), `async`, and
- * multi-statement bodies are fail-loud (later slices).
+ * Extract an `arity`-param, expression-bodied arrow closure's param names and
+ * lowered body (series 033/039). The body is the arrow's expression, or a block
+ * of exactly one `return <expr>`. A wrong param count, `async`, destructured
+ * params, and multi-statement bodies are all fail-loud (later slices).
  */
-function arrowExprClosure(
+function arrowClosureN(
   arrow: ArrowFunctionExpression,
   analysis: ModuleAnalysis,
-): { param: string; body: HirExpr } {
+  arity: number,
+): { params: string[]; body: HirExpr } {
   if (arrow.async) {
     throw new UnsupportedError({ type: "async arrow closure" });
   }
-  if (arrow.params.length !== 1) {
+  if (arrow.params.length !== arity) {
     throw new UnsupportedError({
-      type: "closure must take exactly one parameter (index/array params not yet supported)",
+      type: `closure must take exactly ${arity} parameter(s)`,
     });
   }
-  const param = arrow.params[0]?.name;
-  if (!param) throw new UnsupportedError({ type: "closure parameter binding" });
+  const params = arrow.params.map((p) => p.name);
+  if (params.some((p) => !p)) {
+    throw new UnsupportedError({ type: "closure parameter binding" });
+  }
   let bodyExpr: Expression;
   if (arrow.expression) {
     bodyExpr = arrow.body as Expression;
@@ -2006,11 +2086,23 @@ function arrowExprClosure(
       bodyExpr = ret.argument;
     } else {
       throw new UnsupportedError({
-        type: "map/filter closure body must be an expression or a single return",
+        type: "closure body must be an expression or a single return",
       });
     }
   }
-  return { param, body: lowerExpr(bodyExpr, analysis) };
+  return { params: params as string[], body: lowerExpr(bodyExpr, analysis) };
+}
+
+/**
+ * The single-param specialization used by `map`/`filter`/`some`/`every`/`find`
+ * (series 027-cl). Delegates to `arrowClosureN` with arity 1.
+ */
+function arrowExprClosure(
+  arrow: ArrowFunctionExpression,
+  analysis: ModuleAnalysis,
+): { param: string; body: HirExpr } {
+  const { params, body } = arrowClosureN(arrow, analysis, 1);
+  return { param: params[0] as string, body };
 }
 
 /**
@@ -2087,6 +2179,30 @@ function tryTslibMethod(
       args: [
         recvRef(),
         { borrow: "owned", expr: lowerExpr(args[0], analysis) },
+      ],
+    };
+  }
+  // `xs.slice(start[, end])` → `tslib::array::slice{,_from}(&xs, …)` (040): JS's
+  // clamped, negative-aware, end-exclusive shallow copy. Numeric args are owned
+  // `f64` (floored in `tslib`, the `at` precedent).
+  if (methodName === "slice" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::array::slice_from",
+      args: [
+        recvRef(),
+        { borrow: "owned", expr: lowerExpr(args[0], analysis) },
+      ],
+    };
+  }
+  if (methodName === "slice" && args.length === 2 && args[0] && args[1]) {
+    return {
+      kind: "call",
+      callee: "tslib::array::slice",
+      args: [
+        recvRef(),
+        { borrow: "owned", expr: lowerExpr(args[0], analysis) },
+        { borrow: "owned", expr: lowerExpr(args[1], analysis) },
       ],
     };
   }

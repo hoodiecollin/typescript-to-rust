@@ -129,6 +129,40 @@ export type HirExpr =
    * `xs.iter().filter(|&&p| body).copied().collect::<Vec<_>>()` (027-cl).
    */
   | { kind: "iterFilter"; receiver: HirExpr; param: string; body: HirExpr }
+  /** `xs.some(p => c)` → `xs.iter().any(|&p| c)` → `bool` (039). */
+  | { kind: "iterAny"; receiver: HirExpr; param: string; body: HirExpr }
+  /** `xs.every(p => c)` → `xs.iter().all(|&p| c)` → `bool` (039). */
+  | { kind: "iterAll"; receiver: HirExpr; param: string; body: HirExpr }
+  /**
+   * `xs.reduce((acc, x) => e, init)` → `xs.iter().fold(init, |acc, &x| e)` (039).
+   * `acc` is the owned fold accumulator (seeded by `init`); `elem` binds `&elem`
+   * to copy each Copy element out of the `.iter()` borrow.
+   */
+  | {
+      kind: "iterReduce";
+      receiver: HirExpr;
+      acc: string;
+      elem: string;
+      body: HirExpr;
+      init: HirExpr;
+    }
+  /**
+   * `xs.sort()` → `tslib::array::sort_default(&mut xs)` (040). Default JS sort is
+   * a lexicographic *string* compare, in place; the fidelity lives in `tslib`.
+   */
+  | { kind: "iterSortDefault"; receiver: HirExpr }
+  /**
+   * `xs.sort((a, b) => e)` → `tslib::array::sort_by(&mut xs, |a, b| e)` (040). The
+   * comparator's numeric sign is mapped to an `Ordering` inside `tslib`; `a`/`b`
+   * are plain (owned Copy) closure params.
+   */
+  | {
+      kind: "iterSortBy";
+      receiver: HirExpr;
+      a: string;
+      b: string;
+      body: HirExpr;
+    }
   /**
    * `Rc::new(RefCell::new(inner))` — construct a shared, interior-mutable value
    * (series 028b). Wraps a class constructor call in a `"use rc"` scope.

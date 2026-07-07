@@ -514,6 +514,16 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.receiver)}.iter().map(|&${rid(expr.param)}| ${emitExpr(expr.body)}).collect::<Vec<_>>()`;
     case "iterFilter":
       return `${emitExpr(expr.receiver)}.iter().filter(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied().collect::<Vec<_>>()`;
+    case "iterAny":
+      return `${emitExpr(expr.receiver)}.iter().any(|&${rid(expr.param)}| ${emitExpr(expr.body)})`;
+    case "iterAll":
+      return `${emitExpr(expr.receiver)}.iter().all(|&${rid(expr.param)}| ${emitExpr(expr.body)})`;
+    case "iterReduce":
+      return `${emitExpr(expr.receiver)}.iter().fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, &${rid(expr.elem)}| ${emitExpr(expr.body)})`;
+    case "iterSortDefault":
+      return `tslib::array::sort_default(&mut ${emitExpr(expr.receiver)})`;
+    case "iterSortBy":
+      return `tslib::array::sort_by(&mut ${emitExpr(expr.receiver)}, |${rid(expr.a)}, ${rid(expr.b)}| ${emitExpr(expr.body)})`;
     case "rcNew":
       return `Rc::new(RefCell::new(${emitExpr(expr.inner)}))`;
     case "rcClone":
