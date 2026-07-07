@@ -1,15 +1,13 @@
 /**
- * Specs for records → `HashMap` (series 010). Drives the public `emit(...)` entry
- * and asserts the emitted shape: a `HashMap<String, V>` type, a
- * `HashMap::from([…])` construction, a bare-`&str` keyed lookup, and the std
- * import. The cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs
- * map to docs/work/010-records-hashmap/specs.md.
+ * Specs for records → `IndexMap` (series 010, retargeted to `IndexMap` in 041).
+ * Drives the public `emit(...)` entry and asserts the emitted shape: an
+ * `IndexMap<String, V>` type, an `IndexMap::from([…])` construction, a
+ * bare-`&str` keyed lookup, and the `indexmap` import. The backing type is
+ * `IndexMap` (not `HashMap`) so key/value iteration matches JS insertion order
+ * (series 041). The cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts.
  *
- * RED against the scaffold seam in `src/lower.ts`: a `Record` type throws
- * `UnsupportedError` "Record → HashMap lowering pending" until `lowerType`/
- * `lowerHashMapLiteral` land. REC5 is a green control (no record) proving the
- * seam and the new `hashmap` node don't regress existing lowering nor leak the
- * prelude.
+ * REC5 is a green control (no record) proving the map node doesn't regress
+ * existing lowering nor leak the prelude.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -24,14 +22,14 @@ function compile(src: string): string {
 const RECORD = `const map: Record<string, number> = { "a": 1, "b": 2 };
 let val: number = map["a"];`;
 
-describe("data structures: records → HashMap", () => {
-  test("REC1 the record type lowers to `HashMap<String, f64>`", () => {
-    expect(compile(RECORD)).toContain("let map: HashMap<String, f64> =");
+describe("data structures: records → IndexMap", () => {
+  test("REC1 the record type lowers to `IndexMap<String, f64>`", () => {
+    expect(compile(RECORD)).toContain("let map: IndexMap<String, f64> =");
   });
 
-  test("REC2 the object literal lowers to a `HashMap::from` construction", () => {
+  test("REC2 the object literal lowers to an `IndexMap::from` construction", () => {
     expect(compile(RECORD)).toContain(
-      `HashMap::from([("a".to_string(), 1.0), ("b".to_string(), 2.0)])`,
+      `IndexMap::from([("a".to_string(), 1.0), ("b".to_string(), 2.0)])`,
     );
   });
 
@@ -41,13 +39,13 @@ describe("data structures: records → HashMap", () => {
     expect(rust).not.toContain(`map["a".to_string()]`);
   });
 
-  test("REC4 a module using a HashMap gets the std import prepended", () => {
-    expect(compile(RECORD)).toStartWith("use std::collections::HashMap;");
+  test("REC4 a module using a record gets the `indexmap` import prepended", () => {
+    expect(compile(RECORD)).toStartWith("use indexmap::IndexMap;");
   });
 
   test("REC5 (green control) a non-record program emits unchanged, no import", () => {
     const rust = compile(`const n: number = 1;`);
     expect(rust).toContain("let n: f64 = 1.0;");
-    expect(rust).not.toContain("HashMap");
+    expect(rust).not.toContain("IndexMap");
   });
 });

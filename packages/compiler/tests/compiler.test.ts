@@ -376,7 +376,7 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     expect(rustRun.stdout.trim()).toBe("6");
   });
 
-  test("a record builds a HashMap and looks up the same value", async () => {
+  test("a record builds an IndexMap and looks up the same value", async () => {
     const ts = [
       `const scores: Record<string, number> = { "ada": 10, "linus": 7 };`,
       `const ada: number = scores["ada"];`,
