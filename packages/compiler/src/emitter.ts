@@ -146,7 +146,9 @@ export function emitModule(mod: HirModule): string {
   // A struct table (interface + class field shapes) drives on-demand trait
   // derivation (`derives.ts`); threaded through item emission.
   const structs = buildStructTable(mod.items);
-  const parts = mod.items.map((item) => emitItem(item, structs));
+  // Generated structs derive serde traits only when the module uses JSON (045).
+  const usesJson = usesKind(mod, "jsonStringify") || usesKind(mod, "jsonParse");
+  const parts = mod.items.map((item) => emitItem(item, structs, usesJson));
   if (mod.main.length > 0) {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
     // A fallible script makes `main` return `Result<(), String>` (its trailing
@@ -192,14 +194,18 @@ function usesKind(node: unknown, kind: string): boolean {
 
 // ── Items ────────────────────────────────────────────────────────────────────
 
-function emitItem(item: HirItem, structs: StructTable): string {
+function emitItem(
+  item: HirItem,
+  structs: StructTable,
+  usesJson: boolean,
+): string {
   switch (item.kind) {
     case "fn":
       return emitFn(item);
     case "struct":
-      return emitStruct(item, structs);
+      return emitStruct(item, structs, usesJson);
     case "class":
-      return emitClass(item, structs);
+      return emitClass(item, structs, usesJson);
     case "errorClass":
       return emitErrorClass(item);
     case "enum":
@@ -259,10 +265,15 @@ function emitErrorClass(e: HirErrorClass): string {
 }
 
 /** A `class` → its `struct` definition, an `impl` block, and (if any) `Drop`. */
-function emitClass(c: HirClass, structs: StructTable): string {
+function emitClass(
+  c: HirClass,
+  structs: StructTable,
+  usesJson: boolean,
+): string {
   const struct = emitStruct(
     { kind: "struct", name: c.name, fields: c.fields },
     structs,
+    usesJson,
   );
   const fns = [c.ctor, ...c.methods].filter((f): f is HirFn => f !== null);
   const body = fns.map((f) => indent(emitFn(f))).join("\n");
@@ -284,8 +295,12 @@ function emitClass(c: HirClass, structs: StructTable): string {
  * field-less). The derive clause is computed on-demand from field eligibility
  * (`derives.ts`) — `Clone` (for the ownership pass) + `Debug` (for `console.log`).
  */
-function emitStruct(s: HirStruct, structs: StructTable): string {
-  const derive = structDeriveClause(s, structs);
+function emitStruct(
+  s: HirStruct,
+  structs: StructTable,
+  usesJson = false,
+): string {
+  const derive = structDeriveClause(s, structs, usesJson);
   if (s.fields.length === 0) return `${derive}struct ${rid(s.name)} {}`;
   const fields = s.fields
     .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
@@ -515,6 +530,12 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.object)}[${emitIndex(expr.index)}]`;
     case "optMember":
       return `${emitExpr(expr.receiver)}.map(|v| v.${rid(expr.field)})`;
+    case "jsonStringify":
+      return `tslib::json::stringify(&${emitExpr(expr.value)})`;
+    case "jsonParse": {
+      const ty = expr.target ? emitType(expr.target) : "serde_json::Value";
+      return `serde_json::from_str::<${ty}>(&${emitExpr(expr.source)}).expect("JSON.parse")`;
+    }
     case "some":
       return `Some(${emitExpr(expr.value)})`;
     case "none":

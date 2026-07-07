@@ -129,6 +129,14 @@ export type HirExpr =
    * member access). Deeper chains stay fail-loud.
    */
   | { kind: "optMember"; receiver: HirExpr; field: string }
+  /** `JSON.stringify(v)` → `tslib::json::stringify(&v)` → `String` (series 045). */
+  | { kind: "jsonStringify"; value: HirExpr }
+  /**
+   * `JSON.parse(s)` → `serde_json::from_str::<target>(&s).expect(...)` (series
+   * 045). `target` is the annotated type (`Vec<f64>`, a struct, …), or `null` for
+   * the untyped `serde_json::Value` fallback.
+   */
+  | { kind: "jsonParse"; source: HirExpr; target: RustType | null }
   /** `Some(value)` — a present optional (series 042). */
   | { kind: "some"; value: HirExpr }
   /** `None` — an absent optional, from `undefined`/`null` (series 042). */

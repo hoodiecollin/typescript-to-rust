@@ -130,13 +130,21 @@ function isTypeDebug(
 export function structDeriveClause(
   s: { name: string; fields: { name: string; ty: RustType }[] },
   table: StructTable,
+  usesJson = false,
 ): string {
   const traits: string[] = [];
   if (s.fields.every((f) => isTypeCloneable(f.ty, table, new Set([s.name])))) {
     traits.push("Clone");
   }
-  if (s.fields.every((f) => isTypeDebug(f.ty, table, new Set([s.name])))) {
-    traits.push("Debug");
+  const isDebug = s.fields.every((f) =>
+    isTypeDebug(f.ty, table, new Set([s.name])),
+  );
+  if (isDebug) traits.push("Debug");
+  // serde `Serialize`/`Deserialize` are derived only when the module uses JSON
+  // (series 045) and every field is (de)serializable — the same in-dialect data
+  // set as `Debug`. Fully-qualified so no `use serde::…` prelude is needed.
+  if (usesJson && isDebug) {
+    traits.push("serde::Serialize", "serde::Deserialize");
   }
   return traits.length > 0 ? `#[derive(${traits.join(", ")})]\n` : "";
 }

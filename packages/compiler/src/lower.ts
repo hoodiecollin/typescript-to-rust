@@ -1737,6 +1737,14 @@ function lowerTyped(
   ty: RustType | null,
   analysis: ModuleAnalysis,
 ): HirExpr {
+  // `const x: T = JSON.parse(s)` deserializes into the annotated target type
+  // (series 045); without an annotation it falls to the `Value` form in lowerCall.
+  if (ty && isJsonParseCall(expr)) {
+    const src = (expr as CallExpression).arguments[0];
+    if (src) {
+      return { kind: "jsonParse", source: lowerExpr(src, analysis), target: ty };
+    }
+  }
   // Option coercion (series 042): a plain value flowing into an `Option<T>` slot
   // is `Some`-wrapped (recursing against the inner type); `undefined`/`null`
   // becomes `None`. Centralized here so `let`-init, struct fields, and array
@@ -2192,6 +2200,26 @@ function lowerCall(
     ) {
       return lowerObjectStatic(methodName, call, analysis);
     }
+    // `JSON.stringify(v)` / `JSON.parse(s)` — static calls on the global `JSON`
+    // (series 045). `parse` here has no type context → the untyped `Value`
+    // fallback; a `const x: T = JSON.parse(s)` gets its `T` in `lowerTyped`.
+    if (
+      m.object.type === "Identifier" &&
+      (m.object as Identifier).name === "JSON"
+    ) {
+      const arg = call.arguments[0];
+      if (methodName === "stringify" && arg) {
+        return { kind: "jsonStringify", value: lowerExpr(arg, analysis) };
+      }
+      if (methodName === "parse" && arg) {
+        return {
+          kind: "jsonParse",
+          source: lowerExpr(arg, analysis),
+          target: null,
+        };
+      }
+      throw new UnsupportedError({ type: `JSON.${methodName}` });
+    }
     // A user-declared class method of this name is a native call — never hijack
     // it with the library-method routing below (map/filter/at/pad*, 027/033).
     const isUserMethod = analysis.methodNames.has(methodName);
@@ -2511,6 +2539,20 @@ function tryTslibMethod(
  * JS); everything else — `entries` (needs pair-array access) and `assign` (merge
  * + variadic sources) included — is fail-loud, a tracked residual.
  */
+/** Is `e` a call to `JSON.parse(...)` (series 045)? */
+function isJsonParseCall(e: Expression): boolean {
+  if (e.type !== "CallExpression") return false;
+  const callee = (e as CallExpression).callee;
+  if (callee.type !== "MemberExpression") return false;
+  const m = callee as MemberExpression;
+  return (
+    m.object.type === "Identifier" &&
+    (m.object as Identifier).name === "JSON" &&
+    m.property.type === "Identifier" &&
+    (m.property as Identifier).name === "parse"
+  );
+}
+
 /** Is `e` a call to `Object.entries(...)` (series 043)? */
 function isObjectEntriesCall(e: Expression): boolean {
   if (e.type !== "CallExpression") return false;
