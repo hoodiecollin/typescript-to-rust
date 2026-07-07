@@ -68,6 +68,7 @@ import type {
   HirParam,
   HirStmt,
   HirStruct,
+  MapBuildPart,
   RustType,
   SelfRecv,
 } from "./hir";
@@ -1481,6 +1482,43 @@ function lowerForOf(
   if (!decl || stmt.left.declarations.length !== 1) {
     throw new UnsupportedError({ type: "for-of with a non-single binding" });
   }
+  // Array-pattern destructuring `for (const [k, v] of …)` (series 043) — the
+  // `Object.entries` consumption form. Over `Object.entries(m)` iterate the map
+  // directly (`for (k, v) in m.iter()`); over a stored `Vec<(K,V)>` iterate it.
+  const declId = decl.id as unknown as {
+    type: string;
+    elements?: ({ type: string; name?: string } | null)[];
+  };
+  if (declId.type === "ArrayPattern") {
+    const elems = declId.elements ?? [];
+    const k = elems[0];
+    const v = elems[1];
+    if (
+      elems.length !== 2 ||
+      k?.type !== "Identifier" ||
+      v?.type !== "Identifier" ||
+      !k.name ||
+      !v.name
+    ) {
+      throw new UnsupportedError({
+        type: "for-of destructuring must bind exactly `[k, v]` identifiers",
+      });
+    }
+    const target = isObjectEntriesCall(stmt.right)
+      ? ((stmt.right as CallExpression).arguments[0] as Expression)
+      : stmt.right;
+    return {
+      kind: "forIn",
+      pat: `(${k.name}, ${v.name})`,
+      iter: {
+        kind: "method",
+        receiver: lowerExpr(target, analysis),
+        name: "iter",
+        args: [],
+      },
+      body: lowerBlock(stmt.body, analysis, scope),
+    };
+  }
   // A `for (const x of g())` over a call to a sync generator (series 025d)
   // consumes the returned `impl Iterator` directly — no `.iter()`, and the
   // binding is `x` by value (`Item = T`). Everything else iterates by reference
@@ -1598,6 +1636,11 @@ function lowerVarDecl(
   const mutable = analysis.mut.get(scope);
   return decl.declarations.map((d) => {
     if (!d.init) throw new UnsupportedError({ type: "uninitialized binding" });
+    // Array/object destructuring in a plain binding is unsupported (only the
+    // `for (const [k, v] of Object.entries(…))` pattern is, via `lowerForOf`).
+    if ((d.id as { type: string }).type !== "Identifier") {
+      throw new UnsupportedError({ type: "destructuring binding" });
+    }
     const ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
@@ -1606,6 +1649,9 @@ function lowerVarDecl(
     // `vec![Name { … }, …]`, recursing into nested literals (series 032). A bare
     // object literal (no struct/record type) stays unsupported (via `lowerExpr`).
     const init = lowerTyped(d.init, ty, analysis);
+    // Track an `Object.entries(...)` binding so `es[i][0]`/`es[i][1]` can lower to
+    // tuple field access (series 043).
+    if (isObjectEntriesCall(d.init)) analysis.entriesBindings.add(d.id.name);
     return {
       kind: "let",
       name: d.id.name,
@@ -1704,7 +1750,17 @@ function lowerTyped(
     return lowerStructLiteral(expr as ObjectExpression, ty.name, analysis);
   }
   if (ty?.kind === "hashmap" && expr.type === "ObjectExpression") {
-    return lowerHashMapLiteral(expr as ObjectExpression, analysis);
+    const obj = expr as ObjectExpression;
+    // An object spread `{ ...a, k: v }` builds a merged map (series 044); a plain
+    // record literal stays a direct `IndexMap::from`.
+    if (
+      obj.properties.some(
+        (p) => (p as { type: string }).type === "SpreadElement",
+      )
+    ) {
+      return { kind: "mapBuild", base: null, parts: mapBuildParts(obj, analysis) };
+    }
+    return lowerHashMapLiteral(obj, analysis);
   }
   if (ty?.kind === "vec" && expr.type === "ArrayExpression") {
     return {
@@ -2455,23 +2511,88 @@ function tryTslibMethod(
  * JS); everything else — `entries` (needs pair-array access) and `assign` (merge
  * + variadic sources) included — is fail-loud, a tracked residual.
  */
+/** Is `e` a call to `Object.entries(...)` (series 043)? */
+function isObjectEntriesCall(e: Expression): boolean {
+  if (e.type !== "CallExpression") return false;
+  const callee = (e as CallExpression).callee;
+  if (callee.type !== "MemberExpression") return false;
+  const m = callee as MemberExpression;
+  return (
+    m.object.type === "Identifier" &&
+    (m.object as Identifier).name === "Object" &&
+    m.property.type === "Identifier" &&
+    (m.property as Identifier).name === "entries"
+  );
+}
+
 function lowerObjectStatic(
   methodName: string,
   call: CallExpression,
   analysis: ModuleAnalysis,
 ): HirExpr {
   if (
-    (methodName === "keys" || methodName === "values") &&
+    (methodName === "keys" ||
+      methodName === "values" ||
+      methodName === "entries") &&
     call.arguments.length === 1 &&
     call.arguments[0]
   ) {
     const map = lowerExpr(call.arguments[0], analysis);
-    return methodName === "keys"
-      ? { kind: "objectKeys", map }
-      : { kind: "objectValues", map };
+    if (methodName === "keys") return { kind: "objectKeys", map };
+    if (methodName === "values") return { kind: "objectValues", map };
+    return { kind: "objectEntries", map };
+  }
+  // `Object.assign(target, ...sources)` → a merged-map builder (series 044).
+  if (methodName === "assign" && call.arguments.length >= 1 && call.arguments[0]) {
+    const [target, ...sources] = call.arguments;
+    const parts: MapBuildPart[] = [];
+    let base: HirExpr | null;
+    if ((target as Expression).type === "ObjectExpression") {
+      base = null;
+      parts.push(...mapBuildParts(target as ObjectExpression, analysis));
+    } else {
+      base = lowerExpr(target as Expression, analysis);
+    }
+    for (const s of sources) {
+      parts.push({ kind: "spread", expr: lowerExpr(s, analysis) });
+    }
+    return { kind: "mapBuild", base, parts };
   }
   throw new UnsupportedError({
-    type: `Object.${methodName} (only Object.keys/values are supported; entries/assign are later slices)`,
+    type: `Object.${methodName} (only keys/values/entries/assign are supported)`,
+  });
+}
+
+/**
+ * Turn an object literal's properties into `mapBuild` parts (series 044): a
+ * `...spread` becomes a `spread` part, a `key: value` a `entry` part. Computed
+ * keys are fail-loud.
+ */
+function mapBuildParts(
+  obj: ObjectExpression,
+  analysis: ModuleAnalysis,
+): MapBuildPart[] {
+  return obj.properties.map((raw): MapBuildPart => {
+    const p = raw as unknown as {
+      type: string;
+      argument?: Expression;
+      computed?: boolean;
+      key?: Expression;
+      value?: Expression;
+    };
+    if (p.type === "SpreadElement" && p.argument) {
+      return { kind: "spread", expr: lowerExpr(p.argument, analysis) };
+    }
+    if (p.type === "Property" && !p.computed && p.key && p.value) {
+      return {
+        kind: "entry",
+        key: lowerKey(p.key as Parameters<typeof lowerKey>[0]),
+        value: lowerExpr(p.value, analysis),
+      };
+    }
+    throw new UnsupportedError({
+      type: "unsupported object-spread property (computed key)",
+    });
   });
 }
 
@@ -2497,6 +2618,27 @@ function lowerMember(
   analysis: ModuleAnalysis,
 ): HirExpr {
   if (member.computed) {
+    // Pair index on an `Object.entries` element — `es[i][0]` / `es[i][1]` →
+    // tuple field `.0` / `.1` (series 043). The base must be `<entriesBinding>[i]`
+    // and the index the literal `0` or `1`.
+    const prop = member.property;
+    const base = member.object;
+    if (
+      (prop.type === "Literal" &&
+        ((prop as Literal).value === 0 || (prop as Literal).value === 1)) &&
+      base.type === "MemberExpression" &&
+      (base as MemberExpression).computed &&
+      (base as MemberExpression).object.type === "Identifier" &&
+      analysis.entriesBindings.has(
+        ((base as MemberExpression).object as Identifier).name,
+      )
+    ) {
+      return {
+        kind: "tupleField",
+        tuple: lowerExpr(base, analysis),
+        index: (prop as Literal).value as 0 | 1,
+      };
+    }
     return {
       kind: "index",
       object: lowerExpr(member.object, analysis),

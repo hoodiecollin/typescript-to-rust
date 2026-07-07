@@ -154,6 +154,21 @@ export type HirExpr =
   /** `Object.values(m)` → `m.values().cloned().collect::<Vec<_>>()` → `Vec<V>` (041). */
   | { kind: "objectValues"; map: HirExpr }
   /**
+   * `Object.entries(m)` → `m.iter().map(|(k, v)| (k.clone(), v.clone()))
+   * .collect::<Vec<_>>()` → `Vec<(K, V)>`, in insertion order (series 043).
+   */
+  | { kind: "objectEntries"; map: HirExpr }
+  /** `pair[0]` / `pair[1]` on an `entries` tuple → `<tuple>.0` / `.1` (series 043). */
+  | { kind: "tupleField"; tuple: HirExpr; index: 0 | 1 }
+  /**
+   * A merged-map builder (series 044) — the shared lowering of `Object.assign`
+   * and object spread `{ ...a, k: v }`. Emits a block expression that seeds a
+   * `mut` `IndexMap` from `base` (or `IndexMap::new()` when null), applies each
+   * part in order (a spread `extend`s a cloned source; an entry `insert`s), and
+   * evaluates to the map. Later parts override earlier keys, matching JS.
+   */
+  | { kind: "mapBuild"; base: HirExpr | null; parts: MapBuildPart[] }
+  /**
    * `xs.find(p => c)` → `xs.iter().find(|&&p| c).copied()` → `Option<T>` (042d).
    */
   | { kind: "iterFind"; receiver: HirExpr; param: string; body: HirExpr }
@@ -210,6 +225,11 @@ export type HirExpr =
    * arena binding name is `arena`.
    */
   | { kind: "bumpVec"; arena: string; elements: HirExpr[] };
+
+/** One step of a `mapBuild`: spread a whole source, or insert a single entry. */
+export type MapBuildPart =
+  | { kind: "spread"; expr: HirExpr }
+  | { kind: "entry"; key: HirExpr; value: HirExpr };
 
 // ── Statements ───────────────────────────────────────────────────────────────
 

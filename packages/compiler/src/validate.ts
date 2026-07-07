@@ -91,6 +91,12 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "YieldExpression",
   // Optional chaining `a?.b` (series 042d) — lowered by `lowerChain`.
   "ChainExpression",
+  // Array pattern — only `for (const [k, v] of Object.entries(m))` (series 043);
+  // a plain `const [a, b] = …` destructuring binding stays fail-loud in lowering.
+  "ArrayPattern",
+  // Spread — only object spread `{ ...a }` (series 044) is lowered; array/call
+  // spread stays fail-loud in lowering.
+  "SpreadElement",
   // Types
   "TSTypeAnnotation",
   "TSTypeReference",

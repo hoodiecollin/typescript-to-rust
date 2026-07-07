@@ -75,6 +75,13 @@ export interface ModuleAnalysis {
    * Populated by `lower()` after analysis (needs `lowerType`); empty here.
    */
   structFields: Map<string, { name: string; ty: RustType }[]>;
+  /**
+   * Names of bindings whose initializer is `Object.entries(...)` — a
+   * `Vec<(K, V)>` of pairs (series 043). A pair index `es[i][0]`/`es[i][1]` on
+   * such a binding lowers to tuple field access `.0`/`.1`. Populated during
+   * lowering (like `structFields`).
+   */
+  entriesBindings: Set<string>;
   /** names of class methods that mutate `this` (→ a `&mut self` receiver) */
   mutatingMethods: Set<string>;
   /**
@@ -814,6 +821,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     structs,
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
     structFields: new Map(),
+    // Populated during lowering as `Object.entries` bindings are seen.
+    entriesBindings: new Set(),
     mutatingMethods,
     methodNames,
     fallible,

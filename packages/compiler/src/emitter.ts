@@ -162,7 +162,8 @@ export function emitModule(mod: HirModule): string {
   const imports: string[] = [];
   // `Record`/object types are backed by `IndexMap` (series 041) so key/value
   // iteration matches JS's insertion order (`HashMap` does not preserve it).
-  if (usesKind(mod, "hashmap")) imports.push("use indexmap::IndexMap;");
+  if (usesKind(mod, "hashmap") || usesKind(mod, "mapBuild"))
+    imports.push("use indexmap::IndexMap;");
   if (
     usesKind(mod, "rc") ||
     usesKind(mod, "rcNew") ||
@@ -532,6 +533,19 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
     case "objectValues":
       return `${emitExpr(expr.map)}.values().cloned().collect::<Vec<_>>()`;
+    case "objectEntries":
+      return `${emitExpr(expr.map)}.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>()`;
+    case "tupleField":
+      return `${emitExpr(expr.tuple)}.${expr.index}`;
+    case "mapBuild": {
+      const seed = expr.base ? emitExpr(expr.base) : "IndexMap::new()";
+      const steps = expr.parts.map((p) =>
+        p.kind === "spread"
+          ? `__o.extend(${emitExpr(p.expr)}.clone());`
+          : `__o.insert(${emitExpr(p.key)}, ${emitExpr(p.value)});`,
+      );
+      return `{ let mut __o = ${seed}; ${steps.join(" ")} __o }`;
+    }
     case "iterFind":
       return `${emitExpr(expr.receiver)}.iter().find(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied()`;
     case "iterAny":
