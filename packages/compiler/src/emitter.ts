@@ -506,6 +506,10 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.object)}.${rid(expr.name)}`;
     case "index":
       return `${emitExpr(expr.object)}[${emitIndex(expr.index)}]`;
+    case "some":
+      return `Some(${emitExpr(expr.value)})`;
+    case "none":
+      return "None";
     case "ok":
       return expr.value ? `Ok(${emitExpr(expr.value)})` : "Ok(())";
     case "try":
@@ -583,6 +587,8 @@ function emitType(ty: RustType): string {
       return "()";
     case "vec":
       return `Vec<${emitType(ty.elem)}>`;
+    case "option":
+      return `Option<${emitType(ty.inner)}>`;
     case "hashmap":
       return `IndexMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
     case "struct":

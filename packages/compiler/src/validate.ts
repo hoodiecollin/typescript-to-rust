@@ -97,6 +97,12 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "TSStringKeyword",
   "TSBooleanKeyword",
   "TSVoidKeyword",
+  // Nullability (series 042): `T | undefined` / `T | null` → `Option<T>`. The
+  // union/keyword shapes are modeled; `lowerType` maps the nullable ones and
+  // fails loud on a union of two real types.
+  "TSUnionType",
+  "TSUndefinedKeyword",
+  "TSNullKeyword",
   // `any`/`unknown` are modeled-but-forbidden — see FORBIDDEN_TYPES.
   "TSAnyKeyword",
   "TSUnknownKeyword",

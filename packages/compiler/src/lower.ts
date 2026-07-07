@@ -1170,8 +1170,20 @@ function lowerParam(
       start: p.start,
     });
   }
-  const base = lowerType(p.typeAnnotation.typeAnnotation, structs);
-  const ownership = info?.ownership ?? "move";
+  // An optional param `(x?: T)` is `Option<T>` (series 042); `(x: T | undefined)`
+  // already lowers to `option` via the union in `lowerType`.
+  const annotated = lowerType(p.typeAnnotation.typeAnnotation, structs);
+  const optional =
+    (p as { optional?: boolean }).optional === true ||
+    annotated.kind === "option";
+  const base: RustType =
+    (p as { optional?: boolean }).optional && annotated.kind !== "option"
+      ? { kind: "option", inner: annotated }
+      : annotated;
+  // An `Option` param is passed **by value** (owned): `??`/pattern-matching
+  // consumes it, and `&Option<T>` would not satisfy those. Non-optional params
+  // keep the inferred borrow.
+  const ownership = optional ? "move" : (info?.ownership ?? "move");
   const ty: RustType =
     ownership === "ref"
       ? { kind: "ref", mut: false, inner: base }
@@ -1618,6 +1630,15 @@ function lowerTyped(
   ty: RustType | null,
   analysis: ModuleAnalysis,
 ): HirExpr {
+  // Option coercion (series 042): a plain value flowing into an `Option<T>` slot
+  // is `Some`-wrapped (recursing against the inner type); `undefined`/`null`
+  // becomes `None`. Centralized here so `let`-init, struct fields, and array
+  // elements all coerce uniformly.
+  if (ty?.kind === "option") {
+    return isNullishExpr(expr)
+      ? { kind: "none" }
+      : { kind: "some", value: lowerTyped(expr, ty.inner, analysis) };
+  }
   if (ty?.kind === "struct" && expr.type === "ObjectExpression") {
     return lowerStructLiteral(expr as ObjectExpression, ty.name, analysis);
   }
@@ -1726,8 +1747,13 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       );
     case "Literal":
       return lowerLiteral(expr as Literal);
-    case "Identifier":
-      return { kind: "ident", name: (expr as Identifier).name };
+    case "Identifier": {
+      const name = (expr as Identifier).name;
+      // `undefined` is an identifier in ESTree (not a literal); it is the absent
+      // optional (series 042).
+      if (name === "undefined") return { kind: "none" };
+      return { kind: "ident", name };
+    }
     case "BinaryExpression": {
       const b = expr as {
         operator: string;
@@ -1751,9 +1777,19 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         left: Expression;
         right: Expression;
       };
+      // `x ?? d` → `x.unwrap_or(d)` (series 042, graduates #7): the left is an
+      // `Option`, the right the fallback of the inner type.
+      if (l.operator === "??") {
+        return {
+          kind: "method",
+          receiver: lowerExpr(l.left, analysis),
+          name: "unwrap_or",
+          args: [lowerExpr(l.right, analysis)],
+        };
+      }
       if (l.operator !== "&&" && l.operator !== "||") {
         throw new UnsupportedError({
-          type: `logical operator '${l.operator}' (nullish coalescing needs Option)`,
+          type: `logical operator '${l.operator}'`,
         });
       }
       return {
@@ -1828,8 +1864,20 @@ function lowerLiteral(lit: Literal): HirExpr {
   if (typeof v === "number") return { kind: "number", value: v };
   if (typeof v === "string") return { kind: "string", value: v };
   if (typeof v === "boolean") return { kind: "bool", value: v };
-  if (v === null) throw new UnsupportedError({ type: "null literal" });
+  // `null` is the absent optional → `None` (series 042).
+  if (v === null) return { kind: "none" };
   throw new UnsupportedError({ type: `literal ${typeof v}` });
+}
+
+/**
+ * Is this expression the JS `undefined` (an identifier) or `null` (a literal)?
+ * Both are the absent optional (`None`) in the dialect's nullability model
+ * (series 042).
+ */
+function isNullishExpr(expr: Expression): boolean {
+  if (expr.type === "Identifier") return (expr as Identifier).name === "undefined";
+  if (expr.type === "Literal") return (expr as Literal).value === null;
+  return false;
 }
 
 function isConsoleLog(callee: Expression): boolean {
@@ -1898,15 +1946,33 @@ function lowerCall(
   if (call.callee.type === "Identifier") {
     const name = (call.callee as Identifier).name;
     const sig = analysis.fns.get(name);
-    const args: HirArg[] = call.arguments.map((a, i) => {
-      const param = sig?.params[i];
+    const params = sig?.params ?? [];
+    // Iterate over params (not just supplied args) so an omitted trailing
+    // optional param is filled with `None` (series 042).
+    const arity = Math.max(call.arguments.length, params.length);
+    const args: HirArg[] = [];
+    for (let i = 0; i < arity; i++) {
+      const param = params[i];
+      const a = call.arguments[i];
+      // An optional param is `Option<T>` and passed by value: a present arg is
+      // `Some`-wrapped (`undefined`/`null` → `None`), an omitted one is `None`.
+      if (param?.optional) {
+        const expr: HirExpr = !a
+          ? { kind: "none" }
+          : isNullishExpr(a)
+            ? { kind: "none" }
+            : { kind: "some", value: lowerExpr(a, analysis) };
+        args.push({ borrow: "owned", expr });
+        continue;
+      }
+      if (!a) break; // a missing non-optional arg is a TS-invalid / cargo-loud arity error
       let borrow: Borrow = "owned";
       if (param && !param.isCopy) {
         if (param.ownership === "ref") borrow = "ref";
         else if (param.ownership === "refMut") borrow = "refMut";
       }
-      return { borrow, expr: lowerExpr(a, analysis) };
-    });
+      args.push({ borrow, expr: lowerExpr(a, analysis) });
+    }
     const callExpr: HirExpr = { kind: "call", callee: name, args };
     // A call to an `async` function is only valid `await`ed — a bare call is an
     // un-polled future that never runs (a `must_use` warning, not an error, so
@@ -2361,6 +2427,24 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
       // unknown type name stays fail-loud (`Promise`, `Map`, … are unsupported).
       if (structs.has(ref.typeName.name)) {
         return { kind: "struct", name: ref.typeName.name };
+      }
+      throw new UnsupportedError(ty);
+    }
+    case "TSNullKeyword":
+    case "TSUndefinedKeyword":
+      // A bare `null`/`undefined` type (not in a `T | null` union) has no `T` to
+      // make `Option` over — fail-loud (series 042).
+      throw new UnsupportedError(ty);
+    case "TSUnionType": {
+      // `T | undefined` / `T | null` / `T | null | undefined` → `Option<T>`
+      // (series 042). A union of two *real* types is enum territory — fail-loud.
+      const u = ty as unknown as { types: TSType[] };
+      const real = u.types.filter(
+        (m) => m.type !== "TSUndefinedKeyword" && m.type !== "TSNullKeyword",
+      );
+      const hasNullish = real.length !== u.types.length;
+      if (hasNullish && real.length === 1 && real[0]) {
+        return { kind: "option", inner: lowerType(real[0], structs) };
       }
       throw new UnsupportedError(ty);
     }

@@ -49,6 +49,12 @@ export interface ParamInfo {
   ownership: Ownership;
   /** `Copy` types are passed by value regardless of ownership. */
   isCopy: boolean;
+  /**
+   * An optional param — `(x?: T)` or `(x: T | undefined)` (series 042). Its Rust
+   * type is `Option<T>`, so a call site `Some`-wraps a present argument and fills
+   * an omitted trailing one with `None`.
+   */
+  optional: boolean;
 }
 
 export interface FnInfo {
@@ -235,6 +241,26 @@ function assignmentTarget(node: AnyNode): string | null {
 
 // ── Type classification ──────────────────────────────────────────────────────
 
+/**
+ * Is a parameter optional (`Option<T>` in Rust, series 042)? Either the `x?: T`
+ * flag, or an annotation `T | undefined` / `T | null` (a union with a nullish
+ * member).
+ */
+function isOptionalParam(p: {
+  optional?: boolean;
+  typeAnnotation?: unknown;
+}): boolean {
+  if (p.optional === true) return true;
+  const ann = isNode(p.typeAnnotation) ? p.typeAnnotation.typeAnnotation : undefined;
+  if (isNode(ann) && ann.type === "TSUnionType") {
+    const types = (ann as { types?: { type: string }[] }).types ?? [];
+    return types.some(
+      (t) => t.type === "TSUndefinedKeyword" || t.type === "TSNullKeyword",
+    );
+  }
+  return false;
+}
+
 function isCopyType(annotation: unknown, enums: ReadonlySet<string>): boolean {
   const inner = isNode(annotation) ? annotation.typeAnnotation : undefined;
   const t = isNode(inner) ? inner.type : undefined;
@@ -276,6 +302,7 @@ function analyzeFunction(
       name: p.name,
       ownership: classifyParam(p.name, fn.body, isCopy),
       isCopy,
+      optional: isOptionalParam(p),
     };
   });
   return { params };

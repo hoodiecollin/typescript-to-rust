@@ -40,6 +40,13 @@ export type RustType =
   | { kind: "unit" }
   | { kind: "vec"; elem: RustType }
   /**
+   * `Option<inner>` — the dialect's nullability (series 042): `T | undefined`,
+   * `T | null`, and optional properties/params all map here. `undefined` and
+   * `null` both become `None`; a plain `T` flowing into an `Option` slot is
+   * `Some`-wrapped.
+   */
+  | { kind: "option"; inner: RustType }
+  /**
    * `Record<string, V>` → `IndexMap<String, V>` (series 041; insertion-order
    * preserving, matching JS). `key` is always `String` today. The HIR tag stays
    * `hashmap` (the map node); only the emitted backing type is `IndexMap`.
@@ -117,6 +124,10 @@ export type HirExpr =
       name: string;
       fields: { name: string; value: HirExpr }[];
     }
+  /** `Some(value)` — a present optional (series 042). */
+  | { kind: "some"; value: HirExpr }
+  /** `None` — an absent optional, from `undefined`/`null` (series 042). */
+  | { kind: "none" }
   /** `Ok(value)` — the success arm of a `Result`. `null` value ⇒ `Ok(())`. */
   | { kind: "ok"; value: HirExpr | null }
   /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */
