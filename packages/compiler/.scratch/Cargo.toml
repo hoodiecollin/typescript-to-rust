@@ -26,6 +26,12 @@ tslib = { path = "../../../crates/tslib" }
 # warm; the harness fetches it online on a cold cache. Unused by non-async
 # output (a present-but-unused dependency costs nothing at check time).
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# indexmap backs `Record`/object types (series 041): JS objects and `Map`s
+# iterate in *insertion order*, which `std::collections::HashMap` does not
+# preserve; `IndexMap` does, so `Object.keys`/`values` observe JS order. A
+# drop-in for the read/insert/index usage the emitter produces. Unused by
+# map-free output (present-but-unused costs nothing at check time).
+indexmap = "2"
 # bumpalo backs the `"use arena"` directive (series 028c): a `"use arena"` scope
 # builds its `Vec`s from a bump arena (`bumpalo::vec![in &arena; …]`), freed all
 # at once at scope exit. `collections` enables `bumpalo::vec!`/`bumpalo::collections::Vec`.
