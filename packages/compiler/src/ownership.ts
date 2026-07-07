@@ -268,6 +268,19 @@ function transfer(
         : liveAfter;
       return union(exprUses(s.cond, movable), cIn, aIn);
     }
+    case "ifLet": {
+      map.set(s, liveAfter);
+      // The `binding` shadows the inner `T` inside `someBody` — a fresh name, so
+      // drop it before its liveness escapes the arm.
+      const someIn = new Set(
+        liveInOfSeq(s.someBody, liveAfter, ctx, movable, map),
+      );
+      someIn.delete(s.binding);
+      const noneIn = s.noneBody
+        ? liveInOfSeq(s.noneBody, liveAfter, ctx, movable, map)
+        : liveAfter;
+      return union(exprUses(s.scrutinee, movable), someIn, noneIn);
+    }
     case "while":
       return loopTransfer(
         exprUses(s.cond, movable),

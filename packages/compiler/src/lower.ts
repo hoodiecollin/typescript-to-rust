@@ -799,17 +799,19 @@ function lowerInterface(
     if (m.type !== "TSPropertySignature" || m.computed) {
       throw new UnsupportedError({ type: "unsupported interface member" });
     }
-    if (m.optional) {
-      throw new UnsupportedError({ type: "optional interface field (x?: T)" });
-    }
     if (!m.typeAnnotation) {
       throw new UnsupportedError({
         type: `interface field '${m.key.name}' without a type`,
       });
     }
+    // An optional field `x?: T` is `Option<T>` (series 042b).
     return {
       name: m.key.name,
-      ty: lowerType(m.typeAnnotation.typeAnnotation, structs),
+      ty: fieldRustType(
+        m.typeAnnotation.typeAnnotation,
+        m.optional === true,
+        structs,
+      ),
     };
   });
   return { kind: "struct", name: decl.id.name, fields };
@@ -1267,12 +1269,62 @@ function lowerIf(
   analysis: ModuleAnalysis,
   scope: string,
 ): HirStmt {
+  // Option narrowing (series 042c): `if (x !== undefined) { … }` →
+  // `if let Some(x) = x { … }`, so `x` is the inner `T` inside the block. The
+  // `=== undefined` form narrows the *else* branch (branches swap).
+  const narrow = optionNarrowTest(stmt.test);
+  if (narrow) {
+    const conseq = lowerBlock(stmt.consequent, analysis, scope);
+    const alt = stmt.alternate
+      ? lowerBlock(stmt.alternate, analysis, scope)
+      : null;
+    const scrutinee: HirExpr = { kind: "ident", name: narrow.name };
+    if (narrow.op === "!==") {
+      return {
+        kind: "ifLet",
+        binding: narrow.name,
+        scrutinee,
+        someBody: conseq,
+        noneBody: alt,
+      };
+    }
+    // `=== undefined`: the present-value branch is the `else`; narrow only when
+    // it exists (a bare `if (x === undefined)` uses the `is_none()` condition).
+    if (alt) {
+      return {
+        kind: "ifLet",
+        binding: narrow.name,
+        scrutinee,
+        someBody: alt,
+        noneBody: conseq,
+      };
+    }
+  }
   return {
     kind: "if",
     cond: lowerExpr(stmt.test, analysis),
     conseq: lowerBlock(stmt.consequent, analysis, scope),
     alt: lowerAlternate(stmt.alternate, analysis, scope),
   };
+}
+
+/**
+ * Recognize an `Option`-narrowing `if` test — `x === undefined`/`null` or
+ * `x !== undefined`/`null` where `x` is an identifier (series 042c). Returns the
+ * binding name and operator, or `null` when it is not that shape.
+ */
+function optionNarrowTest(
+  test: Expression,
+): { name: string; op: "===" | "!==" } | null {
+  if (test.type !== "BinaryExpression") return null;
+  const b = test as { operator: string; left: Expression; right: Expression };
+  if (b.operator !== "===" && b.operator !== "!==") return null;
+  const leftNull = isNullishExpr(b.left);
+  const rightNull = isNullishExpr(b.right);
+  if (leftNull === rightNull) return null;
+  const idExpr = leftNull ? b.right : b.left;
+  if (idExpr.type !== "Identifier") return null;
+  return { name: (idExpr as Identifier).name, op: b.operator as "===" | "!==" };
 }
 
 /**
@@ -1600,6 +1652,7 @@ function lowerStructLiteral(
   // literals (series 032). An unknown struct has no entry — values lower plainly
   // (the cargo oracle catches a mismatch).
   const fieldTypes = analysis.structFields.get(name);
+  const provided = new Set<string>();
   const fields = obj.properties.map((p) => {
     if (p.type !== "Property" || p.computed) {
       throw new UnsupportedError({
@@ -1610,9 +1663,17 @@ function lowerStructLiteral(
     if (key.kind !== "string") {
       throw new UnsupportedError({ type: "struct field name must be static" });
     }
+    provided.add(key.value);
     const declared = fieldTypes?.find((f) => f.name === key.value)?.ty ?? null;
     return { name: key.value, value: lowerTyped(p.value, declared, analysis) };
   });
+  // An omitted **optional** field (`Option<T>`) defaults to `None` (series 042b):
+  // Rust struct literals require every field, so fill the gaps the JS literal left.
+  for (const f of fieldTypes ?? []) {
+    if (f.ty.kind === "option" && !provided.has(f.name)) {
+      fields.push({ name: f.name, value: { kind: "none" } });
+    }
+  }
   return { kind: "structLit", name, fields };
 }
 
@@ -1662,6 +1723,23 @@ function lowerTyped(
  * members are skipped here; the real lowering (`lowerInterface`/`lowerClass`)
  * still fails loud on them.
  */
+/**
+ * The Rust type of a struct/interface field, folding in optionality (series
+ * 042b): an optional field (`x?: T`) is `Option<T>`; `x: T | undefined` already
+ * lowers to `option` via the union. Shared by `lowerInterface` and
+ * `collectStructFields` so the emitted struct and the coercion table agree.
+ */
+function fieldRustType(
+  annotation: TSType,
+  optional: boolean,
+  structs: Set<string>,
+): RustType {
+  const base = lowerType(annotation, structs);
+  return optional && base.kind !== "option"
+    ? { kind: "option", inner: base }
+    : base;
+}
+
 function collectStructFields(
   program: Program,
   structs: Set<string>,
@@ -1676,12 +1754,15 @@ function collectStructFields(
         if (
           m.type === "TSPropertySignature" &&
           !m.computed &&
-          !m.optional &&
           m.typeAnnotation
         ) {
           fields.push({
             name: m.key.name,
-            ty: lowerType(m.typeAnnotation.typeAnnotation, structs),
+            ty: fieldRustType(
+              m.typeAnnotation.typeAnnotation,
+              m.optional === true,
+              structs,
+            ),
           });
         }
       }
@@ -1754,12 +1835,34 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       if (name === "undefined") return { kind: "none" };
       return { kind: "ident", name };
     }
+    case "ChainExpression":
+      return lowerChain(
+        (expr as unknown as { expression: Expression }).expression,
+        analysis,
+      );
     case "BinaryExpression": {
       const b = expr as {
         operator: string;
         left: Expression;
         right: Expression;
       };
+      // Comparison against `undefined`/`null` (series 042c): `x === undefined` /
+      // `x === null` → `x.is_none()`; `!==` → `x.is_some()`. The non-nullish side
+      // is the `Option` receiver. (Valid TS only writes this when the operand is
+      // optional.)
+      if (b.operator === "===" || b.operator === "!==") {
+        const leftNullish = isNullishExpr(b.left);
+        const rightNullish = isNullishExpr(b.right);
+        if (leftNullish !== rightNullish) {
+          const opt = leftNullish ? b.right : b.left;
+          return {
+            kind: "method",
+            receiver: lowerExpr(opt, analysis),
+            name: b.operator === "===" ? "is_none" : "is_some",
+            args: [],
+          };
+        }
+      }
       return {
         kind: "binary",
         op: b.operator,
@@ -1857,6 +1960,32 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
     default:
       throw new UnsupportedError(expr);
   }
+}
+
+/**
+ * Lower an optional-chain expression (series 042d). Only the single-level
+ * optional member `a?.b` (`a.map(|v| v.b)`) is supported; a deeper chain
+ * (`a?.b?.c`, `a?.[i]`, `a?.()`) stays fail-loud.
+ */
+function lowerChain(inner: Expression, analysis: ModuleAnalysis): HirExpr {
+  if (inner.type === "MemberExpression") {
+    const m = inner as MemberExpression;
+    if (
+      (m as { optional?: boolean }).optional &&
+      !m.computed &&
+      m.property.type === "Identifier" &&
+      m.object.type !== "MemberExpression"
+    ) {
+      return {
+        kind: "optMember",
+        receiver: lowerExpr(m.object, analysis),
+        field: (m.property as Identifier).name,
+      };
+    }
+  }
+  throw new UnsupportedError({
+    type: "optional chaining beyond a single `a?.b` member (deeper chains are a later slice)",
+  });
 }
 
 function lowerLiteral(lit: Literal): HirExpr {
@@ -2043,6 +2172,24 @@ function lowerCall(
       return methodName === "some"
         ? { kind: "iterAny", receiver, param: cl.param, body: cl.body }
         : { kind: "iterAll", receiver, param: cl.param, body: cl.body };
+    }
+    // `find` → native `.iter().find(|&&x| p).copied()` → `Option<T>` (042d).
+    if (
+      !isUserMethod &&
+      methodName === "find" &&
+      call.arguments.length === 1 &&
+      call.arguments[0]?.type === "ArrowFunctionExpression"
+    ) {
+      const cl = arrowExprClosure(
+        call.arguments[0] as ArrowFunctionExpression,
+        analysis,
+      );
+      return {
+        kind: "iterFind",
+        receiver: lowerExpr(m.object, analysis),
+        param: cl.param,
+        body: cl.body,
+      };
     }
     // `reduce((acc, x) => e, init)` → native `.iter().fold(init, |acc, &x| e)`
     // (039). The two-param closure seeds `acc` from the required `init` arg; a

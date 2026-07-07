@@ -61,6 +61,8 @@ export function isTypeCloneable(
       return true;
     case "vec":
       return isTypeCloneable(ty.elem, table, seen);
+    case "option":
+      return isTypeCloneable(ty.inner, table, seen);
     case "hashmap":
       return (
         isTypeCloneable(ty.key, table, seen) &&
@@ -102,6 +104,8 @@ function isTypeDebug(
       return true;
     case "vec":
       return isTypeDebug(ty.elem, table, seen);
+    case "option":
+      return isTypeDebug(ty.inner, table, seen);
     case "hashmap":
       return (
         isTypeDebug(ty.key, table, seen) && isTypeDebug(ty.value, table, seen)

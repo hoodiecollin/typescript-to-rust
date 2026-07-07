@@ -333,6 +333,12 @@ function emitStmt(stmt: HirStmt): string {
       }
       return `${head} else ${block(stmt.alt)}`;
     }
+    case "ifLet": {
+      const head = `if let Some(${rid(stmt.binding)}) = ${emitExpr(stmt.scrutinee)} ${block(stmt.someBody)}`;
+      return stmt.noneBody === null
+        ? head
+        : `${head} else ${block(stmt.noneBody)}`;
+    }
     case "while":
       return `while ${emitExpr(stmt.cond)} ${block(stmt.body)}`;
     case "block":
@@ -506,6 +512,8 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.object)}.${rid(expr.name)}`;
     case "index":
       return `${emitExpr(expr.object)}[${emitIndex(expr.index)}]`;
+    case "optMember":
+      return `${emitExpr(expr.receiver)}.map(|v| v.${rid(expr.field)})`;
     case "some":
       return `Some(${emitExpr(expr.value)})`;
     case "none":
@@ -524,6 +532,8 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
     case "objectValues":
       return `${emitExpr(expr.map)}.values().cloned().collect::<Vec<_>>()`;
+    case "iterFind":
+      return `${emitExpr(expr.receiver)}.iter().find(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied()`;
     case "iterAny":
       return `${emitExpr(expr.receiver)}.iter().any(|&${rid(expr.param)}| ${emitExpr(expr.body)})`;
     case "iterAll":

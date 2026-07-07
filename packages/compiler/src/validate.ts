@@ -89,6 +89,8 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "AwaitExpression",
   "ArrowFunctionExpression",
   "YieldExpression",
+  // Optional chaining `a?.b` (series 042d) — lowered by `lowerChain`.
+  "ChainExpression",
   // Types
   "TSTypeAnnotation",
   "TSTypeReference",

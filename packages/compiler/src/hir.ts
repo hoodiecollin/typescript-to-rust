@@ -124,6 +124,11 @@ export type HirExpr =
       name: string;
       fields: { name: string; value: HirExpr }[];
     }
+  /**
+   * `a?.b` → `a.map(|v| v.b)` → `Option<…>` (series 042d, single-level optional
+   * member access). Deeper chains stay fail-loud.
+   */
+  | { kind: "optMember"; receiver: HirExpr; field: string }
   /** `Some(value)` — a present optional (series 042). */
   | { kind: "some"; value: HirExpr }
   /** `None` — an absent optional, from `undefined`/`null` (series 042). */
@@ -148,6 +153,10 @@ export type HirExpr =
   | { kind: "objectKeys"; map: HirExpr }
   /** `Object.values(m)` → `m.values().cloned().collect::<Vec<_>>()` → `Vec<V>` (041). */
   | { kind: "objectValues"; map: HirExpr }
+  /**
+   * `xs.find(p => c)` → `xs.iter().find(|&&p| c).copied()` → `Option<T>` (042d).
+   */
+  | { kind: "iterFind"; receiver: HirExpr; param: string; body: HirExpr }
   /** `xs.some(p => c)` → `xs.iter().any(|&p| c)` → `bool` (039). */
   | { kind: "iterAny"; receiver: HirExpr; param: string; body: HirExpr }
   /** `xs.every(p => c)` → `xs.iter().all(|&p| c)` → `bool` (039). */
@@ -220,6 +229,19 @@ export type HirStmt =
    * statements. (`conseq`, not `then`, to avoid thenable confusion.)
    */
   | { kind: "if"; cond: HirExpr; conseq: HirStmt[]; alt: HirStmt[] | null }
+  /**
+   * `if let Some(binding) = scrutinee { someBody } [else { noneBody }]` — the
+   * narrowing of an `Option` (series 042c). Lowered from `if (x !== undefined) {…}`
+   * (and the `=== undefined` else-branch form), so `binding` shadows `scrutinee`
+   * as the inner `T` inside `someBody`.
+   */
+  | {
+      kind: "ifLet";
+      binding: string;
+      scrutinee: HirExpr;
+      someBody: HirStmt[];
+      noneBody: HirStmt[] | null;
+    }
   | { kind: "while"; cond: HirExpr; body: HirStmt[] }
   /**
    * A bare, scope-containing `{ … }`. Emitted with no trailing `;`. The C-style
