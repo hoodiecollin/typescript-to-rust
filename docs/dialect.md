@@ -1,47 +1,458 @@
-# The Input Dialect
+# The Input Dialect — Complete Fail-Loud Catalog
 
-The translator accepts a **strict subset** of TypeScript. This document is the
-specification; a validator pass (planned — see plan.md) will enforce it and
-reject anything outside it with a clear error. "Reject loudly" beats "mistranslate
-silently."
+The translator accepts a **strict subset** of TypeScript and rejects everything
+outside it. "Reject loudly" beats "mistranslate silently": every construct the
+compiler cannot soundly lower stops the build with an error rather than emitting
+wrong Rust.
 
-The subset exists so we can skip a full type-inference engine (à la `tsc`) and
-rely on explicit annotations during a single AST pass — and so that every
-construct has a *sound* Rust lowering under the Option A memory model.
+This document is the **complete catalog of every fail-loud case** — grouped by
+feature. If the compiler rejected your input, the exact message is here, with the
+input shape that triggers it and whether it is a hard "no" or a "not yet".
 
-## Required
+> Why the subset exists: TypeScript is intentionally unsound (bivariant params,
+> `any` escape hatches) and garbage-collected. A *total* TS→Rust translation does
+> not exist. Constraining the input is what makes the problem decidable and the
+> output idiomatic — under the "Option A" memory model (idiomatic borrows, no
+> blanket `Rc<RefCell<T>>`). See [plan.md](./plan.md) and
+> [architecture.md](./architecture.md).
+
+## How to read this catalog
+
+Every rejection is one of two kinds:
+
+- **Forbidden** (`DialectError`) — *fix your input.* The construct is outside the
+  accepted dialect and will **never** be translated as written (e.g. `any`,
+  decorators, `abstract`). Change the code.
+- **Not yet** (`UnsupportedError`) — *in the dialect, not built.* The construct is
+  intended to work eventually but the compiler does not lower it today. It may
+  graduate in a later series. The workaround is to rewrite into a supported shape.
+
+The distinction lives in [`packages/compiler/src/errors.ts`](../packages/compiler/src/errors.ts).
+The **error message string is the stable anchor** — line numbers drift, messages
+don't. Each row below quotes the message the compiler prints.
+
+## The two gates (where rejection happens)
+
+1. **Validator** (`validate.ts`) — a whole-tree walk run first. It enforces the
+   parse-level allowlist (default-deny: any AST node type not modeled is rejected),
+   the forbidden *types* (`any`/`unknown`), and forbidden *flags*
+   (`async function*`, `for await`, decorators, `abstract`, `declare`, …).
+2. **Lowering** (`lower.ts`, with `numeric.ts` refinement) — the single semantic
+   gate. Everything that is syntactically modeled but cannot be soundly lowered in
+   a given *shape* is rejected here.
+3. **Emitter** (`emitter.ts`) — pure and total by design. It carries exactly one
+   defensive throw (an invariant guard, not a feature boundary — see
+   [Identifier hygiene](#identifier-hygiene)).
+
+---
+
+## Required (the positive rules)
 
 - **Explicit type annotations** on every variable, function parameter, and
   function return type. Exception: a binding with a trivial literal initializer
   whose type is unambiguous in one pass (e.g. `const n = 5`).
-- **Statically-known, closed object shapes** via `interface` or `type`. Object
-  literals must conform to a declared shape.
+- **Statically-known, closed object shapes** via `interface`, `type`, or `class`.
+  Object literals must conform to a declared shape.
+- **No shared mutable aliasing that escapes what the ownership pass can prove
+  sound.** Two live mutable references to the same object generally cannot be
+  expressed in idiomatic Rust (the Option A tax). `"use rc"` is the local escape
+  hatch when it's genuinely needed.
 
-## Forbidden (rejected by the validator)
+---
 
-- `any` and `unknown` (they defeat static lowering; `TsAny` is an internal
-  escape hatch, not an input feature).
-- Untyped bindings/parameters/returns (outside the trivial-literal exception).
-- **Dynamic object manipulation** — adding/deleting properties at runtime,
-  monkey-patching. Shapes are fixed at declaration.
-- **Shared mutable aliasing that escapes** what the ownership pass can prove
-  sound. Two live mutable references to the same object generally cannot be
-  expressed in idiomatic Rust; such code is rejected (or, case-by-case, lowered
-  via an explicit `Rc<RefCell<T>>` fallback). This is the Option A tax.
-- Class **inheritance** (`extends` on classes) — no clean `struct` mapping.
-  Composition and `interface` are fine.
+## Types & the accepted type surface
 
-## Deliberately deferred (not yet implemented; tracked in fixtures)
+The accepted type annotations are exactly: `number`, `string`, `boolean`, `void`,
+`Array<T>` / `T[]`, `Record<string, V>`, `Promise<T>`, a declared `interface` /
+`class` name (nominal `struct`), and `T | undefined` / `T | null` (→ `Option<T>`).
+Everything else is fail-loud.
 
-These are *in* the intended dialect but not yet supported by the emitter:
-control flow, arrays/records, `interface`/`class`, `throw`/`try`, `async`/`await`,
-and ownership-sensitive function parameters. See `tests/fixtures/**` and the
-"Next" list in plan.md.
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `any` type anywhere | Forbidden | `` `any` type `` |
+| `unknown` type anywhere | Forbidden | `` `unknown` type `` |
+| Bare `Array` with no element type | Not yet | generic `Unsupported <node>` |
+| Bare `Promise` with no inner type | Not yet | generic `Unsupported <node>` |
+| `Record<K, V>` missing key or value type | Not yet | generic `Unsupported <node>` |
+| `Record<number, V>` / non-string key | Not yet | `Record with a non-string key (only string keys map to HashMap)` |
+| Unknown/undeclared type name (`Map`, `Set`, `Date`, an unresolved generic, …) | Not yet | generic `Unsupported <node>` |
+| Bare `null` / `undefined` type (not inside a union) | Not yet | generic `Unsupported <node>` |
+| A union whose non-nullish member count ≠ 1 (`string \| number`, enum-like unions) | Not yet | generic `Unsupported <node>` |
+| Any other type keyword/form: `bigint`, `symbol`, tuple, function type, intersection, mapped, conditional, indexed-access, literal type, `typeof` query, type predicate | Not yet | generic `Unsupported <node>` |
 
-## Why these restrictions are the right call
+Nullability note: `T | undefined` and `T | null` lower to `Option<T>`. That is the
+*only* accepted union shape — see [Nullability & optional chaining](#nullability--optional-chaining).
 
-TypeScript is intentionally unsound (bivariant parameters, `any` escape hatches)
-and garbage-collected. A *total* TS→Rust translation does not exist. Constraining
-the input is what makes the problem decidable and the output idiomatic. The
-restriction must be **specified and enforced** — an unspecified "we handle most
-TS" is how a translator silently emits wrong code.
+---
+
+## Variables & bindings
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Uninitialized binding (`let x: T;` with no initializer) | Not yet | `uninitialized binding` |
+| Destructuring binding (`const {a} = …` / `const [a] = …` in a plain `let`/`const`) | Not yet | `destructuring binding` |
+| Parameter without a type annotation | Not yet | `parameter '<name>' without a type annotation` |
+| An untyped binding outside the trivial-literal exception | Not yet | (as above, per site) |
+
+> Array-destructuring `[k, v]` *is* supported in one place only: a `for-of` head
+> over `Object.entries(...)`. See [Control flow](#control-flow--loops).
+
+---
+
+## Functions
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Anonymous function declaration (no name) | Not yet | generic `Unsupported <node>` |
+| Function without a body | Not yet | `function without a body` |
+| Top-level script statements alongside a user-defined `main()` | Not yet | `top-level statements alongside a user-defined main()` |
+
+---
+
+## Generators
+
+Only the simplest finite shape is modeled: a **named, non-async `function*`** whose
+body is a straight-line sequence of `yield <value>;` statements, annotated
+`Generator<T>` / `IterableIterator<T>` / `Iterable<T>`.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `async function*` (async generator) | Forbidden | `async generator functions (`async function*`)` |
+| Generator method or generator *expression* (`function*` not a top-level decl) | Forbidden | `generator methods / expressions (`function*`)` |
+| Anonymous generator | Not yet | generic `Unsupported <node>` |
+| Generator with no `Generator<T>` / `IterableIterator<T>` return annotation | Not yet | `generator without a `Generator<T>` / `IterableIterator<T>` return annotation` |
+| That annotation missing its item type argument | Not yet | `generator without an item type` |
+| Generator without a body | Not yet | `generator without a body` |
+| Body is not a straight-line sequence of `yield` (loops, conditionals, locals, any non-yield statement) | Not yet | `generator body is not a straight-line sequence of `yield` (state-machine generators are a later slice)` |
+| `yield*` delegation | Not yet | `` `yield*` delegation `` |
+| Bare `yield` with no value | Not yet | `bare `yield` (no value)` |
+
+---
+
+## Classes
+
+Modeled: a **named** class with instance fields (all explicitly typed), an explicit
+field-initializing constructor, and instance methods. No inheritance, no statics,
+no accessors, no generics.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `abstract class` | Forbidden | `` `abstract` classes `` |
+| Anonymous class | Not yet | `anonymous class` |
+| `extends` / `implements` (inheritance) | Not yet | `class inheritance (extends/implements)` |
+| `static` or computed-name field | Not yet | `static/computed class field` |
+| Class field without a type annotation | Not yet | `class field '<name>' without a type` |
+| Parameter property (`constructor(public x: T)`) without a type | Not yet | `parameter property '<name>' without a type` |
+| `static` or computed-name method | Not yet | `static/computed class method` |
+| `get` / `set` accessor | Not yet | `class get accessor` / `class set accessor` |
+| Class with no explicit constructor | Not yet | `class without an explicit constructor` |
+| `async` method | Not yet | `async method (async only on free functions this slice)` |
+| Method without a body | Not yet | `method without a body` |
+| `[Symbol.dispose]()` method without a body | Not yet | `[Symbol.dispose] without a body` |
+
+### Constructors
+
+A non-fallible constructor may contain **only** `this.field = expr` assignments,
+and must initialize exactly the declared fields (Rust struct-literal totality). A
+constructor that `throw`s becomes fallible and may carry leading guard statements.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Constructor without a body | Not yet | `constructor without a body` |
+| Non-fallible constructor body beyond `this.field = expr` (branches, locals, calls) | Not yet | `constructor body beyond `this.field = expr` initialization` |
+| Constructor initializes ≠ the declared field set | Not yet | `constructor must initialize exactly the declared fields` |
+| A declared field left uninitialized | Not yet | `constructor does not initialize field '<name>'` |
+
+---
+
+## Interfaces
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `interface extends` (inheritance) | Not yet | `interface extends (inheritance)` |
+| A member that is not a plain (non-computed) property signature (methods, index signatures, call signatures) | Not yet | `unsupported interface member` |
+| A property signature without a type annotation | Not yet | `interface field '<name>' without a type` |
+
+---
+
+## Enums
+
+Modeled: a runtime numeric enum with integer-literal (or auto) discriminants.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `const enum` (compile-time inlining) | Not yet | `` `const enum` (compile-time inlining) `` |
+| Computed member name | Not yet | `computed enum member` |
+| Member initializer that is not an integer literal (string enums, expressions) | Not yet | `enum member initializer must be an integer literal (string enums unsupported)` |
+| Member with a fractional discriminant | Not yet | `enum member with a fractional discriminant` |
+
+---
+
+## Control flow & loops
+
+Supported: `if`, `while`, C-style `for`, `for-of`, `switch`, `break`, `continue`,
+`throw`, `try`. The fail-loud edges:
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `for await (…)` async iteration | Forbidden | `` `for await` async iteration `` |
+| Labeled `break` | Not yet | `labeled break` |
+| Labeled `continue` | Not yet | `labeled continue` |
+| `for-of` with more than one binding declaration | Not yet | `for-of with a non-single binding` |
+| `for-of` array-destructuring head that isn't exactly `[k, v]` plain identifiers | Not yet | `for-of destructuring must bind exactly `[k, v]` identifiers` |
+| Empty or stacked (fall-through) `switch` case | Not yet | `empty/stacked switch case (fall-through not supported)` |
+| Non-final `switch` case not ending in `break`/`return` (fall-through) | Not yet | `switch case falls through (needs break or return)` |
+| Any statement type not modeled (`LabeledStatement`, `EmptyStatement`, `DebuggerStatement`, bare nested `BlockStatement`, `with`, …) | Not yet | generic `Unsupported <node>` |
+
+---
+
+## throw / try / catch
+
+Only two throw forms are accepted: `throw new <ErrorClass>(message)` and
+`throw "string literal"`. Errors propagate as `Result<T, String>` + `?`.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `throw new <expr>(...)` where the callee isn't a plain identifier | Not yet | `throw of a non-identifier constructor` |
+| `throw new <Name>(...)` where `<Name>` is not a built-in error class nor a declared `class X extends Error` | Not yet | `throw of an unknown error class (declare it as `class X extends Error`)` |
+| `throw new <Error>(...)` with ≠ 1 argument | Not yet | `throw new <Error>() must have exactly one message argument` |
+| `throw <expr>` that is neither `new Error(...)` nor a string literal (variables, numbers, objects) | Not yet | `throw of a non-Error, non-string-literal value` |
+| `try` without a `catch` handler (`try`/`finally` only) | Not yet | `try/finally without a catch handler (deferred)` |
+| `return`/`break`/`continue` escaping a `try`/`catch` (value-yielding try/catch) | Not yet | `return/break/continue inside try/catch (value-yielding try/catch: deferred)` |
+| Re-throw (or nested `try`) inside `catch` alongside a `finally` | Not yet | `re-throw inside catch alongside a finally (deferred)` |
+
+### Custom error classes
+
+The only accepted shape is `class X extends Error { constructor(message: string) { super(message); } }`.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Anonymous error class | Not yet | `anonymous error class` |
+| Error class with any member beyond the constructor (fields, extra methods) | Not yet | `custom error class with extra members (only { message } is supported)` |
+| Error class with ≠ 1 constructor | Not yet | `custom error class must have exactly one constructor` |
+| Constructor with ≠ 1 parameter | Not yet | `custom error class constructor must take exactly one message param` |
+| Constructor body that isn't exactly `super(message)` | Not yet | `custom error class constructor body must be `super(message)`` |
+
+---
+
+## async / await
+
+Modeled: a free `async function` → `async fn`; `Promise<T>` return → `T`;
+`await asyncFn(...)` → `.await`. Un-polled futures and cross-cutting async are
+rejected.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `await using` (async resource disposal) | Forbidden | `` `await using` (async resource disposal) `` |
+| `await` of a non-call expression (`await x`, `await x.m()`) | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
+| `await` of a call to a non-async / non-free function | Not yet | `await of a call to a non-async function` |
+| Calling an async function without directly awaiting it (un-polled future) | Not yet | `call to an async function not directly awaited (an un-polled future never runs)` |
+| `async` method (see [Classes](#classes)) | Not yet | `async method (async only on free functions this slice)` |
+| `async` arrow closure (see [Closures](#closures--callbacks)) | Not yet | `async arrow closure` |
+
+---
+
+## Operators
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Logical operator other than `&&`, `\|\|`, `??` | Not yet | `logical operator '<op>'` |
+| Unary operator other than `-`, `!` (i.e. `+`, `~`, `typeof`, `void`, `delete`) | Not yet | `unary operator '<op>'` |
+| `UpdateExpression` (`++`/`--`), `ConditionalExpression` (`?:`), `SequenceExpression` (comma), tagged/template literals, and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
+
+---
+
+## Literals
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| A literal that is not a number, string, boolean, or `null` (bigint, symbol, regex) | Not yet | `literal <typeof>` |
+
+---
+
+## Objects, records & struct literals
+
+An object literal is lowered only when its target shape is known — as the
+initializer of a `const x: T = { … }` (struct or `Record`), inside another struct
+literal, or in an object-spread context. A bare untyped object literal is
+fail-loud.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Object literal with no `Record`/struct type in context | Not yet | `object literal without a Record type (struct literals: series 011)` |
+| Spread or computed key in a `Record`/HashMap literal | Not yet | `unsupported object property (spread or computed key)` |
+| Spread or computed key in a struct literal | Not yet | `unsupported object property (spread or computed key)` |
+| Struct field name that isn't a static string/identifier | Not yet | `struct field name must be static` |
+| Record key that isn't a string literal or bare identifier | Not yet | `record key must be a string literal or identifier` |
+| Object-spread property with a computed key (`{ ...a, [k]: v }`) | Not yet | `unsupported object-spread property (computed key)` |
+| Member access whose property isn't a plain identifier (and isn't the entries tuple-field pattern) | Not yet | generic `Unsupported <node>` |
+| `new` with a non-identifier callee (`new (Cond ? A : B)()`) | Not yet | `new with a non-identifier callee` |
+
+### `Object.*` statics
+
+Supported: `Object.keys`, `Object.values`, `Object.entries`, `Object.assign`.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Any other `Object.*` static (`freeze`, `fromEntries`, `getOwnPropertyNames`, …) or wrong arity | Not yet | `Object.<name> (only keys/values/entries/assign are supported)` |
+
+---
+
+## Calls, methods & array/string library
+
+Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
+`reduce`, `sort`, `find`, `some`, `every`, `at`, `slice`, `forEach`; string
+`padStart`, `padEnd`; `Object.*` (above); `JSON.*` (below).
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Method call whose property is computed (`obj[key]()`, `obj["m"]()`) | Not yet | generic `Unsupported <node>` |
+| Call whose callee is neither identifier nor member (`(f1 \|\| f2)()`, `(arr[0])()`) | Not yet | generic `Unsupported <node>` |
+| `reduce` with no explicit initial value | Not yet | `reduce without an explicit initial value (Option-typed, a later slice)` |
+| `sort` with a non-arrow comparator | Not yet | `sort with a non-arrow comparator (pass `(a, b) => …` or no argument)` |
+| Any receiver/method combination not in the supported set | Not yet | generic `Unsupported <node>` (`lowerCall` fallback) |
+
+### Closures & callbacks
+
+Callback arrows (to `map`/`filter`/`reduce`/`sort`/`find`/`some`/`every`/`forEach`)
+must be non-async, have the exact arity the method expects, take plain-identifier
+parameters, and have an expression body or a single `return`.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `async` arrow callback | Not yet | `async arrow closure` |
+| Callback with the wrong parameter count | Not yet | `closure must take exactly <n> parameter(s)` |
+| Callback with a destructured/patterned parameter | Not yet | `closure parameter binding` |
+| Callback body that isn't an expression or a single `return` | Not yet | `closure body must be an expression or a single return` |
+| `async` `forEach` callback | Not yet | `async forEach closure` |
+| `forEach` callback not taking exactly one parameter | Not yet | `forEach closure must take exactly one parameter` |
+
+> A `let`/`var`-bound arrow, or an arrow used as a first-class value outside these
+> callback positions, falls through to the generic expression fallback (`Not yet`).
+
+---
+
+## Nullability & optional chaining
+
+`T | undefined` / `T | null` → `Option<T>`; `??` → `unwrap_or`; `=== undefined` /
+`=== null` narrows via `if let`. Only single-level optional chaining is built.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Optional chaining deeper than one `a?.b` member (`a?.b?.c`, `a?.[i]`, `a?.()`) | Not yet | `optional chaining beyond a single `a?.b` member (deeper chains are a later slice)` |
+
+---
+
+## JSON
+
+Supported: `JSON.stringify` (JS number fidelity via `tslib`), annotation-driven
+`JSON.parse` (`from_str::<T>`), and an untyped `serde_json::Value` fallback.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Any `JSON.*` other than `stringify` / `parse`, or `stringify` with a replacer/space argument (wrong arity) | Not yet | `JSON.<name>` |
+
+---
+
+## Directives (`"use …"` string prologues)
+
+Recognized: `"use strict"` (ignored), `"use panic"`, `"use rc"`, `"use arena"`.
+Strategy directives are only valid on a free function or at script scope.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| An unrecognized `"use …"` directive | Forbidden | `unrecognized directive "<d>"` |
+| `"use panic"` outside a free function / script scope (e.g. in a method) | Not yet | `` `use panic` outside a free function or the top-level script `` |
+| `"use rc"` outside a free function / script scope | Not yet | `` `use rc` outside a free function or the top-level script `` |
+| `"use arena"` outside a free function / script scope | Not yet | `` `use arena` outside a free function or the top-level script `` |
+
+---
+
+## Numeric inference
+
+`numeric.ts` refines `number` to `usize` (array indices) or `i64` (integer
+`switch` discriminants). It fails loud on genuine contradictions, never silently.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| A `usize`-index value used in float arithmetic | Not yet | `numeric conflict: a usize index value used in float arithmetic` |
+| A fractional or negative literal in a `usize` context | Not yet | `value <n> cannot be a usize index` |
+| A fractional (or, for `usize`, negative) literal passed to a `usize`/`i64` parameter | Not yet | `non-integer literal <n> passed to a <usize\|i64> parameter` |
+| A non-literal value passed to a `usize`/`i64` parameter that isn't already a `usize` identifier | Not yet | `inter-procedural integer inference: a non-literal value passed to a <kind> parameter is not yet supported (pass an integer literal, or index within the callee)` |
+
+---
+
+## Identifier hygiene
+
+The emitter is otherwise pure and total. Its single throw is a **defensive
+invariant guard**: most Rust keyword collisions are auto-escaped as raw
+identifiers (`r#match`), but three keywords cannot be.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| A user identifier named `crate`, `super`, or `Self` (no valid raw form) | Not yet | `identifier '<name>' collides with a Rust keyword that cannot be a raw identifier` |
+
+---
+
+## Forbidden flags & meta (validator)
+
+Rejected wherever they appear, regardless of feature:
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `any` type | Forbidden | `` `any` type `` |
+| `unknown` type | Forbidden | `` `unknown` type `` |
+| Decorators (`@decorator`) | Forbidden | `decorators (`@decorator`)` |
+| `abstract` class | Forbidden | `` `abstract` classes `` |
+| `declare` (ambient) declarations | Forbidden | `` `declare` (ambient) declarations `` |
+| `async function*` | Forbidden | `async generator functions (`async function*`)` |
+| Generator method / expression | Forbidden | `generator methods / expressions (`function*`)` |
+| `for await` | Forbidden | `` `for await` async iteration `` |
+| `await using` | Forbidden | `` `await using` (async resource disposal) `` |
+
+---
+
+## The default-deny allowlist (parse gate)
+
+The validator carries a `MODELED` set of ~60 ESTree node types. **Any node whose
+`type` is not in the set is rejected** with a generic `Unsupported <NodeType>`
+before lowering even runs — so a construct the compiler has never heard of can
+never slip through as silent wrong output. This is why the tables above end with
+"any other …" rows: those collapse into this default-deny.
+
+The currently-modeled node types are:
+
+`Program` · `VariableDeclaration` · `VariableDeclarator` · `FunctionDeclaration` ·
+`BlockStatement` · `ReturnStatement` · `ExpressionStatement` · `IfStatement` ·
+`WhileStatement` · `ForStatement` · `ForOfStatement` · `SwitchStatement` ·
+`SwitchCase` · `BreakStatement` · `ContinueStatement` · `ThrowStatement` ·
+`TryStatement` · `CatchClause` · `TSInterfaceDeclaration` · `TSInterfaceBody` ·
+`TSPropertySignature` · `ClassDeclaration` · `ClassBody` · `PropertyDefinition` ·
+`MethodDefinition` · `FunctionExpression` · `TSParameterProperty` ·
+`TSEnumDeclaration` · `TSEnumBody` · `TSEnumMember` · `Identifier` · `Literal` ·
+`BinaryExpression` · `LogicalExpression` · `UnaryExpression` ·
+`AssignmentExpression` · `CallExpression` · `MemberExpression` · `ArrayExpression` ·
+`ObjectExpression` · `Property` · `ThisExpression` · `Super` · `NewExpression` ·
+`ParenthesizedExpression` · `AwaitExpression` · `ArrowFunctionExpression` ·
+`YieldExpression` · `ChainExpression` · `ArrayPattern` · `SpreadElement` ·
+`TSTypeAnnotation` · `TSTypeReference` · `TSTypeParameterInstantiation` ·
+`TSNumberKeyword` · `TSStringKeyword` · `TSBooleanKeyword` · `TSVoidKeyword` ·
+`TSUnionType` · `TSUndefinedKeyword` · `TSNullKeyword` · `TSAnyKeyword` ·
+`TSUnknownKeyword`.
+
+Notable node types **not** modeled (rejected at the gate): `LabeledStatement`,
+`EmptyStatement`, `DebuggerStatement`, `DoWhileStatement`, `WithStatement`,
+`ConditionalExpression`, `SequenceExpression`, `UpdateExpression`,
+`TaggedTemplateExpression`, `TemplateLiteral`, `TSAsExpression`,
+`TSNonNullExpression`, `ObjectPattern`, `RestElement`, `MetaProperty`,
+`ImportExpression`, and all module `import`/`export` syntax.
+
+---
+
+## Maintaining this catalog
+
+This document mirrors the throw sites in `validate.ts`, `lower.ts`, `numeric.ts`,
+and `emitter.ts` and the `MODELED` allowlist in `validate.ts`. When a fail-loud
+case is **added** (new restriction) or **graduated** (a deferral becomes real
+support), update the matching row here in the same change. The messages are the
+stable anchors — grep the source for the quoted string to find its site.
