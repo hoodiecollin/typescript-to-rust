@@ -1,6 +1,6 @@
 //! JS-parity assertions for the `tslib` fidelity layer (series 027).
 
-use tslib::{array, string};
+use tslib::{array, json, string};
 
 #[test]
 fn array_at_negative_indexes_from_end() {
@@ -42,6 +42,23 @@ fn slice_clamps_and_indexes_from_end() {
     assert_eq!(array::slice(&xs, 3.0, 1.0), Vec::<f64>::new()); // empty range
     assert_eq!(array::slice_from(&xs, -2.0), vec![3.0, 4.0]); // negative start
     assert_eq!(array::slice_from(&xs, 1.0), vec![2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn json_stringify_uses_js_number_formatting() {
+    assert_eq!(json::stringify(&1.0_f64), "1"); // not "1.0"
+    assert_eq!(json::stringify(&1.5_f64), "1.5");
+    assert_eq!(json::stringify(&vec![1.0_f64, 2.0, 3.0]), "[1,2,3]");
+    assert_eq!(json::stringify(&"hi"), "\"hi\"");
+    assert_eq!(json::stringify(&true), "true");
+}
+
+#[test]
+fn json_stringify_preserves_object_key_order() {
+    let mut m: indexmap::IndexMap<String, f64> = indexmap::IndexMap::new();
+    m.insert("b".to_string(), 2.0);
+    m.insert("a".to_string(), 1.0);
+    assert_eq!(json::stringify(&m), "{\"b\":2,\"a\":1}"); // insertion order
 }
 
 #[test]

@@ -31,7 +31,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # preserve; `IndexMap` does, so `Object.keys`/`values` observe JS order. A
 # drop-in for the read/insert/index usage the emitter produces. Unused by
 # map-free output (present-but-unused costs nothing at check time).
-indexmap = "2"
+indexmap = { version = "2", features = ["serde"] }
+# serde + serde_json back JSON.parse/stringify (series 045): generated structs
+# derive Serialize/Deserialize on demand, JSON.parse → from_str, and the tslib
+# JSON fidelity layer renders JS number formatting. `preserve_order` keeps object
+# key order. Unused by JSON-free output (costs nothing at check time).
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 # bumpalo backs the `"use arena"` directive (series 028c): a `"use arena"` scope
 # builds its `Vec`s from a bump arena (`bumpalo::vec![in &arena; …]`), freed all
 # at once at scope exit. `collections` enables `bumpalo::vec!`/`bumpalo::collections::Vec`.
