@@ -131,6 +131,16 @@ lives — no new type oracle threaded into `lowerExpr`.
 3. **047c — the fail-loud upgrade.** Struct operand with a non-`PartialEq` field
    (e.g. `fn`-pointer) → clean `UnsupportedError` instead of `E0369`.
 
+## Impl note (2026-07-08) — the pin is a spec, not a differential fixture
+
+The plan called for "a fixture pinning distinct-but-equal structs comparing
+`===`-true." A **differential** fixture can't express this: the harness compares
+Rust stdout to the TS run, and the whole point is that they *differ* (Rust `true`,
+JS `false`). So the pin lives in `struct-eq-structural.test.ts` **EQ1**, which
+asserts *both* the Rust value (`true`) **and** the divergent TS value (`false`) —
+a stronger guard than a fixture, since it fails if either side drifts. No fixture
+was added.
+
 ## Fail-loud residuals
 
 - **Struct map/set keys (#21)** — `f64`-field structs are `PartialEq` but not `Eq`;

@@ -69,6 +69,29 @@ don't. Each row below quotes the message the compiler prints.
 
 ---
 
+## Semantic divergences from TypeScript
+
+A short, closed list of constructs the compiler **accepts and translates**, but
+whose runtime meaning **intentionally differs** from TypeScript. These are not
+rejections — they are documented, deliberate choices (usually forced by the
+Option A memory model). Each is pinned by a fixture so a refactor can't silently
+flip it.
+
+- **Object `===`/`!==` is structural, not identity (series 047).** JS `===` on
+  objects compares *identity* (two distinct objects with equal fields are `!==`);
+  the dialect's default is **structural** equality (`derive(PartialEq)`) — equal
+  fields ⇒ equal. This is what survives the move/clone model (a struct has no
+  stable identity to observe once it is moved, cloned, or rebuilt from a literal)
+  and what idiomatic Rust derives. **Identity is restored only under `"use rc"`**
+  (`Rc::ptr_eq` on the shared handle) **and `"use arena"`** (allocation identity),
+  where an instance has a stable heap home — there `===` matches JS again. `f64`
+  fields are `PartialEq` (so numeric records compare) but not `Eq`, so this does
+  **not** unlock struct map/set keys (#21). A struct with a non-`PartialEq` field
+  (an `fn`-pointer) compared with `===` is a clean `UnsupportedError`, not a
+  silent miscompile.
+
+---
+
 ## Types & the accepted type surface
 
 The accepted type annotations are exactly: `number`, `string`, `boolean`, `void`,
