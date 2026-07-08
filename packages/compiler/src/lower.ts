@@ -345,9 +345,16 @@ function lowerFunction(
   const params = func.params.map((p, i) =>
     lowerParam(p, info?.params[i], analysis.structs),
   );
-  const ret = func.returnType
-    ? lowerType(func.returnType.typeAnnotation, analysis.structs)
-    : UNIT;
+  // A missing return type used to default silently to `-> ()`; it now fails loud
+  // (series 046c). An explicit `: void` annotation still lowers to `UNIT` via
+  // `lowerType`, so genuinely unit-returning functions annotate `: void`.
+  if (!func.returnType) {
+    throw new UnsupportedError({
+      type: `function '${name}' without a return type annotation`,
+      start: func.id.start,
+    });
+  }
+  const ret = lowerType(func.returnType.typeAnnotation, analysis.structs);
 
   if (!func.body)
     throw new UnsupportedError({ type: "function without a body" });
@@ -1135,9 +1142,15 @@ function lowerMethod(
   }
   const structs = analysis.structs;
   const params = fn.params.map((p) => lowerParam(p, undefined, structs));
-  const ret = fn.returnType
-    ? lowerType(fn.returnType.typeAnnotation, structs)
-    : UNIT;
+  // A missing return type fails loud (series 046c); an explicit `: void` still
+  // lowers to `UNIT`.
+  if (!fn.returnType) {
+    throw new UnsupportedError({
+      type: `method '${name}' without a return type annotation`,
+      start: (member.key as { start?: number }).start,
+    });
+  }
+  const ret = lowerType(fn.returnType.typeAnnotation, structs);
   if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
   const body = lowerStatements(
     takeDirectives(fn.body.body),
@@ -1628,6 +1641,52 @@ function lowerBlock(
   return lowerStatement(body, analysis, scope);
 }
 
+/**
+ * Is an initializer a *statically-obvious* scalar literal or homogeneous
+ * scalar-literal array (series 046)? Purely syntactic — one look at the node, no
+ * scope, no types:
+ *   - a `Literal` whose `typeof value` is `number` / `string` / `boolean`
+ *     (`null` is `"object"`, so it is excluded) → true;
+ *   - a non-empty `ArrayExpression` whose every element is such a scalar
+ *     `Literal` **of the same `typeof`** → true;
+ *   - anything else (call, binary, `-5` `UnaryExpression`, `null`/`undefined`,
+ *     identifier, member access, template literal, object literal, empty /
+ *     mixed / nested array) → false.
+ * An untyped binding is allowed iff this holds; everything else must annotate.
+ */
+function isScalarLiteral(e: Expression | null): e is Literal {
+  return (
+    e != null &&
+    e.type === "Literal" &&
+    (typeof (e as Literal).value === "number" ||
+      typeof (e as Literal).value === "string" ||
+      typeof (e as Literal).value === "boolean")
+  );
+}
+
+function isObviousLiteralInit(expr: Expression): boolean {
+  if (isScalarLiteral(expr)) return true;
+  if (expr.type === "ArrayExpression") {
+    const els = (expr as ArrayExpression).elements;
+    if (els.length === 0) return false;
+    if (!els.every(isScalarLiteral)) return false;
+    const first = typeof (els[0] as Literal).value;
+    return els.every((e) => typeof (e as Literal).value === first);
+  }
+  return false;
+}
+
+/** An `<array>.find(…)` call — the shipped 042d form the lowerer types `Option<T>` by construction. */
+function isArrayFindCall(e: Expression): boolean {
+  return (
+    e.type === "CallExpression" &&
+    (e as CallExpression).callee.type === "MemberExpression" &&
+    ((e as CallExpression).callee as MemberExpression).computed === false &&
+    (((e as CallExpression).callee as MemberExpression).property as Identifier)
+      .name === "find"
+  );
+}
+
 function lowerVarDecl(
   decl: VariableDeclaration,
   analysis: ModuleAnalysis,
@@ -1644,6 +1703,33 @@ function lowerVarDecl(
     const ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
+    // An untyped binding is allowed only for a statically-obvious scalar or
+    // homogeneous-scalar-array literal (series 046) — anything else (a user
+    // call, arithmetic, `-5`, `null`/`undefined`, an identifier, a member
+    // access, an empty / mixed / nested array) leaks an un-checked type to
+    // Rust inference, so it fails loud pointing at the fix: annotate it.
+    //
+    // Exceptions — builtin forms the lowerer already types *by construction*,
+    // so no annotation is needed (and, for JSON.parse, none can express the
+    // type): a stored `Object.entries(…)` (→ `Vec<(String, V)>`, 043b), an
+    // untyped `JSON.parse(…)` (→ `serde_json::Value`, the 045c fallback), and
+    // an `<array>.find(…)` (→ `Option<T>`, 042d). `using`/`await using`
+    // resources are also skipped — their acquisition is typed by construction.
+    const declKind = (decl as { kind: string }).kind;
+    const gated = declKind === "const" || declKind === "let" || declKind === "var";
+    if (
+      gated &&
+      ty === null &&
+      !isObviousLiteralInit(d.init) &&
+      !isObjectEntriesCall(d.init) &&
+      !isJsonParseCall(d.init) &&
+      !isArrayFindCall(d.init)
+    ) {
+      throw new UnsupportedError({
+        type: `binding '${d.id.name}' without a type annotation`,
+        start: d.id.start,
+      });
+    }
     // An object/array literal is interpreted from its binding's type: a `hashmap`
     // → `HashMap::from([…])`, a `struct` → `Name { … }`, a `vec<struct>` →
     // `vec![Name { … }, …]`, recursing into nested literals (series 032). A bare
