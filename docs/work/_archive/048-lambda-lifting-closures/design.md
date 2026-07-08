@@ -124,6 +124,28 @@ stable and collision-free; the `__cb_` prefix cannot collide with a user identif
 3. **048c — `fn`-pointer values.** `TSFunctionType` annotation → `fnPtr`; a
    non-capturing top-level fn/arrow passed as an argument or returned. `apply`.
 
+## Decision 2026-07-08 — forEach is not lifted; mutable capture kept
+
+Two conflicts with shipped behavior surfaced at impl time and were resolved with
+Collin:
+
+1. **`forEach` keeps its shipped for-loop lowering** (`tryForEach` →
+   `for &x in xs.iter() { … }`). It is a *statement* form and is already
+   effectively "lifted" to a loop, which naturally handles a **mutable-capture**
+   accumulator (`forEach(x => { total = total + x })`, a green 027-cl test).
+   Lifting it to a `__cb_foreach` fn would *regress* that, so forEach is excluded
+   from lifting. Only the **expression-bodied** adapters (map/filter/find/some/
+   every/reduce/sort) lift — their accepted body shape (expression or single
+   `return`) cannot mutate an outer binding, so the mutable-capture question does
+   not arise for them.
+2. **The lifted fns need explicit Rust types**, which the inline `|&x| body` path
+   never computed. A **bounded expression typer** (this series) types the shipped
+   numeric surface: element param → the receiver's element type (`f64` for the
+   numeric-array surface, resolved via a binding→type map); free-var scalars →
+   their binding type (Copy only); body → `f64` for arithmetic, `bool` for
+   comparison/logical, `reduce` acc → the init type. Anything the typer cannot
+   type fails loud — the same "numeric arrays first" boundary as 033/039.
+
 ## Fail-loud residuals (the honest boundary)
 
 - **Stateful / mutable-capture callback** — a closure counter, `xs.forEach(x =>
@@ -137,6 +159,14 @@ stable and collision-free; the `__cb_` prefix cannot collide with a user identif
 - **Non-Copy element forwarding** stays where `033` left it (numeric arrays first);
   a `String` element needs the shim to `.clone()`/borrow — that is **#11**, a
   downstream series, not this one.
+- **Forwarded free-var type = pre-refinement type.** The lifted fn's free-var
+  params are typed from `bindingTypes`, which is built *before* `refineNumerics`,
+  so a forwarded scalar is `f64`. A free var that the numeric pass would later
+  refine to `usize`/`i64` (e.g. it is also used as an array index elsewhere) and
+  is *then* forwarded into a callback would mismatch the `f64` param. No shipped
+  case hits this (forwarded scalars — `bump`/`factor`/`seed` — are never indices);
+  if it ever arises it is fail-loud at the cargo oracle, and the fix is to type the
+  lifted fn after refinement. Recorded so it is not mistaken for coverage.
 
 ## Knock-on (downstream, not this series' scope)
 

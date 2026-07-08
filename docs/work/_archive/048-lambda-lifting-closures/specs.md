@@ -7,16 +7,21 @@ pin it.
 
 ## 048a — lift anonymous callback bodies + shim (`packages/compiler/tests/lift-callbacks.test.ts`)
 
-- **LIFT1** `const xs = [1,2,3]; console.log(xs.map(x => x * 2))` → `[2, 4, 6]`;
-  emitted contains a lifted `fn __cb_map_1(x: f64) -> f64` and the shim
-  `.iter().map(|x| __cb_map_1(*x, )).collect::<Vec<_>>()` (no free vars → empty
-  forward list).
+- **LIFT1** `const xs = [1,2,3]; xs.map(x => x * 2)` → `[2, 4, 6]` (logged
+  element-wise — a whole `Vec` has no Rust `Display`); emitted contains a lifted
+  `fn __cb_map_1(x: f64) -> f64` and the shim
+  `.iter().map(|x| __cb_map_1(*x)).collect::<Vec<_>>()` (no free vars → the
+  forward list is empty, so the shim call is clean, no trailing comma).
 - **LIFT2** `xs.filter(x => x > 1)` behaves (differential over the survivors) and
-  emits `fn __cb_filter_1(...) -> bool` + `.filter(|x| __cb_filter_1(**x, ))` +
+  emits `fn __cb_filter_1(...) -> bool` + `.filter(|x| __cb_filter_1(**x))` +
   `.copied()`.
-- **LIFT3** `xs.forEach(x => console.log(x))` behaves and lowers to
-  `for &x in xs.iter() { __cb_foreach_1(x, ); }` (the lifted fn is a `-> ()` body).
-- **LIFT4** (green control) a program with no callbacks emits no `__cb_` fn.
+- **LIFT3** `xs.forEach(x => console.log(x))` behaves and keeps its shipped
+  `for &x in xs.iter() { … }` for-loop lowering — **forEach is not lifted**
+  (decision 2026-07-08): the for-loop already handles both read-only and mutable
+  capture, so no `__cb_foreach` fn is emitted. Only the expression-bodied
+  adapters (map/filter/find/some/every/reduce/sort) lift.
+- **LIFT4** (green control) a program with no lifting-eligible callbacks emits no
+  `__cb_` fn.
 
 ## 048b — read-only scalar forwarding (`packages/compiler/tests/lift-forward.test.ts`)
 
@@ -27,8 +32,10 @@ pin it.
 - **LIFT6** the differential is correct when the forwarded scalar changes the result
   (`bump = 100` → `[101, 102, 103]`).
 - **LIFT7** `reduce`: `const seed = 5; console.log([1,2,3].reduce((a, x) => a + x,
-  seed))` → `11`; emits `.fold(seed, |acc, x| __cb_reduce_1(acc, *x, ))` (init seeds
-  `acc`; no extra free var here — control that reduce's two-param shape still lifts).
+  seed))` → `11`; emits `fn __cb_reduce_1(a: f64, x: f64) -> f64` and
+  `.fold(seed, |a, x| __cb_reduce_1(a, *x))` — the shim binds the arrow's own param
+  names, `init` seeds `acc`, no extra free var (control that reduce's two-param
+  shape still lifts).
 - **LIFT8** two callbacks in one module get distinct hoisted names
   (`__cb_map_1`, `__cb_filter_2`) — no collision.
 
@@ -49,9 +56,11 @@ pin it.
 
 ## Fail-loud specs
 
-- **LIFT11** (mutable-capture callback rejected) `let total = 0; [1,2,3].forEach(x
-  => { total += x }); console.log(total)` stays `UnsupportedError` "mutable capture
-  in a callback" — the free var is *assigned*, so it is not forwardable-by-copy.
+- **LIFT11** (mutable-capture forEach still works — decision 2026-07-08) `let total
+  = 0; [1,2,3].forEach(x => { total = total + x }); console.log(total)` → `6`. The
+  shipped for-loop lowering handles the mutable accumulator; forEach is **not**
+  lifted, so this is **not** rejected. (Regressing a shipped green feature was
+  rejected; lambda-lifting applies only to the pure expression-bodied adapters.)
 - **LIFT12** (capturing function value rejected) an arrow that reads an outer local
   passed as an argument (`const y = 3; apply(x => x + y, 5)`) is `UnsupportedError`
   — a capturing value has no `fn`-pointer form (lift it to a named fn taking `y`).
