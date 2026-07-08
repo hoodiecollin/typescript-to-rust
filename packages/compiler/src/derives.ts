@@ -123,9 +123,54 @@ function isTypeDebug(
 }
 
 /**
+ * Is a type (transitively) `PartialEq`? (series 047 — struct `===` defaults to
+ * structural equality.) Scalars/`String`/`str`/`bool` are; a `Vec`/`Option` iff
+ * its element/inner is; a `HashMap`/`IndexMap` iff key **and** value are; a
+ * `struct` iff every field is (cycle-guarded). Everything else — notably an
+ * `fnPtr` field (function values) or any non-data `RustType` — is **not**
+ * `PartialEq`. NB: `f64` IS `PartialEq` (unlike `Eq`/`Hash`) — so ordinary
+ * numeric records are comparable; this deliberately does *not* imply `Eq`, so it
+ * does not unlock struct map/set keys (#21).
+ */
+export function isTypePartialEq(
+  ty: RustType,
+  table: StructTable,
+  seen: Set<string> = new Set(),
+): boolean {
+  switch (ty.kind) {
+    case "f64":
+    case "usize":
+    case "i64":
+    case "String":
+    case "str":
+    case "bool":
+      return true;
+    case "vec":
+      return isTypePartialEq(ty.elem, table, seen);
+    case "option":
+      return isTypePartialEq(ty.inner, table, seen);
+    case "hashmap":
+      return (
+        isTypePartialEq(ty.key, table, seen) &&
+        isTypePartialEq(ty.value, table, seen)
+      );
+    case "struct": {
+      if (seen.has(ty.name)) return true;
+      const fields = table.get(ty.name);
+      if (!fields) return false;
+      const next = new Set(seen).add(ty.name);
+      return fields.every((f) => isTypePartialEq(f.ty, table, next));
+    }
+    default:
+      return false;
+  }
+}
+
+/**
  * The `#[derive(...)]\n` line for a generated data struct (or `""` when nothing is
  * eligible). `Clone` when all fields are cloneable; `Debug` when all fields are
- * `Debug`. Order: `Clone, Debug` (matches the enum convention of `Clone` first).
+ * `Debug`; `PartialEq` when all fields are `PartialEq` (series 047). Order:
+ * `Clone, Debug, PartialEq` (matches the enum convention of `Clone` first).
  */
 export function structDeriveClause(
   s: { name: string; fields: { name: string; ty: RustType }[] },
@@ -140,6 +185,15 @@ export function structDeriveClause(
     isTypeDebug(f.ty, table, new Set([s.name])),
   );
   if (isDebug) traits.push("Debug");
+  // Structural equality (series 047): a struct is comparable with `===`/`!==` iff
+  // every field is `PartialEq`. This is the documented divergence from JS
+  // identity equality (see dialect.md). A non-`PartialEq` field (an `fnPtr`) is
+  // caught at the comparison site with a clean `UnsupportedError` (047c).
+  if (
+    s.fields.every((f) => isTypePartialEq(f.ty, table, new Set([s.name])))
+  ) {
+    traits.push("PartialEq");
+  }
   // serde `Serialize`/`Deserialize` are derived only when the module uses JSON
   // (series 045) and every field is (de)serializable — the same in-dialect data
   // set as `Debug`. Fully-qualified so no `use serde::…` prelude is needed.

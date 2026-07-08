@@ -47,7 +47,7 @@ console.log(a.x);
 console.log(b.x);`;
     await behaves(src, "1\n1");
     const rust = compile(src);
-    expect(rust).toContain("#[derive(Clone, Debug)]");
+    expect(rust).toContain("#[derive(Clone, Debug, PartialEq)]");
     expect(rust).toContain("a.clone()");
   });
 
@@ -71,7 +71,7 @@ console.log(b.count);`;
 }
 const a: Counter = new Counter(5);
 console.log(a.count);`);
-    expect(rust).toContain("#[derive(Clone, Debug)]\nstruct Counter {");
+    expect(rust).toContain("#[derive(Clone, Debug, PartialEq)]\nstruct Counter {");
   });
 
   test("D4 a struct last use stays bare (no needless clone)", () => {

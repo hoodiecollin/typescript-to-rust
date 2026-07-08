@@ -16,6 +16,7 @@ import {
   isErrorSubclass,
 } from "./analysis";
 import { refineArena } from "./arena";
+import { isTypePartialEq } from "./derives";
 import type {
   ArrayExpression,
   ArrowFunctionExpression,
@@ -1988,6 +1989,27 @@ function isObviousLiteralInit(expr: Expression): boolean {
   return false;
 }
 
+/**
+ * The struct `RustType` of a comparison operand when it is a struct-typed binding
+ * (series 047c) — resolved from `analysis.bindingTypes` (the 046/048 binding→type
+ * pre-pass). Used only to upgrade a non-`PartialEq` struct `===` to a clean
+ * `UnsupportedError`; a non-ident or non-struct operand returns null (default path).
+ */
+function structTypeOfOperand(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): Extract<RustType, { kind: "struct" }> | null {
+  if (e.type === "Identifier") {
+    const t = analysis.bindingTypes.get((e as Identifier).name);
+    // Only a genuine *data struct* (present in `structFields`) is checkable — an
+    // enum is also registered as a `struct` RustType but has no field table, and
+    // enums derive `PartialEq`, so `enumVal === E.Variant` must take the default
+    // path, never the non-PartialEq fail-loud upgrade.
+    if (t && t.kind === "struct" && analysis.structFields.has(t.name)) return t;
+  }
+  return null;
+}
+
 /** An `<array>.find(…)` call — the shipped 042d form the lowerer types `Option<T>` by construction. */
 function isArrayFindCall(e: Expression): boolean {
   return (
@@ -2323,6 +2345,17 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
             name: b.operator === "===" ? "is_none" : "is_some",
             args: [],
           };
+        }
+        // Fail-loud upgrade (series 047c): a struct operand whose type is not
+        // `PartialEq`-eligible (e.g. an `fnPtr` field) can't compare structurally.
+        // Raise a clean dialect signal here instead of the opaque cargo `E0369`.
+        for (const side of [b.left, b.right]) {
+          const st = structTypeOfOperand(side, analysis);
+          if (st && !isTypePartialEq(st, analysis.structFields)) {
+            throw new UnsupportedError({
+              type: `'===' on a struct '${st.name}' with a non-comparable (non-PartialEq) field`,
+            });
+          }
         }
       }
       return {

@@ -21,6 +21,7 @@
  */
 
 import { SCRIPT_SCOPE } from "./analysis";
+import { UnsupportedError } from "./errors";
 import type { HirExpr, HirModule, HirStmt } from "./hir";
 
 export interface RcOpts {
@@ -82,8 +83,34 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
           target: rewrite(e.target, true),
           value: rewrite(e.value),
         };
-      case "binary":
+      case "binary": {
+        // Struct identity under `"use rc"` (series 047b): `a === b` over two `rc`
+        // handles compares the handles with `Rc::ptr_eq` (JS identity — an alias
+        // is equal, a fresh equal value is not), not structural `==`. `!==` wraps
+        // in `!`. Mixing an `rc` handle with a non-`rc` operand can't compare a
+        // handle to a value → fail loud rather than guess.
+        if (e.op === "===" || e.op === "!==") {
+          const lRc = e.left.kind === "ident" && rc.has(e.left.name);
+          const rRc = e.right.kind === "ident" && rc.has(e.right.name);
+          if (lRc && rRc) {
+            const ptrEq: HirExpr = {
+              kind: "call",
+              callee: "Rc::ptr_eq",
+              args: [
+                { borrow: "ref", expr: e.left },
+                { borrow: "ref", expr: e.right },
+              ],
+            };
+            return e.op === "===" ? ptrEq : { kind: "unary", op: "!", operand: ptrEq };
+          }
+          if (lRc !== rRc) {
+            throw new UnsupportedError({
+              type: "identity comparison mixes an rc binding with a non-rc operand",
+            });
+          }
+        }
         return { ...e, left: rewrite(e.left), right: rewrite(e.right) };
+      }
       case "unary":
         return { ...e, operand: rewrite(e.operand) };
       case "call":
