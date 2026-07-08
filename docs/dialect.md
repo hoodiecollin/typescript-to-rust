@@ -166,14 +166,39 @@ body is a straight-line sequence of `yield <value>;` statements, annotated
 ## Classes
 
 Modeled: a **named** class with instance fields (all explicitly typed), an explicit
-field-initializing constructor, and instance methods. No inheritance, no statics,
+field-initializing constructor, and instance methods. **Single-`extends` class
+inheritance** (series 053) is modeled via a composition + trait hybrid; no statics,
 no accessors, no generics.
+
+### Inheritance (`extends`) — composition + trait
+
+`class B extends A` decomposes by *what is reused* (series 053):
+
+- **Data / `super` / inherited fields → composition.** `B` gains a synthetic
+  `base: A` embed (`struct B { base: A, … }`, zero-cost). `super(args)` →
+  `base: A::new(args)`; `super.m(args)` → `self.base.m(args)`; an inherited-field
+  read `b.x` → `b.base.x` (multi-level chains hop repeatedly).
+- **Methods / override / polymorphism → a shared `trait IA`** (named `I` + the
+  root base). Each participating class provides an `impl IA for Name`: the base
+  supplies every method body, a subclass its overrides plus a forwarder
+  (`fn m(&self){ self.base.m() }`) for the rest. A trait appears **only** for a
+  class in an `extends` relationship — a plain standalone class emits exactly as
+  before (no `base`, no trait, no `dyn`).
+- **Monomorphic base-typed param** (`fn greet(a: Animal)`) → `impl IA` (static
+  dispatch, zero-cost, no heap).
+- **Heterogeneous base-typed collection** (`const zoo: Array<A> = [new Dog(), new
+  Cat()]`) → `Vec<Box<dyn IA>>` — the *only* place a vtable/heap cost appears.
+- **Base-field read through a `dyn IA`** → an on-demand trait accessor
+  `a.x()` (emitted only for fields actually read polymorphically).
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `abstract class` | Forbidden | `` `abstract` classes `` |
 | Anonymous class | Not yet | `anonymous class` |
-| `extends` / `implements` (inheritance) | Not yet | `class inheritance (extends/implements)` |
+| `implements` / interface conformance | Not yet | `class inheritance (implements / interface conformance)` |
+| `class extends` a non-identifier / non-declared base | Not yet | `class extends a non-identifier base` / `class extends '<name>' which is not a declared class` |
+| Subclass constructor with no `super(...)` | Not yet | `subclass constructor without a \`super(...)\` call (base field uninitialized)` |
+| Subclass-only field read through a `dyn IA` (downcast) | Not yet | `field '<name>' read through a 'dyn I<Base>' is not a shared/base field (downcast — deferred to #17)` |
 | `static` or computed-name field | Not yet | `static/computed class field` |
 | Class field without a type annotation | Not yet | `class field '<name>' without a type` |
 | Parameter property (`constructor(public x: T)`) without a type | Not yet | `parameter property '<name>' without a type` |

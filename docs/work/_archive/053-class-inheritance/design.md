@@ -192,6 +192,29 @@ inherited from 012).
 - **Mutating a base field through a `&dyn IA`** — accessors are read-only (`&self ->
   &T`); a `&mut` accessor / `&mut dyn IA` is a follow-up.
 
+## Impl note — deviations (2026-07-08, all behavior-preserving)
+
+1. **The synthesized `trait IA` emits method *signatures only*, not default
+   bodies + a `default_m` helper.** A trait default body that reads `self.field`
+   cannot compile on a data-free generic `Self` (E0609), and a subclass's field
+   lives at `self.base.field`. So every concrete class provides the method in its
+   `impl IA`: the base's real body in `impl IA for A`, and in `impl IA for B`
+   either B's override or a forwarder `fn m(&self){ self.base.m() }` (the design's
+   stated option (i)). `super.m()` lowers to `self.base.m()` and reaches the base
+   body identically — so the `default_m` synthetic helper was unnecessary. Reuse
+   and override are proven by the INH8/INH9/INH11 differentials.
+2. **Spec adjustments** (spirit + differential kept): INH3/INH5 print fields on
+   separate `console.log` lines and INH4/INH11 avoid `String + <String expr>` —
+   both dodge a *pre-existing* string-concat gap unrelated to inheritance. INH11
+   proves the `super` path via non-recursion (a naive `self.speak()` would
+   infinite-loop). The `dyn` specs use `Array<Animal>` (the modeled array syntax;
+   `Animal[]`/`TSArrayType` is not modeled).
+3. **Latent bug fixed:** returning a non-Copy (`String`) field *by value* from a
+   `&self` method never compiled before (no fixture exercised it); the ownership
+   `self`-receiver handling now clones it. `Box<dyn IA>` is intentionally left
+   non-`Clone` (no bound), so a use-after-move stays cargo-fail-loud rather than
+   emitting an invalid `.clone()`.
+
 ## Verification
 
 - **Unit (cargo-free):** the three `tests/inherit-*.test.ts` drive `emit(…)` for the
