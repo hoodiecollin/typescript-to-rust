@@ -61,6 +61,12 @@ export interface FnInfo {
   params: ParamInfo[];
 }
 
+/** One declared field of a custom error class → an `AppError` variant field (049b). */
+export interface ErrorField {
+  name: string;
+  ty: RustType;
+}
+
 export interface ModuleAnalysis {
   /** function name → signature ownership info */
   fns: Map<string, FnInfo>;
@@ -107,13 +113,15 @@ export interface ModuleAnalysis {
   /** Class **names** whose constructor is fallible (`new C(…)` propagates `?`). */
   fallibleCtors: Set<string>;
   /**
-   * Names of declared **custom error classes** (`class X extends Error { … }`).
-   * They are emitted as error `struct`s + `Display`/`Error` impls (not general
-   * data structs, so they are *excluded* from `structs`); a `throw new X(…)`
-   * boxes them, and a non-empty set upgrades the program error type from `String`
-   * to `Box<dyn Error>`.
+   * Declared **custom error classes** (`class X extends Error { … }`), keyed by
+   * name and carrying each class's ordered typed fields (`message` is implicit —
+   * these are the *extra* declared data fields, series 049b). They become
+   * `AppError` enum variants (not general data structs, so they are *excluded*
+   * from `structs`); a non-empty map upgrades the program error type from
+   * `String` to `AppError`. The field shapes need `lowerType`, so analysis seeds
+   * each entry with empty fields and `lower()` fills them (like `structFields`).
    */
-  errorClasses: Set<string>;
+  errorClasses: Map<string, { name: string; fields: ErrorField[] }>;
   /**
    * Names of top-level `async` function declarations. A call to one is only valid
    * `await`ed (an un-polled future never runs), and `await` only targets one of
@@ -745,11 +753,15 @@ export function analyzeModule(program: Program): ModuleAnalysis {
 
   // Custom error classes (`class X extends Error`) are collected separately and
   // kept *out* of `structs` — they map to error types, not general data structs.
-  const errorClasses = new Set<string>();
+  const errorClasses = new Map<
+    string,
+    { name: string; fields: ErrorField[] }
+  >();
   for (const stmt of program.body) {
     if (stmt.type === "ClassDeclaration" && isErrorSubclass(stmt)) {
       const id = (stmt as { id?: { name?: string } }).id;
-      if (id?.name) errorClasses.add(id.name);
+      // Fields need `lowerType`, so seed empty here; `lower()` fills them in.
+      if (id?.name) errorClasses.set(id.name, { name: id.name, fields: [] });
     }
   }
 

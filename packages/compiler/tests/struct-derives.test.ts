@@ -107,8 +107,10 @@ console.log(c === Color.Red);`);
 }
 function boom(): void { throw new MyError("x"); }
 boom();`);
-    // The custom error class keeps its hand-written impls — no data-struct derive.
-    expect(errRust).toContain("struct MyError {");
+    // A custom error class is an AppError enum variant (series 049), not a data
+    // struct — it carries no data-struct derive clause.
+    expect(errRust).toContain("enum AppError {");
+    expect(errRust).toContain("MyError { message: String },");
     expect(errRust).not.toContain("#[derive(Clone, Debug)]\nstruct MyError");
   });
 });

@@ -57,9 +57,10 @@ import { DialectError, UnsupportedError } from "./errors";
 import type {
   Borrow,
   HirArg,
+  HirCatchArm,
   HirClass,
   HirEnum,
-  HirErrorClass,
+  HirErrorEnum,
   HirExpr,
   HirFn,
   HirItem,
@@ -92,12 +93,38 @@ function resultType(ok: RustType, err: RustType): RustType {
 }
 
 /**
- * The program-wide error type: `Box<dyn std::error::Error>` when any custom
- * error class is declared (series 022), else `String`. Uniform across every
+ * The program-wide error type: the synthesized `AppError` enum when any custom
+ * error class is declared (series 049), else `String`. Uniform across every
  * fallible function so `?` composes.
  */
 function programErrType(analysis: ModuleAnalysis): RustType {
-  return analysis.errorClasses.size > 0 ? { kind: "boxError" } : ERR_STRING;
+  return analysis.errorClasses.size > 0 ? { kind: "appError" } : ERR_STRING;
+}
+
+/**
+ * Synthesize the one whole-program `AppError` enum (series 049) from the declared
+ * custom error classes (each a struct variant, `message: String` first, then its
+ * declared typed fields) plus a fixed `Other { message: String }` catch-all.
+ * Returns `null` when no custom error class is declared (`E` stays `String`, no
+ * enum emitted — the 022-no-custom compat path). `#[error("{message}")]` is
+ * option (A): Display shows only the message, mirroring JS `String(err)`.
+ */
+function synthesizeErrorEnum(analysis: ModuleAnalysis): HirErrorEnum | null {
+  if (analysis.errorClasses.size === 0) return null;
+  const variants = [...analysis.errorClasses.values()].map((c) => ({
+    name: c.name,
+    fields: [
+      { name: "message", ty: ERR_STRING },
+      ...c.fields.map((f) => ({ name: f.name, ty: f.ty })),
+    ],
+    display: "{message}",
+  }));
+  variants.push({
+    name: "Other",
+    fields: [{ name: "message", ty: ERR_STRING }],
+    display: "{message}",
+  });
+  return { kind: "errorEnum", variants };
 }
 
 /**
@@ -125,8 +152,24 @@ export function lower(program: Program): HirModule {
   // and a receiver's element type. Needs `lowerType`, so it runs here, not in
   // `analyzeModule`.
   analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
+  // Error-class shapes (series 049b): validate each `class X extends Error` and
+  // collect its ordered typed fields into `analysis.errorClasses`, *before* any
+  // function body is lowered — a `throw new X(…)` inside a body constructs the
+  // `AppError::X` variant and needs the field order. Needs `lowerType`, so it
+  // runs here (like `structFields`), not in `analyzeModule`.
+  for (const stmt of normalized.body) {
+    if (stmt.type === "ClassDeclaration" && isErrorSubclass(stmt)) {
+      const shape = lowerErrorClass(stmt as ClassDeclaration, analysis.structs);
+      analysis.errorClasses.set(shape.name, shape);
+    }
+  }
   const items: HirItem[] = [];
   const script: Statement[] = [];
+
+  // The one synthesized `AppError` enum (series 049) leads the items when any
+  // custom error class is declared; nothing when none is (E stays String).
+  const errorEnum = synthesizeErrorEnum(analysis);
+  if (errorEnum) items.push(errorEnum);
 
   for (const stmt of normalized.body) {
     if (stmt.type === "FunctionDeclaration") {
@@ -144,12 +187,12 @@ export function lower(program: Program): HirModule {
     } else if (stmt.type === "TSEnumDeclaration") {
       items.push(lowerEnum(stmt as TSEnumDeclaration));
     } else if (stmt.type === "ClassDeclaration") {
-      // A `class X extends Error` is a custom error type, not a data class.
-      items.push(
-        isErrorSubclass(stmt)
-          ? lowerErrorClass(stmt as ClassDeclaration)
-          : lowerClass(stmt as ClassDeclaration, analysis),
-      );
+      // A `class X extends Error` is a custom error type — its shape was
+      // collected into the synthesized enum above, so nothing is emitted per
+      // class here. A plain data class becomes a `struct` + `impl`.
+      if (!isErrorSubclass(stmt)) {
+        items.push(lowerClass(stmt as ClassDeclaration, analysis));
+      }
     } else {
       script.push(stmt);
     }
@@ -500,15 +543,14 @@ const ERROR_CLASSES = new Set([
 ]);
 
 /**
- * Lower a `throw` to a `throw` HIR stmt (emitted as `return Err(<message>);`).
- * Two shapes map, both carrying a `String` payload (E is uniformly `String`):
- * `throw new <ErrorClass>(message)` for the built-in single-message constructors
- * (the class distinction is erased), and a bare string literal `throw "msg"` (the
- * literal is its own message). A thrown variable/expression (needs type tracking
- * to confirm `String`), a user/custom error class (custom error types are a later
- * series), a `cause`/multi-arg throw, or any other value is fail-loud. The message
- * lowers as an expression, so a string literal becomes a `String` and `Err`
- * carries it.
+ * Lower a `throw` to a `throw` HIR stmt (emitted as `return Err(<value>);`).
+ * Three shapes map: `throw new <CustomClass>(message, …fields)` → the matching
+ * `AppError::<Class>` struct variant (message first, then declared fields);
+ * `throw new <BuiltinError>(message)` → `AppError::Other { message }` (the
+ * built-in class distinction is erased); and a bare string literal `throw "msg"`
+ * → `AppError::Other { message }`. Under the no-custom-class `String` error type
+ * the message is carried bare (022 compat). A thrown variable/expression, an
+ * unknown class, or any other value is fail-loud.
  */
 function lowerThrow(
   stmt: ThrowStatement,
@@ -516,7 +558,7 @@ function lowerThrow(
   scope: string,
 ): HirStmt {
   const arg = stmt.argument;
-  const errTy = programErrType(analysis);
+  const hasAppError = analysis.errorClasses.size > 0;
   // In a `"use panic"` scope (028a) a throw aborts with its message; the class
   // (built-in or custom) is erased, exactly as under the `String` error type.
   const panic = analysis.panicScopes.has(scope);
@@ -528,45 +570,55 @@ function lowerThrow(
       });
     }
     const cname = (nw.callee as Identifier).name;
-    const isCustom = analysis.errorClasses.has(cname);
-    if (!isCustom && !ERROR_CLASSES.has(cname)) {
+    const custom = analysis.errorClasses.get(cname);
+    if (!custom && !ERROR_CLASSES.has(cname)) {
       throw new UnsupportedError({
         type: "throw of an unknown error class (declare it as `class X extends Error`)",
       });
     }
     const [message] = nw.arguments;
-    if (nw.arguments.length !== 1 || !message) {
+    if (!message) {
       throw new UnsupportedError({
-        type: "throw new <Error>() must have exactly one message argument",
+        type: "throw new <Error>() must have at least a message argument",
       });
     }
     const msg = lowerExpr(message, analysis);
     if (panic) return { kind: "throw", value: msg, panic: true };
-    // A custom error is boxed: `Box::new(<X>::new(msg))`. A built-in `Error` /
-    // string throw carries the message; under a boxed program error type it
-    // converts with `.into()` (the `From<String>` for `Box<dyn Error>`).
-    if (isCustom) {
-      const ctor: HirExpr = {
-        kind: "call",
-        callee: `${cname}::new`,
-        args: [{ borrow: "owned", expr: msg }],
-      };
+    if (custom) {
+      // `throw new Foo(msg, a, b)` → `AppError::Foo { message: msg, f: a, g: b }`
+      // (message first, then declared fields 1:1 with the remaining args).
+      const rest = nw.arguments.slice(1);
+      if (rest.length !== custom.fields.length) {
+        throw new UnsupportedError({
+          type: `throw new ${cname}() takes a message plus ${custom.fields.length} field argument(s)`,
+        });
+      }
+      const fields = [
+        { name: "message", value: msg },
+        ...custom.fields.map((f, i) => ({
+          name: f.name,
+          value: lowerExpr(rest[i] as Expression, analysis),
+        })),
+      ];
       return {
         kind: "throw",
-        value: {
-          kind: "call",
-          callee: "Box::new",
-          args: [{ borrow: "owned", expr: ctor }],
-        },
+        value: { kind: "enumVariant", enumName: "AppError", variant: cname, fields },
       };
     }
-    return { kind: "throw", value: boxIfNeeded(msg, errTy) };
+    // A built-in `Error` throw → `AppError::Other { message }`, or the bare
+    // `String` message under the no-custom-class program error type (022 compat).
+    if (nw.arguments.length !== 1) {
+      throw new UnsupportedError({
+        type: "throw new Error() must have exactly one message argument",
+      });
+    }
+    return { kind: "throw", value: otherOrMessage(msg, hasAppError) };
   }
   // `throw "literal"` — a bare string literal is thrown as its own message.
   if (arg.type === "Literal" && typeof (arg as Literal).value === "string") {
     const msg = lowerExpr(arg, analysis);
     if (panic) return { kind: "throw", value: msg, panic: true };
-    return { kind: "throw", value: boxIfNeeded(msg, errTy) };
+    return { kind: "throw", value: otherOrMessage(msg, hasAppError) };
   }
   throw new UnsupportedError({
     type: "throw of a non-Error, non-string-literal value",
@@ -574,34 +626,76 @@ function lowerThrow(
 }
 
 /**
- * Under a `Box<dyn Error>` program error type, a `String` message must convert to
- * the boxed error via `.into()` (the standard `From<String>` impl). Under the
- * `String` error type (no custom error classes) the message is carried as-is.
+ * A built-in `Error`/string throw's payload: under an `AppError` program error
+ * type it constructs the catch-all `AppError::Other { message }` directly (no
+ * `.into()` round-trip); under the `String` error type (no custom class) the
+ * message is carried bare (022-no-custom compat).
  */
-function boxIfNeeded(msg: HirExpr, errTy: RustType): HirExpr {
-  return errTy.kind === "boxError"
-    ? { kind: "method", receiver: msg, name: "into", args: [] }
+function otherOrMessage(msg: HirExpr, hasAppError: boolean): HirExpr {
+  return hasAppError
+    ? {
+        kind: "enumVariant",
+        enumName: "AppError",
+        variant: "Other",
+        fields: [{ name: "message", value: msg }],
+      }
     : msg;
 }
 
 /**
- * Lower a `class X extends Error { constructor(message: string) { super(message); } }`
- * to a `HirErrorClass`. Only that exact shape maps — no fields, exactly one
- * constructor taking a single message param whose body is `super(message);` —
- * anything else is fail-loud (richer custom error shapes are a later series).
+ * Lower a `class X extends Error { field: T; …; constructor(message: string,
+ * field: T, …) { super(message); this.field = field; … } }` to its `AppError`
+ * variant shape `{ name, fields }` (series 049b). The recognized shape:
+ *   - members are declared **data fields** (`field: T`) plus exactly one ctor;
+ *     any method/getter/setter is fail-loud (ERR10);
+ *   - the ctor's first param is the message; the remaining params map 1:1 to the
+ *     declared fields, in declaration order;
+ *   - the ctor body is `super(message);` followed by **identity** assignments
+ *     `this.f = f;` (one per field, RHS the bare matching param ident) — a
+ *     computed/reordered/defaulted/extra statement is fail-loud (ERR11).
+ * `message` itself is implicit (always the variant's first field); the returned
+ * `fields` are the *extra* declared data fields.
  */
-function lowerErrorClass(decl: ClassDeclaration): HirErrorClass {
+function lowerErrorClass(
+  decl: ClassDeclaration,
+  structs: Set<string>,
+): { name: string; fields: { name: string; ty: RustType }[] } {
   const name = decl.id?.name;
   if (!name) throw new UnsupportedError({ type: "anonymous error class" });
   const members = decl.body.body;
-  const nonCtor = members.filter(
-    (m) => !(m.type === "MethodDefinition" && m.kind === "constructor"),
+
+  // Declared data fields (`field: T`), in declaration order → variant fields.
+  const props = members.filter(
+    (m): m is PropertyDefinition => m.type === "PropertyDefinition",
   );
-  if (nonCtor.length > 0) {
+  const fields = props.map((f) => {
+    if (f.static || f.computed) {
+      throw new UnsupportedError({ type: "static/computed error-class field" });
+    }
+    if (!f.typeAnnotation) {
+      throw new UnsupportedError({
+        type: `error-class field '${f.key.name}' without a type`,
+      });
+    }
+    return {
+      name: f.key.name,
+      ty: lowerType(f.typeAnnotation.typeAnnotation, structs),
+    };
+  });
+
+  // Anything that is neither a data field nor the constructor is fail-loud
+  // (methods, getters/setters — only typed data + the fixed ctor map).
+  const extras = members.filter(
+    (m) =>
+      m.type !== "PropertyDefinition" &&
+      !(m.type === "MethodDefinition" && m.kind === "constructor"),
+  );
+  if (extras.length > 0) {
     throw new UnsupportedError({
-      type: "custom error class with extra members (only { message } is supported)",
+      type: "custom error class with a method/getter (only typed data fields are supported)",
     });
   }
+
   const ctors = members.filter(
     (m): m is MethodDefinition =>
       m.type === "MethodDefinition" && m.kind === "constructor",
@@ -613,25 +707,73 @@ function lowerErrorClass(decl: ClassDeclaration): HirErrorClass {
     });
   }
   const ctor = ctorDef.value;
-  if (ctor.params.length !== 1) {
+  // First param is the message; the rest map 1:1 (in order) to the fields.
+  if (ctor.params.length !== fields.length + 1) {
     throw new UnsupportedError({
-      type: "custom error class constructor must take exactly one message param",
+      type: "custom error class constructor params must be (message, …fields) 1:1",
     });
   }
+  const paramNames = (ctor.params as unknown as Identifier[]).map((p) => p.name);
+  fields.forEach((f, i) => {
+    if (paramNames[i + 1] !== f.name) {
+      throw new UnsupportedError({
+        type: `error-class constructor param '${paramNames[i + 1]}' must match field '${f.name}' (reordering unsupported)`,
+      });
+    }
+  });
+
+  // Body: `super(message);` then one identity `this.f = f;` per field, in order.
   const body = ctor.body?.body ?? [];
-  const only = body[0];
+  if (body.length !== fields.length + 1) {
+    throw new UnsupportedError({
+      type: "error-class constructor body must be `super(message);` then one `this.f = f;` per field",
+    });
+  }
+  const first = body[0];
   const isSuperCall =
-    body.length === 1 &&
-    only?.type === "ExpressionStatement" &&
-    (only as ExpressionStatement).expression.type === "CallExpression" &&
-    ((only as ExpressionStatement).expression as CallExpression).callee.type ===
+    first?.type === "ExpressionStatement" &&
+    (first as ExpressionStatement).expression.type === "CallExpression" &&
+    ((first as ExpressionStatement).expression as CallExpression).callee.type ===
       "Super";
   if (!isSuperCall) {
     throw new UnsupportedError({
-      type: "custom error class constructor body must be `super(message)`",
+      type: "error-class constructor body must start with `super(message)`",
     });
   }
-  return { kind: "errorClass", name };
+  fields.forEach((f, i) => {
+    const stmt = body[i + 1];
+    if (!isIdentityFieldAssign(stmt, f.name)) {
+      throw new UnsupportedError({
+        type: `error-class constructor must assign \`this.${f.name} = ${f.name};\` (computed/defaulted/reordered init unsupported)`,
+      });
+    }
+  });
+
+  return { name, fields };
+}
+
+/** Is `stmt` exactly `this.<field> = <field>;` (an identity assign of `field`)? */
+function isIdentityFieldAssign(
+  stmt: Statement | undefined,
+  field: string,
+): boolean {
+  if (!stmt || stmt.type !== "ExpressionStatement") return false;
+  const e = (stmt as ExpressionStatement).expression;
+  if (e.type !== "AssignmentExpression") return false;
+  const a = e as AssignmentExpression;
+  if (a.operator !== "=") return false;
+  const left = a.left;
+  if (
+    left.type !== "MemberExpression" ||
+    (left as MemberExpression).computed ||
+    (left as MemberExpression).object.type !== "ThisExpression" ||
+    (left as MemberExpression).property.type !== "Identifier" ||
+    ((left as MemberExpression).property as Identifier).name !== field
+  ) {
+    return false;
+  }
+  // RHS must be the bare matching param identifier — no `.trim()`, no default.
+  return a.right.type === "Identifier" && (a.right as Identifier).name === field;
 }
 
 /**
@@ -669,14 +811,173 @@ function lowerTry(
       type: "re-throw inside catch alongside a finally (deferred)",
     });
   }
+  const catchParam = stmt.handler.param ? stmt.handler.param.name : null;
+  // Series 049c: recognize an `instanceof` ladder catch body → a native `match`
+  // over the owned bound error (no `downcast_ref`). Non-ladder catches keep the
+  // opaque bind. The `escapesClosure` gate above already rejected a per-branch
+  // `return` (the #16 boundary), so a recognized ladder is statement-level only.
+  const discriminant =
+    catchParam && analysis.errorClasses.size > 0
+      ? recognizeDiscriminant(stmt.handler.body.body, catchParam, analysis, scope)
+      : undefined;
   return {
     kind: "tryCatch",
     tryBody: makeFallible(rawTry, UNIT),
-    catchParam: stmt.handler.param ? stmt.handler.param.name : null,
+    catchParam,
     catchBody,
     finallyBody,
     errTy: programErrType(analysis),
+    discriminant,
   };
+}
+
+/**
+ * Recognize a discriminating `instanceof` ladder catch body (series 049c) and
+ * lower it to `match` arms over the owned bound error. The body must be a single
+ * `if`/`else if`/…/`else` chain whose every non-final test is `<catchParam>
+ * instanceof <CustomClass>` (a *declared* error class). Returns the arms, or
+ * `undefined` when the body is not that shape (the opaque bind is kept — ERR16).
+ *   - each `instanceof Foo` branch → `AppError::Foo { <read fields>, .. }`, with
+ *     `e.field` reads rewritten to the owned bound `field`;
+ *   - a trailing `else` → the wildcard `other => …` (binds the whole error);
+ *   - no trailing `else` → an appended `_ => {}` (exhaustiveness; JS swallows
+ *     non-matching errors, ERR15).
+ * An `instanceof` on a *built-in* error class is fail-loud (no variant to match).
+ */
+function recognizeDiscriminant(
+  body: Statement[],
+  catchParam: string,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirCatchArm[] | undefined {
+  if (body.length !== 1 || body[0]?.type !== "IfStatement") return undefined;
+  const arms: HirCatchArm[] = [];
+  let node: Statement | null = body[0] as IfStatement;
+  while (node && node.type === "IfStatement") {
+    const iff = node as IfStatement;
+    const cls = instanceofTest(iff.test, catchParam);
+    if (cls === null) return undefined; // not an `e instanceof X` test → opaque
+    if (!analysis.errorClasses.has(cls)) {
+      if (ERROR_CLASSES.has(cls)) {
+        throw new UnsupportedError({
+          type: `\`instanceof ${cls}\` in a catch — built-in error throws collapse into Other (no variant to match)`,
+        });
+      }
+      return undefined; // an unknown class — not a recognized ladder
+    }
+    // Fields of `cls` read as `e.field` in this branch bind owned; rewrite the
+    // reads to the bound `field` ident before lowering the branch body.
+    const read = collectFieldReads(iff.consequent, catchParam, analysis, cls);
+    const conseq = rewriteFieldReads(iff.consequent, catchParam, read);
+    arms.push({
+      kind: "variant",
+      variant: cls,
+      binds: read,
+      body: lowerBlock(conseq, analysis, scope),
+    });
+    node = iff.alternate;
+  }
+  // A trailing `else { … }` → the `other` wildcard (binds the whole error);
+  // no `else` → an appended `_ => {}` for exhaustiveness (JS swallow parity).
+  if (node) {
+    arms.push({
+      kind: "wildcard",
+      binder: "other",
+      body: lowerBlock(node, analysis, scope),
+    });
+  } else {
+    arms.push({ kind: "wildcard", binder: null, body: [] });
+  }
+  return arms;
+}
+
+/** `<catchParam> instanceof <Class>` → the class name, else `null`. */
+function instanceofTest(test: Expression, catchParam: string): string | null {
+  if (test.type !== "BinaryExpression") return null;
+  const b = test as { operator: string; left: Expression; right: Expression };
+  if (b.operator !== "instanceof") return null;
+  if (b.left.type !== "Identifier" || (b.left as Identifier).name !== catchParam) {
+    return null;
+  }
+  if (b.right.type !== "Identifier") return null;
+  return (b.right as Identifier).name;
+}
+
+/**
+ * Collect the declared field names of `cls` that the branch reads as
+ * `<catchParam>.<field>` (so the match arm binds each owned). `message` is a
+ * valid field too. Order follows the variant's field order for stable output.
+ */
+function collectFieldReads(
+  branch: Statement,
+  catchParam: string,
+  analysis: ModuleAnalysis,
+  cls: string,
+): string[] {
+  const shape = analysis.errorClasses.get(cls);
+  const candidates = ["message", ...(shape?.fields.map((f) => f.name) ?? [])];
+  const found = new Set<string>();
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (!isAstNode(node)) return;
+    if (node.type === "MemberExpression") {
+      const m = node as unknown as MemberExpression;
+      if (
+        !m.computed &&
+        m.object.type === "Identifier" &&
+        (m.object as Identifier).name === catchParam &&
+        m.property.type === "Identifier"
+      ) {
+        found.add((m.property as Identifier).name);
+      }
+    }
+    for (const key in node) {
+      if (key === "type") continue;
+      walk((node as Record<string, unknown>)[key]);
+    }
+  };
+  walk(branch);
+  return candidates.filter((c) => found.has(c));
+}
+
+/**
+ * Rewrite each `<catchParam>.<field>` member access (for a field in `binds`) to a
+ * bare `<field>` identifier, so a lowered branch reads the match-arm-bound owned
+ * field. A structural clone — the source AST is untouched.
+ */
+function rewriteFieldReads<T>(node: T, catchParam: string, binds: string[]): T {
+  if (Array.isArray(node)) {
+    return node.map((n) => rewriteFieldReads(n, catchParam, binds)) as unknown as T;
+  }
+  if (!isAstNode(node)) return node;
+  const n = node as unknown as MemberExpression;
+  if (
+    n.type === "MemberExpression" &&
+    !n.computed &&
+    n.object.type === "Identifier" &&
+    (n.object as Identifier).name === catchParam &&
+    n.property.type === "Identifier" &&
+    binds.includes((n.property as Identifier).name)
+  ) {
+    return {
+      type: "Identifier",
+      name: (n.property as Identifier).name,
+      start: n.start,
+      end: n.end,
+    } as unknown as T;
+  }
+  const out: Record<string, unknown> = {};
+  for (const key in node as Record<string, unknown>) {
+    out[key] = rewriteFieldReads(
+      (node as Record<string, unknown>)[key],
+      catchParam,
+      binds,
+    );
+  }
+  return out as T;
 }
 
 /**

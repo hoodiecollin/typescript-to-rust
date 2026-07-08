@@ -54,6 +54,7 @@ const BEHAVIORAL: ReadonlyArray<readonly [string, string]> = [
   ["06_classes/02_multi_method", "24"],
   ["06_classes/03_getter_method", "212"],
   ["07_async/02_multi_await", "3"],
+  ["08_errors/04_error_enum", "6"],
   ["10_ownership/05_struct_borrow", "42"],
 ];
 

@@ -43,6 +43,13 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # at once at scope exit. `collections` enables `bumpalo::vec!`/`bumpalo::collections::Vec`.
 # Present-but-unused by non-arena output (costs nothing at check time).
 bumpalo = { version = "3", features = ["collections"] }
+# thiserror backs the whole-program `AppError` enum (series 049): a custom
+# `class X extends Error` becomes an `AppError` variant, and the enum derives
+# `thiserror::Error` (fully-qualified — no `use` prelude) for its `Display` /
+# `std::error::Error` impls. Pinned so the offline cache stays warm; the harness
+# fetches it online on a cold cache. Unused by error-enum-free output (a
+# present-but-unused dependency costs nothing at check time).
+thiserror = "2"
 
 [lib]
 name = "ttr_scratch"

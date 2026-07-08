@@ -57,10 +57,11 @@ export type RustType =
   /** A fallible function's return type: `Result<ok, err>` (`err` is `String` today). */
   | { kind: "result"; ok: RustType; err: RustType }
   /**
-   * `Box<dyn std::error::Error>` — the program error type when any custom error
-   * class is declared (series 022), so `?` composes across every fallible fn.
+   * `AppError` — the whole-program synthesized error enum (series 049), the
+   * program error type when any custom error class is declared, so `?` composes
+   * across every fallible fn. Replaces series 022's `boxError`.
    */
-  | { kind: "boxError" }
+  | { kind: "appError" }
   /**
    * `Rc<RefCell<inner>>` — shared, interior-mutable ownership (series 028b, the
    * `"use rc"` directive). The sanctioned Option-B fallback for shared mutable
@@ -129,6 +130,18 @@ export type HirExpr =
   | {
       kind: "structLit";
       name: string;
+      fields: { name: string; value: HirExpr }[];
+    }
+  /**
+   * `AppError::Foo { f: v, … }` — a struct-variant construction (series 049).
+   * The construction site of a `throw new Foo(…)` (custom class → its variant) or
+   * a plain/built-in throw (→ the `Other` variant). `enumName` is always
+   * `AppError` today; kept explicit so the emitter stays a pure path join.
+   */
+  | {
+      kind: "enumVariant";
+      enumName: string;
+      variant: string;
       fields: { name: string; value: HirExpr }[];
     }
   /**
@@ -371,7 +384,24 @@ export type HirStmt =
       catchBody: HirStmt[];
       finallyBody: HirStmt[] | null;
       errTy: RustType;
+      /**
+       * A recognized `instanceof` ladder (series 049c), pre-lowered to `match`
+       * arms over the owned bound error. When present the emitter renders `if let
+       * Err(e) = <closure> { match e { …arms } }` (no `downcast_ref`); when absent
+       * the opaque `catchBody` path is unchanged.
+       */
+      discriminant?: HirCatchArm[];
     };
+
+/**
+ * One arm of a discriminating `catch` → `match` (series 049c). A `variant` arm
+ * matches `AppError::<variant> { <binds>, .. }` (each read field bound owned); a
+ * `wildcard` arm (from the trailing `else`, or the appended exhaustiveness `_`)
+ * binds the whole error to `binder` (`other`) or ignores it (`_`).
+ */
+export type HirCatchArm =
+  | { kind: "variant"; variant: string; binds: string[]; body: HirStmt[] }
+  | { kind: "wildcard"; binder: string | null; body: HirStmt[] };
 
 /**
  * One `match` arm. `guard` is `disc == case` (`null` is the wildcard `_`). When
@@ -434,14 +464,20 @@ export interface HirClass {
 }
 
 /**
- * A custom error class (`class X extends Error { constructor(message) {…} }`) —
- * emitted as a `struct X { message: String }` with an associated `new` and
- * `Display`/`Debug`/`std::error::Error` impls (series 022). The shape is fixed,
- * so the item carries only the name.
+ * The one synthesized whole-program error enum (series 049), replacing series
+ * 022's per-class error structs. Each variant carries ordered typed fields
+ * (`message: String` first) and a thiserror `#[error(display)]` string; the enum
+ * derives `#[derive(thiserror::Error, Debug)]`. Synthesized once in `lower()`
+ * from the declared custom error classes plus a fixed `Other { message }`
+ * catch-all; absent entirely when no custom error class is declared.
  */
-export interface HirErrorClass {
-  kind: "errorClass";
-  name: string;
+export interface HirErrorEnum {
+  kind: "errorEnum";
+  variants: {
+    name: string;
+    fields: { name: string; ty: RustType }[];
+    display: string;
+  }[];
 }
 
 /**
@@ -455,8 +491,8 @@ export interface HirEnum {
   variants: { name: string; disc: number | null }[];
 }
 
-/** A top-level Rust item: a function, a struct, a class, an enum, or an error type. */
-export type HirItem = HirFn | HirStruct | HirClass | HirErrorClass | HirEnum;
+/** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */
+export type HirItem = HirFn | HirStruct | HirClass | HirErrorEnum | HirEnum;
 
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level

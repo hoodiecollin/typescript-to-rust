@@ -21,9 +21,10 @@ import {
 } from "./derives";
 import type {
   HirArg,
+  HirCatchArm,
   HirClass,
   HirEnum,
-  HirErrorClass,
+  HirErrorEnum,
   HirExpr,
   HirFn,
   HirItem,
@@ -206,8 +207,8 @@ function emitItem(
       return emitStruct(item, structs, usesJson);
     case "class":
       return emitClass(item, structs, usesJson);
-    case "errorClass":
-      return emitErrorClass(item);
+    case "errorEnum":
+      return emitErrorEnum(item);
     case "enum":
       return emitEnum(item);
   }
@@ -230,38 +231,42 @@ function emitEnum(e: HirEnum): string {
 }
 
 /**
- * A custom error class → `struct <Name> { message: String }`, an associated
- * `new`, and the `Display`/`Debug`/`Error` impls that make it usable as a
- * `Box<dyn std::error::Error>`. All paths are fully-qualified, so no `use`
- * prelude is needed.
+ * The whole-program error enum (series 049) → a `#[derive(thiserror::Error,
+ * Debug)]` `enum AppError` whose variants each carry ordered typed fields
+ * (`message: String` first) under a `#[error(display)]` attribute (thiserror
+ * generates `Display` + `std::error::Error`). Plus the `From<String>` /
+ * `From<&str>` impls constructing the `Other` catch-all, so a `String`/`&str`
+ * flowing into an `AppError` slot (`.into()`, `?` on a `Result<_, String>`)
+ * composes. `thiserror::Error` is fully-qualified, so no `use` prelude is needed.
  */
-function emitErrorClass(e: HirErrorClass): string {
-  const n = rid(e.name);
-  return [
-    `struct ${n} {`,
-    `${INDENT}message: String,`,
-    `}`,
-    ``,
-    `impl ${n} {`,
-    `${INDENT}fn new(message: String) -> ${n} {`,
-    `${INDENT}${INDENT}${n} { message }`,
+function emitErrorEnum(e: HirErrorEnum): string {
+  const variants = e.variants
+    .map((v) => {
+      const fields = v.fields
+        .map((f) => `${rid(f.name)}: ${emitType(f.ty)}`)
+        .join(", ");
+      return [
+        indent(`#[error(${JSON.stringify(v.display)})]`),
+        indent(`${rid(v.name)} { ${fields} },`),
+      ].join("\n");
+    })
+    .join("\n");
+  const enumDecl = `#[derive(thiserror::Error, Debug)]\nenum AppError {\n${variants}\n}`;
+  const fromString = [
+    `impl From<String> for AppError {`,
+    `${INDENT}fn from(message: String) -> AppError {`,
+    `${INDENT}${INDENT}AppError::Other { message }`,
     `${INDENT}}`,
     `}`,
-    ``,
-    `impl std::fmt::Display for ${n} {`,
-    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {`,
-    `${INDENT}${INDENT}write!(f, "{}", self.message)`,
-    `${INDENT}}`,
-    `}`,
-    ``,
-    `impl std::fmt::Debug for ${n} {`,
-    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {`,
-    `${INDENT}${INDENT}write!(f, "{}", self.message)`,
-    `${INDENT}}`,
-    `}`,
-    ``,
-    `impl std::error::Error for ${n} {}`,
   ].join("\n");
+  const fromStr = [
+    `impl From<&str> for AppError {`,
+    `${INDENT}fn from(message: &str) -> AppError {`,
+    `${INDENT}${INDENT}AppError::Other { message: message.to_string() }`,
+    `${INDENT}}`,
+    `}`,
+  ].join("\n");
+  return [enumDecl, fromString, fromStr].join("\n\n");
 }
 
 /** A `class` → its `struct` definition, an `impl` block, and (if any) `Drop`. */
@@ -385,9 +390,22 @@ function emitStmt(stmt: HirStmt): string {
       // The `try` block is a `Result`-returning IIFE so its `?`/`throw`s
       // short-circuit to the closure; `catch` matches on the result; `finally`
       // runs after (divergence past it is rejected in lowering, so this is exact).
-      const binder = stmt.catchParam ? rid(stmt.catchParam) : "_";
       const closure = `(|| -> Result<(), ${emitType(stmt.errTy)}> ${block(stmt.tryBody)})()`;
-      const head = `if let Err(${binder}) = ${closure} ${block(stmt.catchBody)}`;
+      // A discriminating catch (series 049c) renders `if let Err(<binder>) = … {
+      // match <binder> { …arms } }` — a native exhaustive match with owned field
+      // bindings, no `downcast_ref`. Otherwise the opaque bind is unchanged.
+      let head: string;
+      if (stmt.discriminant) {
+        const binder = stmt.catchParam ? rid(stmt.catchParam) : "e";
+        const arms = stmt.discriminant
+          .map((arm) => indent(emitCatchArm(arm, binder)))
+          .join("\n");
+        const matchBlock = `{\n${indent(`match ${binder} {\n${arms}\n}`)}\n}`;
+        head = `if let Err(${binder}) = ${closure} ${matchBlock}`;
+      } else {
+        const binder = stmt.catchParam ? rid(stmt.catchParam) : "_";
+        head = `if let Err(${binder}) = ${closure} ${block(stmt.catchBody)}`;
+      }
       if (!stmt.finallyBody) return head;
       const fin = stmt.finallyBody.map(emitStmt).join("\n");
       return `${head}\n${fin}`;
@@ -406,6 +424,25 @@ function emitArm(arm: HirMatchArm): string {
       ? `_ if ${emitExpr(arm.guard)}`
       : "_";
   return `${head} => ${block(arm.body)}`;
+}
+
+/**
+ * One arm of a discriminating `catch` → `match` (series 049c). A `variant` arm is
+ * `AppError::<variant> { <binds>, .. }` (each read field bound owned, `..` for the
+ * rest); a `wildcard` arm binds the whole error (`other => …`) or ignores it
+ * (`_ => …`). The scrutinee is already the caught error binder.
+ */
+function emitCatchArm(arm: HirCatchArm, _binder: string): string {
+  if (arm.kind === "variant") {
+    const binds = arm.binds.map(rid);
+    const pat =
+      binds.length > 0
+        ? `AppError::${rid(arm.variant)} { ${binds.join(", ")}, .. }`
+        : `AppError::${rid(arm.variant)} { .. }`;
+    return `${pat} => ${block(arm.body)}`;
+  }
+  const pat = arm.binder ? rid(arm.binder) : "_";
+  return `${pat} => ${block(arm.body)}`;
 }
 
 // ── Expressions ──────────────────────────────────────────────────────────────
@@ -510,6 +547,14 @@ function emitExpr(expr: HirExpr): string {
         .map((f) => `${rid(f.name)}: ${emitExpr(f.value)}`)
         .join(", ");
       return `${rid(expr.name)} { ${fields} }`;
+    }
+    case "enumVariant": {
+      // `AppError::Foo { f: v, … }` — a struct-variant construction (series 049).
+      const fields = expr.fields
+        .map((f) => `${rid(f.name)}: ${emitExpr(f.value)}`)
+        .join(", ");
+      const path = `${rid(expr.enumName)}::${rid(expr.variant)}`;
+      return fields.length > 0 ? `${path} { ${fields} }` : path;
     }
     case "call":
       return `${ridPath(expr.callee)}(${expr.args.map(emitArg).join(", ")})`;
@@ -649,8 +694,8 @@ function emitType(ty: RustType): string {
       return rid(ty.name);
     case "result":
       return `Result<${emitType(ty.ok)}, ${emitType(ty.err)}>`;
-    case "boxError":
-      return "Box<dyn std::error::Error>";
+    case "appError":
+      return "AppError";
     case "rc":
       return `Rc<RefCell<${emitType(ty.inner)}>>`;
     case "implIterator":

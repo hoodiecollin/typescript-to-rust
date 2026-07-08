@@ -1,13 +1,12 @@
 /**
- * Specs for custom error types → `Box<dyn Error>` (series 022). Drives the
- * public `emit(...)` entry and asserts the emitted shape: the error `struct` +
- * `Display`/`Debug`/`Error` impls, the `Box<dyn Error>` program error type, a
- * boxed custom `throw`, a boxed plain `throw` via `.into()`, and — critically —
- * that a program with no custom error class stays `E = String`. The cargo proof
- * lives in compiler.test.ts. IDs map to docs/work/022-custom-error-types/specs.md.
+ * Specs for custom error types → the whole-program `AppError` enum (series 049,
+ * superseding series 022's `Box<dyn Error>`). Drives the public `emit(...)` entry
+ * and asserts the emitted shape: the `#[derive(thiserror::Error, Debug)]` enum
+ * with a variant per custom class + the `Other` catch-all, the `AppError` program
+ * error type, an `AppError::Foo` custom `throw`, an `AppError::Other` plain
+ * `throw`, and — critically — that a program with no custom error class stays
+ * `E = String`. The cargo proof lives in error-enum.test.ts / compiler.test.ts.
  *
- * RED until `lowerErrorClass` + the program-error-type threading land (a
- * `class … extends Error` currently hits the generic inheritance rejection).
  * CE6 is a green control (no custom error → unchanged String behaviour).
  */
 
@@ -35,35 +34,37 @@ function lookup(id: number): number {
   return id * 2;
 }`;
 
-describe("errors: custom error types → Box<dyn Error>", () => {
-  test("CE1 a custom error class lowers to a struct implementing Error", () => {
+describe("errors: custom error types → AppError enum", () => {
+  test("CE1 a custom error class lowers to an AppError enum variant (thiserror, no hand-impls)", () => {
     const rust = compile(CUSTOM);
-    expect(rust).toContain("struct NotFoundError {");
-    expect(rust).toContain("impl std::error::Error for NotFoundError {}");
+    expect(rust).toContain("#[derive(thiserror::Error, Debug)]");
+    expect(rust).toContain("enum AppError {");
+    expect(rust).toContain("NotFoundError { message: String },");
+    expect(rust).toContain("Other { message: String },");
+    // thiserror derives Display/Error — no hand-written impls.
+    expect(rust).not.toContain("impl std::fmt::Display");
+    expect(rust).not.toContain("impl std::error::Error");
   });
 
-  test("CE2 it gets an associated `new` and a Display impl writing the message", () => {
+  test("CE2 each variant carries a #[error(\"{message}\")] Display attribute", () => {
     const rust = compile(CUSTOM);
-    expect(rust).toContain("fn new(message: String) -> NotFoundError {");
-    expect(rust).toContain("impl std::fmt::Display for NotFoundError");
-    expect(rust).toContain('write!(f, "{}", self.message)');
+    expect(rust).toContain('#[error("{message}")]');
   });
 
-  test("CE3 with a custom error present, a fallible fn's error type is Box<dyn Error>", () => {
+  test("CE3 with a custom error present, a fallible fn's error type is AppError", () => {
+    expect(compile(CUSTOM)).toContain("fn lookup(id: f64) -> Result<f64, AppError> {");
+    expect(compile(CUSTOM)).not.toContain("Box<dyn");
+  });
+
+  test("CE4 a custom throw constructs the enum variant directly (no Box)", () => {
     expect(compile(CUSTOM)).toContain(
-      "fn lookup(id: f64) -> Result<f64, Box<dyn std::error::Error>> {",
+      'return Err(AppError::NotFoundError { message: "no such id".to_string() });',
     );
   });
 
-  test("CE4 a custom throw boxes the constructed error", () => {
+  test("CE5 a plain throw in the same program constructs the Other variant", () => {
     expect(compile(CUSTOM)).toContain(
-      'return Err(Box::new(NotFoundError::new("no such id".to_string())));',
-    );
-  });
-
-  test("CE5 a plain throw in the same (boxed) program converts via `.into()`", () => {
-    expect(compile(CUSTOM)).toContain(
-      'return Err("zero reserved".to_string().into());',
+      'return Err(AppError::Other { message: "zero reserved".to_string() });',
     );
   });
 
@@ -72,15 +73,16 @@ describe("errors: custom error types → Box<dyn Error>", () => {
       `function half(n: number): number { if (n < 0) { throw new Error("neg"); } return n / 2; }`,
     );
     expect(rust).toContain("Result<f64, String>");
+    expect(rust).not.toContain("AppError");
     expect(rust).not.toContain("Box<dyn");
-    expect(rust).not.toContain(".into()");
+    expect(rust).not.toContain("thiserror");
   });
 });
 
 describe("errors: custom error types — deferred (fail-loud)", () => {
-  test("CEX1 an error class with extra members is rejected", () => {
+  test("CEX1 an error class with a method is rejected", () => {
     const src = `class E extends Error {
-  code: number;
+  code(): number { return 1; }
   constructor(message: string) {
     super(message);
   }

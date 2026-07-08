@@ -793,7 +793,7 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
   test("a custom error type propagates and prints the same (series 022)", async () => {
     // Success path (both runtimes agree); the boxed custom-error branch is
     // proven to compile at tier 1. A custom error class present makes the whole
-    // program's error type `Box<dyn Error>`.
+    // program's error type the synthesized `AppError` enum (series 049).
     const ts = [
       `class NotFoundError extends Error {`,
       `  constructor(message: string) {`,
@@ -816,8 +816,8 @@ describe("programs behave (tier 2: BEHAVES — differential)", () => {
     const tsStdout = new TextDecoder().decode(tsRun.stdout).trim();
 
     const rust = emit(parseSync("prog.ts", ts).program as unknown as Program);
-    expect(rust).toContain("impl std::error::Error for NotFoundError {}");
-    expect(rust).toContain("Result<f64, Box<dyn std::error::Error>>");
+    expect(rust).toContain("enum AppError {");
+    expect(rust).toContain("Result<f64, AppError>");
     const rustRun = await runRust(rust);
 
     expect(rustRun.ok).toBe(true);
