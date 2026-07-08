@@ -104,6 +104,23 @@ elements, so refinement leaves them alone and Rust infers `Vec<f64>`.
    method, or `const`-bound arrow fails loud, while explicit `: void` still lowers
    to `-> ()`.
 
+## Impl note — builtin by-construction carve-outs (found during impl)
+
+The gate fires only on `const`/`let`/`var`. Four builtin forms are exempt from the
+"untyped ⇒ fail loud" rule because the lowerer already assigns them a concrete
+type *by construction* (so no annotation is needed, and for `JSON.parse` none can
+even name the type) — rejecting them would regress shipped features:
+
+- a stored `Object.entries(…)` → `Vec<(String, V)>` (series 043b),
+- an untyped `JSON.parse(…)` → `serde_json::Value` (the deliberate 045c fallback),
+- an `<array>.find(…)` → `Option<T>` (series 042d),
+- a `using` / `await using` resource (its acquisition is typed by construction).
+
+Each has (or gets) a syntactic predicate (`isObjectEntriesCall`, `isJsonParseCall`,
+`isArrayFindCall`; `using` via `decl.kind`). The set is kept **minimal — only what
+ships** (per the derive-on-demand principle): other adapters (`.map`/`.filter`/…)
+bound to an untyped `const` still fail loud, matching the current test surface.
+
 ## Fail-loud residuals
 
 - **Empty / mixed / nested arrays** stay fail-loud: an empty array has no element

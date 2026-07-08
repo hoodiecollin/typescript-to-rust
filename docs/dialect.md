@@ -49,8 +49,17 @@ don't. Each row below quotes the message the compiler prints.
 ## Required (the positive rules)
 
 - **Explicit type annotations** on every variable, function parameter, and
-  function return type. Exception: a binding with a trivial literal initializer
-  whose type is unambiguous in one pass (e.g. `const n = 5`).
+  function return type. Exception: a binding whose initializer is a
+  statically-obvious literal — a scalar (`const n = 5`, `const s = "hi"`,
+  `const b = true`) or a **non-empty, homogeneous scalar-literal array**
+  (`const xs = [1, 2, 3]`, `["a", "b"]`, `[true, false]`) — may be left untyped
+  (series 046). Builtin forms the compiler types by construction are likewise
+  exempt: a stored `Object.entries(…)`, an untyped `JSON.parse(…)` (→ `Value`),
+  an `<array>.find(…)`, and a `using` resource. Everything else — a call to a
+  user function, arithmetic, `-5`, `null`/`undefined`, a bare identifier, a
+  member access, a template literal, an empty/mixed/nested array — must be
+  annotated. A **missing function/method return type** is likewise fail-loud
+  (it no longer defaults to `-> ()`); annotate `: void` for a unit return.
 - **Statically-known, closed object shapes** via `interface`, `type`, or `class`.
   Object literals must conform to a declared shape.
 - **No shared mutable aliasing that escapes what the ownership pass can prove
@@ -92,7 +101,7 @@ Nullability note: `T | undefined` and `T | null` lower to `Option<T>`. That is t
 | Uninitialized binding (`let x: T;` with no initializer) | Not yet | `uninitialized binding` |
 | Destructuring binding (`const {a} = …` / `const [a] = …` in a plain `let`/`const`) | Not yet | `destructuring binding` |
 | Parameter without a type annotation | Not yet | `parameter '<name>' without a type annotation` |
-| An untyped binding outside the trivial-literal exception | Not yet | (as above, per site) |
+| An untyped binding outside the obvious-literal exception (scalar or homogeneous scalar-literal array), excluding the builtin `Object.entries`/`JSON.parse`/`.find`/`using` forms | Not yet | `binding '<name>' without a type annotation` |
 
 > Array-destructuring `[k, v]` *is* supported in one place only: a `for-of` head
 > over `Object.entries(...)`. See [Control flow](#control-flow--loops).
@@ -105,6 +114,8 @@ Nullability note: `T | undefined` and `T | null` lower to `Option<T>`. That is t
 |---------|------|---------|
 | Anonymous function declaration (no name) | Not yet | generic `Unsupported <node>` |
 | Function without a body | Not yet | `function without a body` |
+| Function without a return-type annotation (was a silent `-> ()`) | Not yet | `function '<name>' without a return type annotation` |
+| Method without a return-type annotation | Not yet | `method '<name>' without a return type annotation` |
 | Top-level script statements alongside a user-defined `main()` | Not yet | `top-level statements alongside a user-defined main()` |
 
 ---
