@@ -329,17 +329,32 @@ Callback arrows (to `map`/`filter`/`reduce`/`sort`/`find`/`some`/`every`/`forEac
 must be non-async, have the exact arity the method expects, take plain-identifier
 parameters, and have an expression body or a single `return`.
 
+**Lambda lifting (series 048).** Every expression-bodied adapter callback is
+*lifted* to a named top-level `fn __cb_<method>_<n>` whose params are the arrow's
+own params plus its **read-only Copy free variables** (forwarded by value at a thin
+shim). The body is typed by a bounded typer over the numeric surface. `forEach` is
+the exception — it lowers to a `for` loop, so a mutable-accumulator body is fine.
+A **function value** (an annotated `(x: T) => U` parameter/field/return) lowers to
+a `fn`-pointer; a bare top-level fn or normalized arrow coerces to it
+(`apply(double, 5)`).
+
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `async` arrow callback | Not yet | `async arrow closure` |
 | Callback with the wrong parameter count | Not yet | `closure must take exactly <n> parameter(s)` |
 | Callback with a destructured/patterned parameter | Not yet | `closure parameter binding` |
 | Callback body that isn't an expression or a single `return` | Not yet | `closure body must be an expression or a single return` |
+| Mutable capture in a lifted callback (a free var it *assigns*) | Not yet | `mutable capture in a callback (lift to a named fn taking the state as an explicit param)` |
+| Lifted callback body outside the numeric surface | Not yet | `callback body too complex to lift (numeric surface only)` |
+| Lifted callback free var of unknown/non-Copy type | Not yet | `cannot lift callback: free variable '<name>' has unknown type` |
 | `async` `forEach` callback | Not yet | `async forEach closure` |
 | `forEach` callback not taking exactly one parameter | Not yet | `forEach closure must take exactly one parameter` |
 
-> A `let`/`var`-bound arrow, or an arrow used as a first-class value outside these
-> callback positions, falls through to the generic expression fallback (`Not yet`).
+> A **capturing** arrow used as a first-class value (it reads an outer local) has no
+> `fn`-pointer form → fail-loud; the user lifts it to a named fn taking the data as
+> an explicit param. A `let`/`var`-bound arrow, or any other value-position arrow
+> that is not a nameable non-capturing top-level fn, falls through to the generic
+> expression fallback (`Not yet`).
 
 ---
 
