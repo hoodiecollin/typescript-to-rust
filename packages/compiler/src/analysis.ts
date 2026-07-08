@@ -190,6 +190,55 @@ export interface ModuleAnalysis {
    * incremented once per lifted callback so two callbacks get distinct names.
    */
   liftCounter: number;
+  /**
+   * Class inheritance (series 053). Subclass name → its direct base class name
+   * (from `decl.superClass`). Drives the synthetic `base: A` embed and the
+   * multi-level `.base` hops for an inherited-field read.
+   */
+  superclass: Map<string, string>;
+  /**
+   * Per class, the field names owned by its ancestors (transitive). A `field`
+   * read `b.x` is classified own-vs-inherited against this set to decide whether
+   * to inject the `.base` hop(s).
+   */
+  inheritedFields: Map<string, Set<string>>;
+  /**
+   * Per subclass, the method names it redefines (vs. inheriting the trait
+   * default). Drives which methods appear in `impl IA for B` as overrides and
+   * which fall through to the default via a forwarder.
+   */
+  overrides: Map<string, Set<string>>;
+  /**
+   * Classes that are extended by some subclass — each needs a synthesized
+   * `trait IA` (series 053b). A leaf/never-extended class needs no trait.
+   */
+  baseClasses: Set<string>;
+  /**
+   * Shared/base field names read through a `dyn IA` position (series 053c),
+   * keyed by the base (trait-owning) class name. Gates on-demand accessor
+   * synthesis — a pure reuse+override program collects none.
+   */
+  dynFieldReads: Map<string, Set<string>>;
+  /**
+   * Per class, the field names it declares itself (series 053) — property
+   * definitions + `constructor(public x: T)` parameter properties. Used with
+   * `superclass` to count `.base` hops to the ancestor that owns a field.
+   */
+  ownClassFields: Map<string, Set<string>>;
+  /**
+   * The class currently being lowered (series 053a) — set transiently by
+   * `lowerMethod`/`lowerConstructor` so a `this.<field>` read can be classified
+   * own-vs-inherited (injecting the `.base` hop for an inherited field). Absent
+   * outside a class body.
+   */
+  currentClass?: string;
+  /**
+   * Bindings whose value is a `&dyn IA` / `Box<dyn IA>` element (series 053c),
+   * keyed by the binding/param name → the base (trait-owning) class name. A
+   * field read on such a binding routes through a trait accessor (`a.x()`), and
+   * a method call dispatches virtually. Populated during lowering.
+   */
+  dynBindings: Map<string, string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -333,9 +382,20 @@ function classifyParam(
 function analyzeFunction(
   fn: FunctionDeclaration,
   enums: ReadonlySet<string>,
+  extendedBases: ReadonlySet<string> = new Set(),
 ): FnInfo {
   const params = fn.params.map((p) => {
     const isCopy = isCopyType(p.typeAnnotation, enums);
+    // A base-typed param becomes `impl IA` (by value, series 053b/INH10), so it
+    // must be passed owned — force `move` regardless of read-only use.
+    if (isBaseTypedParam(p, extendedBases)) {
+      return {
+        name: p.name,
+        ownership: "move" as const,
+        isCopy: false,
+        optional: isOptionalParam(p),
+      };
+    }
     return {
       name: p.name,
       ownership: classifyParam(p.name, fn.body, isCopy),
@@ -344,6 +404,22 @@ function analyzeFunction(
     };
   });
   return { params };
+}
+
+/** Is a param annotated with an extended base class type (→ `impl IA`, 053b)? */
+function isBaseTypedParam(
+  p: { typeAnnotation?: unknown },
+  extendedBases: ReadonlySet<string>,
+): boolean {
+  const ann = (p.typeAnnotation as { typeAnnotation?: AnyNode } | undefined)
+    ?.typeAnnotation;
+  if (!ann || !isNode(ann) || ann.type !== "TSTypeReference") return false;
+  const ref = (ann as AnyNode).typeName;
+  return (
+    isNode(ref) &&
+    ref.type === "Identifier" &&
+    extendedBases.has(ref.name as string)
+  );
 }
 
 // ── Local mutability ─────────────────────────────────────────────────────────
@@ -707,13 +783,35 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     }
   }
 
+  // Pre-scan the extended base classes (series 053b) — a base-typed param is
+  // `impl IA` (by value), so its call-site ownership must be `move`, not a
+  // borrow. Needed before `analyzeFunction` classifies param ownership.
+  const extendedBases = new Set<string>();
+  {
+    const clsNames = new Set<string>();
+    for (const stmt of program.body) {
+      if (stmt.type === "ClassDeclaration" && !isErrorSubclass(stmt)) {
+        const id = (stmt as { id?: { name?: string } }).id;
+        if (id?.name) clsNames.add(id.name);
+      }
+    }
+    for (const stmt of program.body) {
+      if (stmt.type !== "ClassDeclaration" || isErrorSubclass(stmt)) continue;
+      const sup = (stmt as { superClass?: unknown }).superClass;
+      if (isNode(sup) && sup.type === "Identifier" && clsNames.has(sup.name as string)) {
+        extendedBases.add(sup.name as string);
+      }
+    }
+  }
+
   const fns = new Map<string, FnInfo>();
   const script: Statement[] = [];
 
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
-    if (named) fns.set(named.name, analyzeFunction(named.fn, enums));
-    else script.push(stmt);
+    if (named) {
+      fns.set(named.name, analyzeFunction(named.fn, enums, extendedBases));
+    } else script.push(stmt);
   }
 
   // Self-mutating methods (→ `&mut self`, and `mut` for their call-site receiver).
@@ -783,6 +881,79 @@ export function analyzeModule(program: Program): ModuleAnalysis {
       if (id?.name) classes.add(id.name);
     }
   }
+
+  // ── Class inheritance facts (series 053) ────────────────────────────────────
+  // `superclass`: subclass → its direct base (a plain `extends A`, not `extends
+  // Error`). `ownFields`: per class, the field names it declares (property
+  // definitions + `constructor(public x: T)` parameter properties). `ownMethods`:
+  // per class, its own method names.
+  const superclass = new Map<string, string>();
+  const ownFields = new Map<string, Set<string>>();
+  const ownMethods = new Map<string, Set<string>>();
+  for (const stmt of program.body) {
+    if (stmt.type !== "ClassDeclaration" || isErrorSubclass(stmt)) continue;
+    const decl = stmt as unknown as {
+      id?: { name?: string };
+      superClass?: unknown;
+      body?: { body?: AnyNode[] };
+    };
+    const name = decl.id?.name;
+    if (!name) continue;
+    const sup = decl.superClass;
+    if (isNode(sup) && sup.type === "Identifier") {
+      superclass.set(name, sup.name as string);
+    }
+    const fields = new Set<string>();
+    const methods = new Set<string>();
+    for (const m of decl.body?.body ?? []) {
+      if (m.type === "PropertyDefinition") {
+        const fn = identName((m as AnyNode).key);
+        if (fn) fields.add(fn);
+      } else if (m.type === "MethodDefinition") {
+        const mn = (m as AnyNode).kind;
+        if (mn === "constructor") {
+          const ctorParams =
+            ((m as AnyNode).value as AnyNode)?.params ?? [];
+          for (const p of ctorParams as AnyNode[]) {
+            if (p.type === "TSParameterProperty") {
+              const pn = identName((p as AnyNode).parameter);
+              if (pn) fields.add(pn);
+            }
+          }
+        } else if (mn === "method") {
+          const nm = identName((m as AnyNode).key);
+          if (nm) methods.add(nm);
+        }
+      }
+    }
+    ownFields.set(name, fields);
+    ownMethods.set(name, methods);
+  }
+  // `baseClasses`: every class named as some subclass's base. `inheritedFields`:
+  // transitive ancestor own-fields. `overrides`: methods a subclass redefines
+  // that an ancestor also declares (so they shadow the trait default).
+  const baseClasses = new Set<string>();
+  for (const base of superclass.values()) {
+    if (classes.has(base)) baseClasses.add(base);
+  }
+  const inheritedFields = new Map<string, Set<string>>();
+  const overrides = new Map<string, Set<string>>();
+  for (const cls of classes) {
+    const inh = new Set<string>();
+    const ovr = new Set<string>();
+    const own = ownMethods.get(cls) ?? new Set();
+    let cur = superclass.get(cls);
+    while (cur && classes.has(cur)) {
+      for (const f of ownFields.get(cur) ?? []) inh.add(f);
+      for (const m of own) {
+        if ((ownMethods.get(cur) ?? new Set()).has(m)) ovr.add(m);
+      }
+      cur = superclass.get(cur);
+    }
+    inheritedFields.set(cls, inh);
+    overrides.set(cls, ovr);
+  }
+  const dynFieldReads = new Map<string, Set<string>>();
 
   // Scopes carrying a leading `"use panic"` directive (series 028a). Detected
   // before fallibility so `analyzeFallible` can treat them as infallible.
@@ -875,6 +1046,13 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     bindingTypes: new Map(),
     liftedFns: [],
     liftCounter: 0,
+    superclass,
+    inheritedFields,
+    overrides,
+    baseClasses,
+    dynFieldReads,
+    dynBindings: new Map(),
+    ownClassFields: ownFields,
   };
 }
 

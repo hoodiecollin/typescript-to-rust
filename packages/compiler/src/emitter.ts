@@ -32,6 +32,7 @@ import type {
   HirModule,
   HirStmt,
   HirStruct,
+  HirTrait,
   RustType,
 } from "./hir";
 import { DialectError, UnsupportedError, lower } from "./lower";
@@ -211,7 +212,38 @@ function emitItem(
       return emitErrorEnum(item);
     case "enum":
       return emitEnum(item);
+    case "trait":
+      return emitTrait(item);
   }
+}
+
+/**
+ * A synthesized shared trait `IA` (series 053b): method **signatures** for the
+ * base class's public methods, plus (on demand, 053c) read-only accessor
+ * signatures for base fields read through a `dyn IA`. Every concrete class then
+ * provides *all* of these in its own `impl IA for Name` (the base supplies the
+ * real bodies, a subclass its overrides + forwarders + accessor bodies) — those
+ * are emitted next to the class in `emitClass`. Bodyless signatures keep `Self`
+ * data-free, so no default ever touches a field the impl might not have.
+ */
+function emitTrait(t: HirTrait): string {
+  const methods = t.methods.map((f) => indent(emitFnSig(f) + ";"));
+  const accessors = t.accessors.map((a) =>
+    indent(`fn ${rid(a.field)}(&self) -> &${emitType(a.ty)};`),
+  );
+  const body = [...accessors, ...methods].join("\n");
+  return `trait ${rid(t.name)} {\n${body}\n}`;
+}
+
+/** A function signature (no body) — `[async ]fn name(&self, …)[ -> R]`. */
+function emitFnSig(fn: HirFn): string {
+  const asyncKw = fn.isAsync ? "async " : "";
+  const self =
+    fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
+  const rest = fn.params.map((p) => `${rid(p.name)}: ${emitType(p.ty)}`);
+  const params = [...self, ...rest].join(", ");
+  const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
+  return `${asyncKw}fn ${rid(fn.name)}(${params})${ret}`;
 }
 
 /**
@@ -280,9 +312,34 @@ function emitClass(
     structs,
     usesJson,
   );
-  const fns = [c.ctor, ...c.methods].filter((f): f is HirFn => f !== null);
+  // Class inheritance (series 053): trait methods (an override or a forwarder,
+  // named in `overrides`) go in the `impl IA for Name` block, *not* the inherent
+  // `impl` — else a duplicate definition. The inherent impl keeps `new` + any
+  // non-trait method.
+  const inherent = c.methods.filter((m) => !c.overrides?.has(m.name));
+  const fns = [c.ctor, ...inherent].filter((f): f is HirFn => f !== null);
   const body = fns.map((f) => indent(emitFn(f))).join("\n");
   const parts = [`${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`];
+  // The `impl IA for Name` block carries the trait methods this class *provides*
+  // (its overrides + forwarders for non-overridden methods) plus any on-demand
+  // field accessors. A class that uses every trait default and reads no field
+  // polymorphically emits an empty `impl IA for Name {}` (inheriting defaults).
+  if (c.implTrait) {
+    const traitFns = c.methods
+      .filter((m) => c.overrides?.has(m.name))
+      .map((f) => indent(emitFn(f)));
+    const accessorFns = (c.accessors ?? []).map((a) =>
+      indent(
+        `fn ${rid(a.field)}(&self) -> &${emitType(a.ty)} { &${emitExpr(a.proj)} }`,
+      ),
+    );
+    const implBody = [...accessorFns, ...traitFns].join("\n");
+    parts.push(
+      implBody.length === 0
+        ? `impl ${rid(c.implTrait)} for ${rid(c.name)} {}`
+        : `impl ${rid(c.implTrait)} for ${rid(c.name)} {\n${implBody}\n}`,
+    );
+  }
   // A `[Symbol.dispose]` method → `impl Drop` (RAII for `using`, series 025).
   if (c.dispose) {
     const dropBody = c.dispose
@@ -589,6 +646,8 @@ function emitExpr(expr: HirExpr): string {
       return expr.value ? `Ok(${emitExpr(expr.value)})` : "Ok(())";
     case "try":
       return `${emitExpr(expr.expr)}?`;
+    case "boxNew":
+      return `Box::new(${emitExpr(expr.value)})`;
     case "await":
       return `${emitExpr(expr.expr)}.await`;
     case "iterMap":
@@ -707,5 +766,11 @@ function emitType(ty: RustType): string {
     }
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
+    case "dyn":
+      return `dyn ${rid(ty.trait)}`;
+    case "implTrait":
+      return `impl ${rid(ty.trait)}`;
+    case "box":
+      return `Box<${emitType(ty.inner)}>`;
   }
 }

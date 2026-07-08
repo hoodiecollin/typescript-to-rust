@@ -58,7 +58,16 @@ export function refineOwnership(module: HirModule): HirModule {
     } else if (item.kind === "class") {
       if (item.ctor) refineBody(item.ctor.params, item.ctor.body, structs);
       for (const method of item.methods) {
-        refineBody(method.params, method.body, structs);
+        refineBody(selfParams(method, item.name), method.body, structs);
+      }
+    } else if (item.kind === "trait") {
+      // Class inheritance (series 053): trait *default* bodies are ordinary
+      // method bodies over `&self`. `self`'s concrete type isn't known here (it
+      // varies per impl), so the receiver is left out of the env — a field read
+      // returned by value from a trait default is cloned via the `self` receiver
+      // typed as a borrow of an opaque struct (below, in `selfParams`).
+      for (const method of item.methods) {
+        refineBody(selfParams(method, item.name), method.body, structs);
       }
     }
   }
@@ -90,6 +99,30 @@ function isCloneableMovable(
     default:
       return false;
   }
+}
+
+/**
+ * A method's params with a synthetic leading `self` receiver (series 053/038),
+ * typed as a shared borrow of the class struct so a `return self.field` of a
+ * non-Copy field clones (move-out-of-borrow). `ownerName` is the class name for
+ * an inherent/impl method, or a trait name (`IAnimal`) for a trait default — for
+ * a trait the receiver struct is the base class (strip the leading `I`), whose
+ * fields drive the projection-clone decision.
+ */
+function selfParams(method: HirFn, ownerName: string): HirParam[] {
+  if (!method.recv) return method.params;
+  const structName = ownerName.startsWith("I")
+    ? ownerName.slice(1)
+    : ownerName;
+  const self: HirParam = {
+    name: "self",
+    ty: {
+      kind: "ref",
+      mut: method.recv === "refMut",
+      inner: { kind: "struct", name: structName },
+    },
+  };
+  return [self, ...method.params];
 }
 
 /** Wrap an expression in a `.clone()` method call. */

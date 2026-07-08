@@ -53,6 +53,8 @@ const BEHAVIORAL: ReadonlyArray<readonly [string, string]> = [
   ["05_interfaces/02_nested_struct", "3"],
   ["06_classes/02_multi_method", "24"],
   ["06_classes/03_getter_method", "212"],
+  ["06_classes/04_inherit_override", "...\nwoof\nRex"],
+  ["06_classes/05_inherit_dyn", "Rex\nwoof\nTom\nmeow"],
   ["07_async/02_multi_await", "3"],
   ["08_errors/04_error_enum", "6"],
   ["10_ownership/05_struct_borrow", "42"],

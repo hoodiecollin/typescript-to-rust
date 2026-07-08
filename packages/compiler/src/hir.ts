@@ -81,6 +81,21 @@ export type RustType =
    * lowers here; the pointer is `Copy`, so it is always passed by value.
    */
   | { kind: "fnPtr"; params: RustType[]; ret: RustType }
+  /**
+   * A trait object `dyn IA` (series 053c). Only ever valid behind a pointer —
+   * `&dyn IA` (a `ref`) or `Box<dyn IA>` (a `box`); it is the polymorphic /
+   * heterogeneous axis of class inheritance (the one place a vtable appears).
+   */
+  | { kind: "dyn"; trait: string }
+  /**
+   * `impl IA` (series 053b) — a monomorphic base-typed param, static dispatch,
+   * zero-cost. Preferred over `dyn` whenever a base-typed position is used with a
+   * single concrete subtype.
+   */
+  | { kind: "implTrait"; trait: string }
+  /** `Box<inner>` (series 053c) — an owned heap box; carries a `dyn IA` for a
+   * heterogeneous collection element (`Vec<Box<dyn IA>>`). */
+  | { kind: "box"; inner: RustType }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -165,6 +180,9 @@ export type HirExpr =
   | { kind: "ok"; value: HirExpr | null }
   /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */
   | { kind: "try"; expr: HirExpr }
+  /** `Box::new(value)` — a heterogeneous collection element upcast to `Box<dyn IA>`
+   * (series 053c). */
+  | { kind: "boxNew"; value: HirExpr }
   /** `expr.await` — suspend on a future (a call to an `async fn`) for its value. */
   | { kind: "await"; expr: HirExpr }
   /**
@@ -461,6 +479,39 @@ export interface HirClass {
    * `null` when the class is not disposable.
    */
   dispose?: HirStmt[] | null;
+  /**
+   * Class inheritance (series 053). When this class participates in an `extends`
+   * relationship (as a subclass or a base), it carries a synthetic `base: A`
+   * embed field (subclass only) plus the trait it implements (`implTrait`) and
+   * which of that trait's methods it provides itself vs. inherits as a default
+   * (`overrides`). `base` is prepended to `fields` so a struct literal reads
+   * cleanly; `implTrait`/`overrides` drive the emitted `impl IA for Name` block.
+   */
+  base?: { field: "base"; ty: RustType };
+  implTrait?: string;
+  overrides?: Set<string>;
+  /**
+   * The trait accessors this class must provide for shared/base fields read
+   * through a `dyn IA` (series 053c). Each maps a field name to the `&self`
+   * projection that reaches it (`self.name` on the base class, `self.base.name`
+   * on a subclass). Emitted as `fn <field>(&self) -> &Ty { <proj> }` in the
+   * `impl IA for Name` block. Empty/absent when no field is read polymorphically.
+   */
+  accessors?: { field: string; ty: RustType; proj: HirExpr }[];
+}
+
+/**
+ * A synthesized shared trait `IA` (series 053b) for a base class `A` that is
+ * extended. Carries `A`'s public methods as **default bodies** (`methods`),
+ * plus, on demand (series 053c), read-only accessor signatures for base fields
+ * read through a `dyn IA` (`accessors`). Each per-class `impl IA for Name`
+ * lives on the `HirClass`; the trait item holds only the shared surface.
+ */
+export interface HirTrait {
+  kind: "trait";
+  name: string;
+  methods: HirFn[];
+  accessors: { field: string; ty: RustType }[];
 }
 
 /**
@@ -492,7 +543,13 @@ export interface HirEnum {
 }
 
 /** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */
-export type HirItem = HirFn | HirStruct | HirClass | HirErrorEnum | HirEnum;
+export type HirItem =
+  | HirFn
+  | HirStruct
+  | HirClass
+  | HirErrorEnum
+  | HirEnum
+  | HirTrait;
 
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level

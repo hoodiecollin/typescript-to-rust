@@ -70,6 +70,7 @@ import type {
   HirParam,
   HirStmt,
   HirStruct,
+  HirTrait,
   MapBuildPart,
   RustType,
   SelfRecv,
@@ -230,6 +231,12 @@ export function lower(program: Program): HirModule {
   // as top-level items now, *before* the refine chain, so the passes below type
   // and refine them like any other fn.
   items.push(...analysis.liftedFns);
+
+  // Class inheritance (series 053b/c): synthesize the shared `trait IA` for each
+  // extended base and rewire each participating class's `impl IA` (overrides +
+  // forwarders + on-demand accessors). Runs after all bodies are lowered so
+  // `analysis.dynFieldReads` (populated by polymorphic field reads) is complete.
+  items.push(...synthesizeTraits(items, analysis));
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`, then the
@@ -400,6 +407,11 @@ function lowerFunction(
   const params = func.params.map((p, i) =>
     lowerParam(p, info?.params[i], analysis.structs),
   );
+  // Class inheritance (series 053b, INH10): a base-typed param is monomorphic —
+  // `impl IA` (static dispatch, zero-cost). Rewrites the param type and records
+  // it as a `dyn` binding so a `.method()` dispatches through the trait and a
+  // `.field` read routes through an accessor.
+  applyBaseParamTraits(params, analysis);
   // A missing return type used to default silently to `-> ()`; it now fails loud
   // (series 046c). An explicit `: void` annotation still lowers to `UNIT` via
   // `lowerType`, so genuinely unit-returning functions annotate `: void`.
@@ -1191,13 +1203,34 @@ function lowerClass(
   analysis: ModuleAnalysis,
 ): HirClass {
   if (!decl.id) throw new UnsupportedError({ type: "anonymous class" });
-  if (decl.superClass || (decl.implements && decl.implements.length > 0)) {
+  // `implements` / multiple inheritance stays fail-loud (INH16) — single-`extends`
+  // composition only.
+  if (decl.implements && decl.implements.length > 0) {
     throw new UnsupportedError({
-      type: "class inheritance (extends/implements)",
+      type: "class inheritance (implements / interface conformance)",
     });
   }
   const name = decl.id.name;
   const structs = analysis.structs;
+  // Class inheritance (series 053). A subclass `class B extends A` gains a
+  // synthetic `base: A` embed (prepended so `super(...)` reads first, like Rust
+  // field-init order). `A` must be a declared class (not `Error` — those are
+  // error subclasses handled elsewhere, and never reach here).
+  const baseName =
+    decl.superClass && decl.superClass.type === "Identifier"
+      ? (decl.superClass as Identifier).name
+      : analysis.superclass.get(name);
+  if (decl.superClass && decl.superClass.type !== "Identifier") {
+    throw new UnsupportedError({ type: "class extends a non-identifier base" });
+  }
+  if (baseName && !analysis.classes.has(baseName)) {
+    throw new UnsupportedError({
+      type: `class extends '${baseName}' which is not a declared class`,
+    });
+  }
+  const base = baseName
+    ? { field: "base" as const, ty: { kind: "struct" as const, name: baseName } }
+    : undefined;
 
   const fields = decl.body.body
     .filter((m): m is PropertyDefinition => m.type === "PropertyDefinition")
@@ -1238,9 +1271,19 @@ function lowerClass(
     }
   }
 
+  // Class inheritance (series 053): the synthetic `base: A` embed is *prepended*
+  // to the field list, so the struct literal, the struct definition, and the
+  // derive walk all see it first (Rust field-init order, and `super(...)` runs
+  // before own-field init).
+  if (base) fields.unshift({ name: base.field, ty: base.ty });
+
   let ctor: HirFn | null = null;
   let dispose: HirStmt[] | null = null;
   const methods: HirFn[] = [];
+  // Class inheritance (series 053a): mark the class under lowering so a
+  // `this.<field>` read can be classified own-vs-inherited (`.base` hop).
+  const prevClass = analysis.currentClass;
+  analysis.currentClass = name;
   for (const member of decl.body.body) {
     if (member.type !== "MethodDefinition") continue;
     // A `[Symbol.dispose]() { … }` method → the class's `Drop` impl (series 025).
@@ -1259,13 +1302,14 @@ function lowerClass(
       throw new UnsupportedError({ type: "static/computed class method" });
     }
     if (member.kind === "constructor") {
-      ctor = lowerConstructor(member.value, name, fields, analysis);
+      ctor = lowerConstructor(member.value, name, fields, analysis, baseName);
     } else if (member.kind === "method") {
       methods.push(lowerMethod(member, name, analysis));
     } else {
       throw new UnsupportedError({ type: `class ${member.kind} accessor` });
     }
   }
+  analysis.currentClass = prevClass;
   if (!ctor) {
     throw new UnsupportedError({
       type: "class without an explicit constructor",
@@ -1274,7 +1318,217 @@ function lowerClass(
   // Throwing / `?`-propagation inside methods and constructors is supported
   // (series 023): the fallibility fixpoint types the method/ctor as `Result` and
   // `?`-propagates fallible method/`new` calls.
-  return { kind: "class", name, fields, ctor, methods, dispose };
+  //
+  // Class inheritance (series 053b): a class that participates in an `extends`
+  // relationship — either a subclass (`baseName` set) or a base that is itself
+  // extended (in `analysis.baseClasses`) — implements the shared trait `I<Root>`
+  // (named after the root base). `overrides` names the trait methods this class
+  // provides itself; the rest fall through to the trait default (via a
+  // forwarder synthesized in the emitter for a subclass, or the default itself
+  // for the base). Accessors (053c) are attached later in `lower()` once the
+  // module's `dynFieldReads` are known.
+  const inChain = !!baseName || analysis.baseClasses.has(name);
+  if (!inChain) {
+    return { kind: "class", name, fields, ctor, methods, dispose };
+  }
+  const root = rootBaseOf(name, analysis);
+  const implTrait = traitNameOf(root);
+  const overrides = analysis.overrides.get(name) ?? new Set<string>();
+  return {
+    kind: "class",
+    name,
+    fields,
+    ctor,
+    methods,
+    dispose,
+    base,
+    implTrait,
+    overrides,
+  };
+}
+
+/** The trait name synthesized for a base class `A` — `IA` (design §Trait). */
+function traitNameOf(baseName: string): string {
+  return `I${baseName}`;
+}
+
+/**
+ * Rewrite base-typed params to `impl IA` (series 053b, INH10) and record each as
+ * a `dyn` binding, so a `.method()` in the body dispatches through the trait and
+ * a base-`.field` read routes through an accessor. A param whose (possibly
+ * borrowed) type names an extended base class is monomorphic static dispatch.
+ */
+function applyBaseParamTraits(
+  params: HirParam[],
+  analysis: ModuleAnalysis,
+): void {
+  for (const p of params) {
+    const inner = p.ty.kind === "ref" ? p.ty.inner : p.ty;
+    if (inner.kind === "struct" && analysis.baseClasses.has(inner.name)) {
+      const base = inner.name;
+      p.ty = { kind: "implTrait", trait: traitNameOf(base) };
+      analysis.dynBindings.set(p.name, base);
+    }
+  }
+}
+
+/**
+ * Class inheritance trait synthesis (series 053b/c). For each extended base
+ * (a root of an `extends` chain), build the shared `trait IA` from the base's
+ * public methods (as default bodies) plus on-demand accessors for base fields
+ * read through a `dyn IA` (`analysis.dynFieldReads`). Rewire each participating
+ * `HirClass`'s `impl IA`:
+ *   - the trait-owning **base** moves its methods into the trait defaults and
+ *     keeps an empty `impl IA for Base {}` (uses every default);
+ *   - a **subclass** provides its overrides directly and a *forwarder*
+ *     `fn m(&self){ self.base.m() }` for every non-overridden trait method, plus
+ *     an accessor `fn x(&self) -> &T { &self.base.x }` for each polymorphic
+ *     field read.
+ * Returns the synthesized `HirTrait` items.
+ */
+function synthesizeTraits(
+  items: HirItem[],
+  analysis: ModuleAnalysis,
+): HirTrait[] {
+  const classByName = new Map<string, HirClass>();
+  for (const it of items) {
+    if (it.kind === "class") classByName.set(it.name, it);
+  }
+  const traits: HirTrait[] = [];
+  for (const root of analysis.baseClasses) {
+    const base = classByName.get(root);
+    if (!base) continue;
+    const traitName = traitNameOf(root);
+    // Trait surface: the base's own public methods (their bodies become the
+    // trait defaults). Subclasses may override these; never add new methods.
+    const traitMethods = base.methods;
+    const traitMethodNames = new Set(traitMethods.map((m) => m.name));
+    // Accessors: base fields read through a `dyn IA`. Each maps to the projection
+    // reaching the field on that class (`self.x` on the base, `self.base.x` on a
+    // subclass). The trait carries only the signature.
+    const dynFields = [...(analysis.dynFieldReads.get(root) ?? [])];
+    const accessorSigs = dynFields
+      .map((field) => {
+        const f = base.fields.find((bf) => bf.name === field);
+        return f ? { field, ty: f.ty } : null;
+      })
+      .filter((a): a is { field: string; ty: RustType } => a !== null);
+    traits.push({
+      kind: "trait",
+      name: traitName,
+      methods: traitMethods,
+      accessors: accessorSigs,
+    });
+
+    // Rewire every class in this chain (the base + its transitive subclasses).
+    for (const c of classByName.values()) {
+      if (rootBaseOf(c.name, analysis) !== root) continue;
+      const isBase = c.name === root;
+      const overrides = new Set<string>();
+      if (isBase) {
+        // The base supplies the real bodies for every trait method — mark them
+        // all as `overrides` so they land in `impl IA for Base` (not the inherent
+        // impl). The trait itself declares only signatures.
+        for (const m of c.methods) overrides.add(m.name);
+        c.overrides = overrides;
+      } else {
+        // A subclass: its own methods that match a trait method are overrides.
+        const forwarders: HirFn[] = [];
+        for (const m of c.methods) {
+          if (traitMethodNames.has(m.name)) overrides.add(m.name);
+        }
+        // Forward every non-overridden trait method to the embedded base.
+        for (const tm of traitMethods) {
+          if (overrides.has(tm.name)) continue;
+          overrides.add(tm.name);
+          forwarders.push(makeForwarder(tm));
+        }
+        c.methods = [...c.methods, ...forwarders];
+        c.overrides = overrides;
+      }
+      // Accessors: the projection to the field on *this* class. On the base it
+      // is `self.x`; on a subclass it hops through `.base` to the owner.
+      if (accessorSigs.length > 0) {
+        c.accessors = accessorSigs.map(({ field, ty }) => ({
+          field,
+          ty,
+          proj: accessorProjection(c.name, field, analysis),
+        }));
+      }
+    }
+  }
+  return traits;
+}
+
+/** A forwarder trait method `fn m(&self, …) -> R { self.base.m(…) }` (053b). */
+function makeForwarder(tm: HirFn): HirFn {
+  return {
+    kind: "fn",
+    name: tm.name,
+    isAsync: tm.isAsync,
+    params: tm.params,
+    ret: tm.ret,
+    recv: tm.recv ?? "ref",
+    body: [
+      {
+        kind: "return",
+        value: {
+          kind: "method",
+          receiver: {
+            kind: "field",
+            object: { kind: "ident", name: "self" },
+            name: "base",
+          },
+          name: tm.name,
+          args: tm.params.map((p) => ({ kind: "ident", name: p.name })),
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * Is a base-typed array literal *heterogeneous* (series 053c)? True when it
+ * holds a `new C(...)` whose class `C` is a *subclass* of the base (a class name
+ * ≠ the base). A literal of only base instances stays a homogeneous `Vec<A>`.
+ */
+function isHeterogeneous(
+  arr: ArrayExpression,
+  base: string,
+  analysis: ModuleAnalysis,
+): boolean {
+  return arr.elements.some((e) => {
+    if (!e || e.type !== "NewExpression") return false;
+    const callee = (e as NewExpression).callee;
+    if (callee.type !== "Identifier") return false;
+    const name = (callee as Identifier).name;
+    return name !== base && analysis.classes.has(name);
+  });
+}
+
+/** The `&self` projection reaching `field` on `cls` — `self.x` or `self.base.x` … */
+function accessorProjection(
+  cls: string,
+  field: string,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const hops = baseHopsToField(cls, field, analysis);
+  let obj: HirExpr = { kind: "ident", name: "self" };
+  for (let i = 0; i < hops; i++) {
+    obj = { kind: "field", object: obj, name: "base" };
+  }
+  return { kind: "field", object: obj, name: field };
+}
+
+/** The root (top-most) base of a class in its `extends` chain (itself if none). */
+function rootBaseOf(name: string, analysis: ModuleAnalysis): string {
+  let cur = name;
+  let up = analysis.superclass.get(cur);
+  while (up && analysis.classes.has(up)) {
+    cur = up;
+    up = analysis.superclass.get(cur);
+  }
+  return cur;
 }
 
 /** Is this a `[Symbol.dispose]() { … }` method (→ the class's `Drop` impl)? */
@@ -1303,6 +1557,7 @@ function lowerConstructor(
   className: string,
   fields: { name: string; ty: RustType }[],
   analysis: ModuleAnalysis,
+  baseName?: string,
 ): HirFn {
   const structs = analysis.structs;
   // A parameter property (`public x: T`) both declares a field (added in
@@ -1327,7 +1582,25 @@ function lowerConstructor(
   // statement is a *guard* (`if (…) throw …`), allowed only in a fallible ctor
   // (which returns `Result`), emitted as leading statements before the return.
   const leading: HirStmt[] = [];
+  let sawSuper = false;
   for (const stmt of fn.body.body) {
+    // Class inheritance (series 053a): `super(args)` in a subclass constructor
+    // initializes the synthetic `base: A` embed via `A::new(args)`.
+    const superCall = constructorSuperCall(stmt, analysis);
+    if (superCall) {
+      if (!baseName) {
+        throw new UnsupportedError({
+          type: "`super(...)` in a class with no base (extends) clause",
+        });
+      }
+      sawSuper = true;
+      assigned.set("base", {
+        kind: "call",
+        callee: `${baseName}::new`,
+        args: superCall.map((expr) => ({ borrow: "owned", expr })),
+      });
+      continue;
+    }
     const init = constructorFieldInit(stmt, analysis);
     if (init) {
       assigned.set(init.field, init.value);
@@ -1339,6 +1612,13 @@ function lowerConstructor(
       });
     }
     leading.push(...lowerStatement(stmt, analysis, `${className}.constructor`));
+  }
+  // A subclass constructor with no `super(...)` would leave `base` uninitialized
+  // — struct-literal totality (INH6). Fail loud.
+  if (baseName && !sawSuper) {
+    throw new UnsupportedError({
+      type: "subclass constructor without a `super(...)` call (base field uninitialized)",
+    });
   }
   if (assigned.size !== fields.length) {
     throw new UnsupportedError({
@@ -1383,6 +1663,22 @@ function lowerConstructor(
     ret: { kind: "struct", name: className },
     body: [{ kind: "return", value: structLit }],
   };
+}
+
+/**
+ * A constructor statement `super(args);` — the lowered argument expressions, or
+ * null if the statement is not a bare `super(...)` call (series 053a).
+ */
+function constructorSuperCall(
+  stmt: Statement,
+  analysis: ModuleAnalysis,
+): HirExpr[] | null {
+  if (stmt.type !== "ExpressionStatement") return null;
+  const e = (stmt as ExpressionStatement).expression;
+  if (e.type !== "CallExpression") return null;
+  const call = e as CallExpression;
+  if (call.callee.type !== "Super") return null;
+  return call.arguments.map((a) => lowerExpr(a as Expression, analysis));
 }
 
 /** A constructor statement `this.<field> = <expr>;`, or null if it is anything else. */
@@ -1455,6 +1751,8 @@ function lowerMethod(
   }
   const structs = analysis.structs;
   const params = fn.params.map((p) => lowerParam(p, undefined, structs));
+  // Class inheritance (series 053b, INH10): a base-typed method param → `impl IA`.
+  applyBaseParamTraits(params, analysis);
   // A missing return type fails loud (series 046c); an explicit `: void` still
   // lowers to `UNIT`.
   if (!fn.returnType) {
@@ -1863,6 +2161,19 @@ function lowerForOf(
         name: "iter",
         args: [],
       };
+  // Class inheritance (series 053c): iterating a `Vec<Box<dyn IA>>` binds each
+  // element as a `&Box<dyn IA>` — record the loop binding as a `dyn` binding so
+  // a `.field` read inside routes through a trait accessor and `.m()` dispatches
+  // virtually. Set before lowering the body.
+  if (
+    stmt.right.type === "Identifier" &&
+    analysis.dynBindings.has((stmt.right as Identifier).name)
+  ) {
+    const base = analysis.dynBindings.get(
+      (stmt.right as Identifier).name,
+    ) as string;
+    analysis.dynBindings.set(decl.id.name, base);
+  }
   return {
     kind: "forIn",
     pat: decl.id.name,
@@ -2072,11 +2383,30 @@ function lowerVarDecl(
     // Track an `Object.entries(...)` binding so `es[i][0]`/`es[i][1]` can lower to
     // tuple field access (series 043).
     if (isObjectEntriesCall(d.init)) analysis.entriesBindings.add(d.id.name);
+    // Class inheritance (series 053c): a heterogeneous base-typed array binding
+    // is `Vec<Box<dyn IA>>`. Rewrite its declared type and record it as a `dyn`
+    // binding so a later `.field` read routes through a trait accessor and a
+    // `for-of` element inherits the polymorphic type.
+    let letTy = ty;
+    if (
+      ty?.kind === "vec" &&
+      ty.elem.kind === "struct" &&
+      analysis.baseClasses.has(ty.elem.name) &&
+      d.init.type === "ArrayExpression" &&
+      isHeterogeneous(d.init as ArrayExpression, ty.elem.name, analysis)
+    ) {
+      const base = ty.elem.name;
+      letTy = {
+        kind: "vec",
+        elem: { kind: "box", inner: { kind: "dyn", trait: traitNameOf(base) } },
+      };
+      analysis.dynBindings.set(d.id.name, base);
+    }
     return {
       kind: "let",
       name: d.id.name,
       mut: mutable?.has(d.id.name) ?? false,
-      ty,
+      ty: letTy,
       init,
     };
   });
@@ -2191,6 +2521,23 @@ function lowerTyped(
     return lowerHashMapLiteral(obj, analysis);
   }
   if (ty?.kind === "vec" && expr.type === "ArrayExpression") {
+    // Class inheritance (series 053c): a base-typed array holding *different*
+    // subtypes is heterogeneous → `Vec<Box<dyn IA>>`; each element is upcast
+    // with `Box::new(...)`. Detected when the elem type is an extended base and
+    // the literal's `new` elements name a subclass (a class ≠ the base).
+    if (
+      ty.elem.kind === "struct" &&
+      analysis.baseClasses.has(ty.elem.name) &&
+      isHeterogeneous(expr as ArrayExpression, ty.elem.name, analysis)
+    ) {
+      return {
+        kind: "array",
+        elements: (expr as ArrayExpression).elements.map((e) => ({
+          kind: "boxNew",
+          value: lowerExpr(e, analysis),
+        })),
+      };
+    }
     return {
       kind: "array",
       elements: (expr as ArrayExpression).elements.map((e) =>
@@ -2622,6 +2969,18 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // Class inheritance (series 053a): `super.m(args)` in a subclass method →
+    // `self.base.m(args)` (dispatch the base's method on the embedded base). The
+    // base's method is a trait default carrying its real body, so this composes
+    // with an override calling `super`.
+    if (m.object.type === "Super") {
+      return {
+        kind: "method",
+        receiver: { kind: "field", object: { kind: "ident", name: "self" }, name: "base" },
+        name: methodName,
+        args: call.arguments.map((a) => lowerExpr(a, analysis)),
+      };
+    }
     // `Object.keys(m)` / `Object.values(m)` are static calls on the global
     // `Object` (series 041), not a method on a value — handle before the
     // value-method routing. `Object.<anything else>` is fail-loud.
@@ -3507,6 +3866,40 @@ function lowerMember(
         segments: [(member.object as Identifier).name, prop],
       };
     }
+    // Class inheritance (series 053c): a field read through a `dyn IA` element
+    // (a `Box<dyn IA>`/`&dyn IA` binding) routes through a trait accessor
+    // `a.x()` — a trait holds no data. A field the base does not declare is
+    // subclass-only → a downcast, fail-loud (deferred to #17).
+    const dynBase = dynBaseOf(member.object, analysis);
+    if (dynBase) {
+      const root = dynBaseRoot(dynBase, analysis);
+      if (!fieldOwner(dynBase, prop, analysis)) {
+        throw new UnsupportedError({
+          type: `field '${prop}' read through a 'dyn ${traitNameOf(root)}' is not a shared/base field (downcast — deferred to #17)`,
+        });
+      }
+      recordDynFieldRead(root, prop, analysis);
+      return {
+        kind: "method",
+        receiver: lowerExpr(member.object, analysis),
+        name: prop,
+        args: [],
+      };
+    }
+    // Otherwise classify the field read own-vs-inherited (053a): `this` → the
+    // class under lowering; an identifier binding → its `bindingTypes` struct.
+    // An inherited field hops through `.base`.
+    const cls = receiverClass(member.object, analysis);
+    if (cls) {
+      const hops = baseHopsToField(cls, prop, analysis);
+      if (hops > 0) {
+        let object: HirExpr = lowerExpr(member.object, analysis);
+        for (let i = 0; i < hops; i++) {
+          object = { kind: "field", object, name: "base" };
+        }
+        return { kind: "field", object, name: prop };
+      }
+    }
     return {
       kind: "field",
       object: lowerExpr(member.object, analysis),
@@ -3514,6 +3907,88 @@ function lowerMember(
     };
   }
   throw new UnsupportedError(member);
+}
+
+/**
+ * The class of a member-access receiver, or null (series 053). `this` resolves
+ * to the class under lowering; an identifier binding resolves via
+ * `bindingTypes` (a `struct` type that names a declared class).
+ */
+function receiverClass(
+  object: Expression,
+  analysis: ModuleAnalysis,
+): string | null {
+  if (object.type === "ThisExpression") return analysis.currentClass ?? null;
+  if (object.type === "Identifier") {
+    const t = analysis.bindingTypes.get((object as Identifier).name);
+    if (t && t.kind === "struct" && analysis.classes.has(t.name)) return t.name;
+  }
+  return null;
+}
+
+/** The base (trait-owning) class a `dyn`/`Box<dyn>` binding element carries, or null. */
+function dynBaseOf(object: Expression, analysis: ModuleAnalysis): string | null {
+  if (object.type === "Identifier") {
+    return analysis.dynBindings.get((object as Identifier).name) ?? null;
+  }
+  return null;
+}
+
+/** The root (trait-owning) base of a class chain (itself if none) — 053c accessors. */
+function dynBaseRoot(name: string, analysis: ModuleAnalysis): string {
+  return rootBaseOf(name, analysis);
+}
+
+/**
+ * Number of `.base` hops from a class to the ancestor that *declares* `field`
+ * (series 053a): 0 if the field is the class's own, else the depth of the
+ * declaring ancestor. Undeclared fields hop 0 (a plain read — cargo catches a
+ * genuine typo).
+ */
+function baseHopsToField(
+  cls: string,
+  field: string,
+  analysis: ModuleAnalysis,
+): number {
+  const inherited = analysis.inheritedFields.get(cls);
+  if (!inherited || !inherited.has(field)) return 0;
+  let hops = 0;
+  let cur: string | undefined = cls;
+  while (cur) {
+    const own = analysis.ownClassFields.get(cur);
+    if (own?.has(field)) return hops;
+    cur = analysis.superclass.get(cur);
+    hops++;
+  }
+  return hops;
+}
+
+/** The ancestor (self or above) that declares `field`, or null (053c gating). */
+function fieldOwner(
+  cls: string,
+  field: string,
+  analysis: ModuleAnalysis,
+): string | null {
+  let cur: string | undefined = cls;
+  while (cur) {
+    if (analysis.ownClassFields.get(cur)?.has(field)) return cur;
+    cur = analysis.superclass.get(cur);
+  }
+  return null;
+}
+
+/** Record a base-field read through a `dyn` (gates accessor synthesis, 053c). */
+function recordDynFieldRead(
+  base: string,
+  field: string,
+  analysis: ModuleAnalysis,
+): void {
+  let set = analysis.dynFieldReads.get(base);
+  if (!set) {
+    set = new Set();
+    analysis.dynFieldReads.set(base, set);
+  }
+  set.add(field);
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
