@@ -254,6 +254,16 @@ The pure/total emitter's exhaustiveness switch forces `emitType(appError)`,
 - **Storing an `AppError` as a first-class value, error combinators
   (`.map_err`/`.context`), `anyhow`** — out.
 
+## Impl note — cold-cache thundering herd (2026-07-08)
+
+Adding `thiserror` to the scratch manifest made the **first** `bun run test`
+after the change show ~80 transient failures in *unrelated* cargo fixtures — the
+new crate compiling once under parallel-cargo lock contention, not a regression.
+The **warm re-run is 493/0**. Judge on the re-run. #15 will hit the same when it
+adds `futures`. (ERR19 was also adjusted: the plain-throw differential uses
+`throw "lit"` rather than `throw new Error(msg)`, since Bun renders an `Error`
+object with a full stack trace that can't match our message-only Display.)
+
 ## Verification
 
 - **Unit (cargo-free, tier-1 COMPILES):** `emit(…)` asserts the enum shape,

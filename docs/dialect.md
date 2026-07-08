@@ -219,30 +219,58 @@ Supported: `if`, `while`, C-style `for`, `for-of`, `switch`, `break`, `continue`
 
 ## throw / try / catch
 
-Only two throw forms are accepted: `throw new <ErrorClass>(message)` and
-`throw "string literal"`. Errors propagate as `Result<T, String>` + `?`.
+Only two throw forms are accepted: `throw new <ErrorClass>(message, …fields)`
+and `throw "string literal"`. With **no** custom error class declared, errors
+propagate as `Result<T, String>` + `?`. The moment any `class X extends Error`
+is declared, the whole program's error type becomes the synthesized `AppError`
+enum (series 049 — see *Custom error classes* below), and both a `throw new
+Error(msg)` and a `throw "lit"` construct the `AppError::Other { message }`
+catch-all variant.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `throw new <expr>(...)` where the callee isn't a plain identifier | Not yet | `throw of a non-identifier constructor` |
 | `throw new <Name>(...)` where `<Name>` is not a built-in error class nor a declared `class X extends Error` | Not yet | `throw of an unknown error class (declare it as `class X extends Error`)` |
-| `throw new <Error>(...)` with ≠ 1 argument | Not yet | `throw new <Error>() must have exactly one message argument` |
+| `throw new Error(...)` (built-in) with ≠ 1 argument | Not yet | `throw new Error() must have exactly one message argument` |
+| `throw new <CustomClass>(...)` with the wrong field-argument count | Not yet | `throw new <Class>() takes a message plus N field argument(s)` |
 | `throw <expr>` that is neither `new Error(...)` nor a string literal (variables, numbers, objects) | Not yet | `throw of a non-Error, non-string-literal value` |
 | `try` without a `catch` handler (`try`/`finally` only) | Not yet | `try/finally without a catch handler (deferred)` |
 | `return`/`break`/`continue` escaping a `try`/`catch` (value-yielding try/catch) | Not yet | `return/break/continue inside try/catch (value-yielding try/catch: deferred)` |
 | Re-throw (or nested `try`) inside `catch` alongside a `finally` | Not yet | `re-throw inside catch alongside a finally (deferred)` |
 
-### Custom error classes
+### The `AppError` enum + `instanceof` catch discrimination (series 049)
 
-The only accepted shape is `class X extends Error { constructor(message: string) { super(message); } }`.
+A custom `class X extends Error` becomes a **struct variant** of one whole-program
+`#[derive(thiserror::Error, Debug)] enum AppError` — `message: String` first, then
+its declared typed fields — alongside a fixed `Other { message: String }`
+catch-all. thiserror derives `Display` / `std::error::Error`; the `#[error(...)]`
+is **`#[error("{message}")]`** for every variant (**option A**): Display shows only
+the message, mirroring JS `String(err)` / `console.log(err.message)` — a variant's
+extra fields stay first-class in `match` but are *not* rendered by Display. `From<String>`/`From<&str>` impls construct `Other` so a `String` composes into the
+enum via `.into()` / `?`.
+
+A `catch` whose body is a clean `if (e instanceof Foo) … else if (e instanceof
+Bar) … [else …]` ladder lowers to a native exhaustive `match` over the owned bound
+error (no `downcast_ref`); a branch reading `e.field` binds `field` owned. A ladder
+with **no trailing `else`** gets an appended `_ => {}` — **JS parity**: a
+`try`/`catch` whose ladder matches nothing silently completes (the non-matching
+error is swallowed).
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | Anonymous error class | Not yet | `anonymous error class` |
-| Error class with any member beyond the constructor (fields, extra methods) | Not yet | `custom error class with extra members (only { message } is supported)` |
+| Error class with a method / getter / setter (non-data member) | Not yet | `custom error class with a method/getter (only typed data fields are supported)` |
 | Error class with ≠ 1 constructor | Not yet | `custom error class must have exactly one constructor` |
-| Constructor with ≠ 1 parameter | Not yet | `custom error class constructor must take exactly one message param` |
-| Constructor body that isn't exactly `super(message)` | Not yet | `custom error class constructor body must be `super(message)`` |
+| Constructor params not `(message, …fields)` 1:1 with the declared fields | Not yet | `custom error class constructor params must be (message, …fields) 1:1` |
+| Constructor param out of field order | Not yet | `error-class constructor param '<p>' must match field '<f>' (reordering unsupported)` |
+| Constructor body not `super(message);` then one identity `this.f = f;` per field | Not yet | `error-class constructor body must be `super(message);` then one `this.f = f;` per field` |
+| Computed / defaulted / reordered field init (`this.f = f.trim()`) | Not yet | `error-class constructor must assign `this.<f> = <f>;` (computed/defaulted/reordered init unsupported)` |
+| `e instanceof <BuiltinError>` in a catch (built-in throws collapse into `Other`) | Not yet | ``instanceof <Class>` in a catch — built-in error throws collapse into Other (no variant to match)`` |
+
+A non-`instanceof` catch (`e.message === …`, property tests) keeps the opaque
+Display bind (`if let Err(e) = … { … }`, no `match`); a per-branch-*returning*
+discriminating catch is still the value-yielding-try/catch deferral (rejected by
+the escaping-`return` rule above — #16).
 
 ---
 
