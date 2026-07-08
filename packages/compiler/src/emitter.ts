@@ -547,9 +547,9 @@ function emitExpr(expr: HirExpr): string {
     case "await":
       return `${emitExpr(expr.expr)}.await`;
     case "iterMap":
-      return `${emitExpr(expr.receiver)}.iter().map(|&${rid(expr.param)}| ${emitExpr(expr.body)}).collect::<Vec<_>>()`;
+      return `${emitExpr(expr.receiver)}.iter().map(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
     case "iterFilter":
-      return `${emitExpr(expr.receiver)}.iter().filter(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied().collect::<Vec<_>>()`;
+      return `${emitExpr(expr.receiver)}.iter().filter(|${rid(expr.elemParam)}| ${expr.cbName}(**${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).copied().collect::<Vec<_>>()`;
     case "objectKeys":
       return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
     case "objectValues":
@@ -568,17 +568,17 @@ function emitExpr(expr: HirExpr): string {
       return `{ let mut __o = ${seed}; ${steps.join(" ")} __o }`;
     }
     case "iterFind":
-      return `${emitExpr(expr.receiver)}.iter().find(|&&${rid(expr.param)}| ${emitExpr(expr.body)}).copied()`;
+      return `${emitExpr(expr.receiver)}.iter().find(|${rid(expr.elemParam)}| ${expr.cbName}(**${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).copied()`;
     case "iterAny":
-      return `${emitExpr(expr.receiver)}.iter().any(|&${rid(expr.param)}| ${emitExpr(expr.body)})`;
+      return `${emitExpr(expr.receiver)}.iter().any(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterAll":
-      return `${emitExpr(expr.receiver)}.iter().all(|&${rid(expr.param)}| ${emitExpr(expr.body)})`;
+      return `${emitExpr(expr.receiver)}.iter().all(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterReduce":
-      return `${emitExpr(expr.receiver)}.iter().fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, &${rid(expr.elem)}| ${emitExpr(expr.body)})`;
+      return `${emitExpr(expr.receiver)}.iter().fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, *${rid(expr.elem)}${emitForwarded(expr.forwarded)}))`;
     case "iterSortDefault":
       return `tslib::array::sort_default(&mut ${emitExpr(expr.receiver)})`;
     case "iterSortBy":
-      return `tslib::array::sort_by(&mut ${emitExpr(expr.receiver)}, |${rid(expr.a)}, ${rid(expr.b)}| ${emitExpr(expr.body)})`;
+      return `tslib::array::sort_by(&mut ${emitExpr(expr.receiver)}, |${rid(expr.a)}, ${rid(expr.b)}| ${expr.cbName}(${rid(expr.a)}, ${rid(expr.b)}${emitForwarded(expr.forwarded)}))`;
     case "rcNew":
       return `Rc::new(RefCell::new(${emitExpr(expr.inner)}))`;
     case "rcClone":
@@ -588,6 +588,15 @@ function emitExpr(expr: HirExpr): string {
     case "bumpVec":
       return `bumpalo::vec![in &${rid(expr.arena)}; ${expr.elements.map(emitExpr).join(", ")}]`;
   }
+}
+
+/**
+ * Render the forwarded read-only free-variable arguments of a lifted callback
+ * shim (series 048): each prefixed with `, ` so it appends cleanly after the
+ * element argument. An empty list renders nothing — `cbName(*x)`, not `cbName(*x, )`.
+ */
+function emitForwarded(forwarded: HirExpr[]): string {
+  return forwarded.map((e) => `, ${emitExpr(e)}`).join("");
 }
 
 function emitArg(arg: HirArg): string {
@@ -646,6 +655,11 @@ function emitType(ty: RustType): string {
       return `Rc<RefCell<${emitType(ty.inner)}>>`;
     case "implIterator":
       return `impl Iterator<Item = ${emitType(ty.item)}>`;
+    case "fnPtr": {
+      const params = ty.params.map(emitType).join(", ");
+      const ret = ty.ret.kind === "unit" ? "" : ` -> ${emitType(ty.ret)}`;
+      return `fn(${params})${ret}`;
+    }
     case "ref":
       return `&${ty.mut ? "mut " : ""}${emitType(ty.inner)}`;
   }

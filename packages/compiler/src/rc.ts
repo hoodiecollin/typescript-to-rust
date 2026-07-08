@@ -125,7 +125,11 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
         return { ...e, expr: rewrite(e.expr) };
       case "iterMap":
       case "iterFilter":
-        return { ...e, receiver: rewrite(e.receiver), body: rewrite(e.body) };
+        return {
+          ...e,
+          receiver: rewrite(e.receiver),
+          forwarded: e.forwarded.map((f) => rewrite(f)),
+        };
       case "rcNew":
         return { ...e, inner: rewrite(e.inner) };
       case "rcClone":

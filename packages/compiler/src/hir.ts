@@ -73,6 +73,13 @@ export type RustType =
    * (`function*`, series 025d). Only valid in return position (an opaque type).
    */
   | { kind: "implIterator"; item: RustType }
+  /**
+   * A bare function pointer `fn(P1, P2, …) -> R` (series 048). The Rust value form
+   * of a non-capturing function *value* — a top-level fn / normalized arrow passed
+   * as an argument, stored, or returned. A `(a: A, b: B) => R` type annotation
+   * lowers here; the pointer is `Copy`, so it is always passed by value.
+   */
+  | { kind: "fnPtr"; params: RustType[]; ret: RustType }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -148,15 +155,31 @@ export type HirExpr =
   /** `expr.await` — suspend on a future (a call to an `async fn`) for its value. */
   | { kind: "await"; expr: HirExpr }
   /**
-   * `xs.map(p => body)` → `xs.iter().map(|&p| body).collect::<Vec<_>>()` (027-cl).
-   * The `&p` pattern copies the element out of the `.iter()` borrow (Copy elems).
+   * `xs.map(p => body)` → `xs.iter().map(|p| cbName(*p, forwarded…)).collect::<Vec<_>>()`
+   * (series 048). The callback body is lifted to a top-level `fn cbName` (whose
+   * params are `p` plus the read-only free vars); the shim forwards `*p` (the Copy
+   * element out of the `.iter()` borrow) and each free var by value.
    */
-  | { kind: "iterMap"; receiver: HirExpr; param: string; body: HirExpr }
+  | {
+      kind: "iterMap";
+      receiver: HirExpr;
+      cbName: string;
+      elemParam: string;
+      forwarded: HirExpr[];
+    }
   /**
    * `xs.filter(p => body)` →
-   * `xs.iter().filter(|&&p| body).copied().collect::<Vec<_>>()` (027-cl).
+   * `xs.iter().filter(|p| cbName(**p, forwarded…)).copied().collect::<Vec<_>>()`
+   * (series 048). The predicate is lifted to a top-level `fn cbName -> bool`; the
+   * shim forwards `**p` (the `&&T` a filter predicate receives).
    */
-  | { kind: "iterFilter"; receiver: HirExpr; param: string; body: HirExpr }
+  | {
+      kind: "iterFilter";
+      receiver: HirExpr;
+      cbName: string;
+      elemParam: string;
+      forwarded: HirExpr[];
+    }
   /** `Object.keys(m)` → `m.keys().cloned().collect::<Vec<_>>()` → `Vec<String>` (041). */
   | { kind: "objectKeys"; map: HirExpr }
   /** `Object.values(m)` → `m.values().cloned().collect::<Vec<_>>()` → `Vec<V>` (041). */
@@ -177,24 +200,45 @@ export type HirExpr =
    */
   | { kind: "mapBuild"; base: HirExpr | null; parts: MapBuildPart[] }
   /**
-   * `xs.find(p => c)` → `xs.iter().find(|&&p| c).copied()` → `Option<T>` (042d).
+   * `xs.find(p => c)` → `xs.iter().find(|p| cbName(**p, forwarded…)).copied()` →
+   * `Option<T>` (series 048; predicate lifted to `fn cbName -> bool`).
    */
-  | { kind: "iterFind"; receiver: HirExpr; param: string; body: HirExpr }
-  /** `xs.some(p => c)` → `xs.iter().any(|&p| c)` → `bool` (039). */
-  | { kind: "iterAny"; receiver: HirExpr; param: string; body: HirExpr }
-  /** `xs.every(p => c)` → `xs.iter().all(|&p| c)` → `bool` (039). */
-  | { kind: "iterAll"; receiver: HirExpr; param: string; body: HirExpr }
+  | {
+      kind: "iterFind";
+      receiver: HirExpr;
+      cbName: string;
+      elemParam: string;
+      forwarded: HirExpr[];
+    }
+  /** `xs.some(p => c)` → `xs.iter().any(|p| cbName(*p, forwarded…))` → `bool` (048). */
+  | {
+      kind: "iterAny";
+      receiver: HirExpr;
+      cbName: string;
+      elemParam: string;
+      forwarded: HirExpr[];
+    }
+  /** `xs.every(p => c)` → `xs.iter().all(|p| cbName(*p, forwarded…))` → `bool` (048). */
+  | {
+      kind: "iterAll";
+      receiver: HirExpr;
+      cbName: string;
+      elemParam: string;
+      forwarded: HirExpr[];
+    }
   /**
-   * `xs.reduce((acc, x) => e, init)` → `xs.iter().fold(init, |acc, &x| e)` (039).
-   * `acc` is the owned fold accumulator (seeded by `init`); `elem` binds `&elem`
-   * to copy each Copy element out of the `.iter()` borrow.
+   * `xs.reduce((acc, x) => e, init)` →
+   * `xs.iter().fold(init, |acc, x| cbName(acc, *x, forwarded…))` (series 048). The
+   * callback is lifted to `fn cbName(acc, elem, free…)`; `acc` is the owned fold
+   * accumulator (typed by `init`), `elem` copied out of the `.iter()` borrow.
    */
   | {
       kind: "iterReduce";
       receiver: HirExpr;
+      cbName: string;
       acc: string;
       elem: string;
-      body: HirExpr;
+      forwarded: HirExpr[];
       init: HirExpr;
     }
   /**
@@ -203,16 +247,18 @@ export type HirExpr =
    */
   | { kind: "iterSortDefault"; receiver: HirExpr }
   /**
-   * `xs.sort((a, b) => e)` → `tslib::array::sort_by(&mut xs, |a, b| e)` (040). The
-   * comparator's numeric sign is mapped to an `Ordering` inside `tslib`; `a`/`b`
-   * are plain (owned Copy) closure params.
+   * `xs.sort((a, b) => e)` →
+   * `tslib::array::sort_by(&mut xs, |a, b| cbName(a, b, forwarded…))` (series 048).
+   * The comparator is lifted to `fn cbName(a, b, free…) -> f64`; `tslib` maps its
+   * numeric sign to an `Ordering`. `a`/`b` are owned Copy elements (no deref).
    */
   | {
       kind: "iterSortBy";
       receiver: HirExpr;
+      cbName: string;
       a: string;
       b: string;
-      body: HirExpr;
+      forwarded: HirExpr[];
     }
   /**
    * `Rc::new(RefCell::new(inner))` — construct a shared, interior-mutable value

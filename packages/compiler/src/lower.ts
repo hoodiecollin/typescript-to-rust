@@ -120,6 +120,11 @@ export function lower(program: Program): HirModule {
   // Struct field types (series 032) — a pre-pass so a struct object literal can
   // recurse into a struct-typed field / array element wherever it appears.
   analysis.structFields = collectStructFields(normalized, analysis.structs);
+  // Binding → type map (series 048): every `const`/`let`/`var` and function param
+  // resolved to a `RustType`, so callback lifting can type a forwarded free var
+  // and a receiver's element type. Needs `lowerType`, so it runs here, not in
+  // `analyzeModule`.
+  analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
   const items: HirItem[] = [];
   const script: Statement[] = [];
 
@@ -175,6 +180,12 @@ export function lower(program: Program): HirModule {
     // fn main()` (composes with `mainRet` if the script also throws).
     if (hirHasAwait(main)) mainAsync = true;
   }
+
+  // Callback lifting (series 048) collected the synthesized `__cb_*` fns during
+  // lowering (of both the item bodies above and the script `main`); append them
+  // as top-level items now, *before* the refine chain, so the passes below type
+  // and refine them like any other fn.
+  items.push(...analysis.liftedFns);
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`, then the
@@ -1382,7 +1393,7 @@ function hasOwnContinue(node: unknown): boolean {
   return false;
 }
 
-function isAstNode(x: unknown): x is { type: string } {
+function isAstNode(x: unknown): x is { type: string; [k: string]: unknown } {
   return (
     typeof x === "object" &&
     x !== null &&
@@ -2309,61 +2320,88 @@ function lowerCall(
     // A user-declared class method of this name is a native call — never hijack
     // it with the library-method routing below (map/filter/at/pad*, 027/033).
     const isUserMethod = analysis.methodNames.has(methodName);
-    // Value-position closures over arrays (027-cl): `xs.map/filter(arrow)` →
-    // iterator chains. `forEach` is a statement (see `tryForEach`).
+    // Value-position closures over arrays (series 048): `xs.map/filter(arrow)` →
+    // an iterator chain whose callback body is *lifted* to a top-level `__cb_*`
+    // fn + a forwarding shim. `forEach` is a statement kept as a for-loop (see
+    // `tryForEach`) — it is deliberately *not* lifted (decision 2026-07-08).
     if (
       !isUserMethod &&
       (methodName === "map" || methodName === "filter") &&
       call.arguments.length === 1 &&
       call.arguments[0]?.type === "ArrowFunctionExpression"
     ) {
-      const cl = arrowExprClosure(
+      const elemType = elementTypeOf(m.object, analysis);
+      const lifted = liftCallback(
         call.arguments[0] as ArrowFunctionExpression,
         analysis,
+        methodName,
+        elemType,
+        1,
       );
       const receiver = lowerExpr(m.object, analysis);
+      const shared = {
+        receiver,
+        cbName: lifted.cbName,
+        elemParam: lifted.paramNames[0] as string,
+        forwarded: lifted.forwarded,
+      };
       return methodName === "map"
-        ? { kind: "iterMap", receiver, param: cl.param, body: cl.body }
-        : { kind: "iterFilter", receiver, param: cl.param, body: cl.body };
+        ? { kind: "iterMap", ...shared }
+        : { kind: "iterFilter", ...shared };
     }
-    // `some`/`every` → native `.iter().any()`/`.all()` (039); same single-param
-    // predicate-closure shape as `filter`, but yielding a `bool`.
+    // `some`/`every` → `.iter().any()`/`.all()` (series 048); same single-param
+    // predicate shape as `filter`, its lifted `fn` returning `bool`.
     if (
       !isUserMethod &&
       (methodName === "some" || methodName === "every") &&
       call.arguments.length === 1 &&
       call.arguments[0]?.type === "ArrowFunctionExpression"
     ) {
-      const cl = arrowExprClosure(
+      const elemType = elementTypeOf(m.object, analysis);
+      const lifted = liftCallback(
         call.arguments[0] as ArrowFunctionExpression,
         analysis,
+        methodName,
+        elemType,
+        1,
       );
       const receiver = lowerExpr(m.object, analysis);
+      const shared = {
+        receiver,
+        cbName: lifted.cbName,
+        elemParam: lifted.paramNames[0] as string,
+        forwarded: lifted.forwarded,
+      };
       return methodName === "some"
-        ? { kind: "iterAny", receiver, param: cl.param, body: cl.body }
-        : { kind: "iterAll", receiver, param: cl.param, body: cl.body };
+        ? { kind: "iterAny", ...shared }
+        : { kind: "iterAll", ...shared };
     }
-    // `find` → native `.iter().find(|&&x| p).copied()` → `Option<T>` (042d).
+    // `find` → `.iter().find(|x| cb(**x)).copied()` → `Option<T>` (series 048).
     if (
       !isUserMethod &&
       methodName === "find" &&
       call.arguments.length === 1 &&
       call.arguments[0]?.type === "ArrowFunctionExpression"
     ) {
-      const cl = arrowExprClosure(
+      const elemType = elementTypeOf(m.object, analysis);
+      const lifted = liftCallback(
         call.arguments[0] as ArrowFunctionExpression,
         analysis,
+        "find",
+        elemType,
+        1,
       );
       return {
         kind: "iterFind",
         receiver: lowerExpr(m.object, analysis),
-        param: cl.param,
-        body: cl.body,
+        cbName: lifted.cbName,
+        elemParam: lifted.paramNames[0] as string,
+        forwarded: lifted.forwarded,
       };
     }
-    // `reduce((acc, x) => e, init)` → native `.iter().fold(init, |acc, &x| e)`
-    // (039). The two-param closure seeds `acc` from the required `init` arg; a
-    // no-init `reduce` is `Option`-typed (fail-loud, a later slice).
+    // `reduce((acc, x) => e, init)` → `.iter().fold(init, |acc, x| cb(acc, *x))`
+    // (series 048). The two-param callback is lifted; `acc`'s param type is the
+    // `init` type. A no-init `reduce` is `Option`-typed (fail-loud, a later slice).
     if (
       !isUserMethod &&
       methodName === "reduce" &&
@@ -2374,24 +2412,30 @@ function lowerCall(
           type: "reduce without an explicit initial value (Option-typed, a later slice)",
         });
       }
-      const cl = arrowClosureN(
+      const elemType = elementTypeOf(m.object, analysis);
+      const accType = initType(call.arguments[1], analysis);
+      const lifted = liftCallback(
         call.arguments[0] as ArrowFunctionExpression,
         analysis,
+        "reduce",
+        elemType,
         2,
+        accType,
       );
       const receiver = lowerExpr(m.object, analysis);
       const init = lowerExpr(call.arguments[1], analysis);
       return {
         kind: "iterReduce",
         receiver,
-        acc: cl.params[0] as string,
-        elem: cl.params[1] as string,
-        body: cl.body,
+        cbName: lifted.cbName,
+        acc: lifted.paramNames[0] as string,
+        elem: lifted.paramNames[1] as string,
+        forwarded: lifted.forwarded,
         init,
       };
     }
     // `sort` → `tslib` (040): default (0 args) is a lexicographic string compare;
-    // a comparator arrow uses the two-param closure shape. A non-arrow `sort`
+    // a comparator arrow lifts its two-param body (series 048). A non-arrow `sort`
     // argument is fail-loud (there is no faithful native form).
     if (!isUserMethod && methodName === "sort") {
       if (call.arguments.length === 0) {
@@ -2404,17 +2448,21 @@ function lowerCall(
         call.arguments.length === 1 &&
         call.arguments[0]?.type === "ArrowFunctionExpression"
       ) {
-        const cl = arrowClosureN(
+        const elemType = elementTypeOf(m.object, analysis);
+        const lifted = liftCallback(
           call.arguments[0] as ArrowFunctionExpression,
           analysis,
+          "sort",
+          elemType,
           2,
         );
         return {
           kind: "iterSortBy",
           receiver: lowerExpr(m.object, analysis),
-          a: cl.params[0] as string,
-          b: cl.params[1] as string,
-          body: cl.body,
+          cbName: lifted.cbName,
+          a: lifted.paramNames[0] as string,
+          b: lifted.paramNames[1] as string,
+          forwarded: lifted.forwarded,
         };
       }
       throw new UnsupportedError({
@@ -2443,17 +2491,28 @@ function lowerCall(
   throw new UnsupportedError(call);
 }
 
+// ── Callback lifting (series 048) ─────────────────────────────────────────────
+
+/** JS globals a callback body may read without them being *free variables*. */
+const CB_GLOBALS = new Set([
+  "console",
+  "JSON",
+  "Math",
+  "Object",
+  "undefined",
+  "NaN",
+]);
+
 /**
- * Extract an `arity`-param, expression-bodied arrow closure's param names and
- * lowered body (series 033/039). The body is the arrow's expression, or a block
- * of exactly one `return <expr>`. A wrong param count, `async`, destructured
- * params, and multi-statement bodies are all fail-loud (later slices).
+ * Extract an `arity`-param, expression-bodied arrow's param names and body
+ * expression (series 048; formerly `arrowClosureN`). The body is the arrow's
+ * expression, or a block of exactly one `return <expr>`. A wrong param count,
+ * `async`, destructured params, and multi-statement bodies are all fail-loud.
  */
-function arrowClosureN(
+function arrowShape(
   arrow: ArrowFunctionExpression,
-  analysis: ModuleAnalysis,
   arity: number,
-): { params: string[]; body: HirExpr } {
+): { params: string[]; bodyExpr: Expression } {
   if (arrow.async) {
     throw new UnsupportedError({ type: "async arrow closure" });
   }
@@ -2482,19 +2541,345 @@ function arrowClosureN(
       });
     }
   }
-  return { params: params as string[], body: lowerExpr(bodyExpr, analysis) };
+  return { params: params as string[], bodyExpr };
 }
 
 /**
- * The single-param specialization used by `map`/`filter`/`some`/`every`/`find`
- * (series 027-cl). Delegates to `arrowClosureN` with arity 1.
+ * The read-only free variables of a callback body, in first-occurrence order: the
+ * `Identifier`s it reads that are not its own params, a top-level fn name, a
+ * declared nominal type, a member-access property, or a known global. A free var
+ * that is *assigned* (an `=` LHS, or a `++`/`--` target) is a mutable capture —
+ * fail-loud (series 048; the user lifts it to a named fn taking the state).
  */
-function arrowExprClosure(
+function freeVarsOf(
+  body: Expression,
+  params: Set<string>,
+  analysis: ModuleAnalysis,
+): string[] {
+  const excluded = (name: string): boolean =>
+    params.has(name) ||
+    analysis.fns.has(name) ||
+    analysis.structs.has(name) ||
+    CB_GLOBALS.has(name);
+  const seen = new Set<string>();
+  const order: string[] = [];
+  const mutableCapture = (): never => {
+    throw new UnsupportedError({
+      type: "mutable capture in a callback (lift to a named fn taking the state as an explicit param)",
+    });
+  };
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!isAstNode(node)) return;
+    switch (node.type) {
+      case "Identifier": {
+        const name = node.name as string;
+        if (!excluded(name) && !seen.has(name)) {
+          seen.add(name);
+          order.push(name);
+        }
+        return;
+      }
+      case "MemberExpression": {
+        visit(node.object);
+        // A non-computed property (`obj.prop`) is a field name, not a free var.
+        if (node.computed) visit(node.property);
+        return;
+      }
+      case "AssignmentExpression": {
+        const left = node.left;
+        if (isAstNode(left) && left.type === "Identifier") {
+          if (!params.has(left.name as string)) mutableCapture();
+        } else {
+          visit(left);
+        }
+        visit(node.right);
+        return;
+      }
+      case "UpdateExpression": {
+        const arg = node.argument;
+        if (
+          isAstNode(arg) &&
+          arg.type === "Identifier" &&
+          !params.has(arg.name as string)
+        ) {
+          mutableCapture();
+        }
+        visit(arg);
+        return;
+      }
+      default: {
+        for (const key in node) {
+          if (key === "type") continue;
+          visit(node[key]);
+        }
+      }
+    }
+  };
+  visit(body);
+  return order;
+}
+
+/** Is a `RustType` a `Copy` scalar (forwardable by value into a lifted fn)? */
+function isCopyRustType(ty: RustType): boolean {
+  return (
+    ty.kind === "f64" ||
+    ty.kind === "usize" ||
+    ty.kind === "i64" ||
+    ty.kind === "bool" ||
+    ty.kind === "fnPtr"
+  );
+}
+
+/**
+ * The bounded expression typer (series 048): types a lifted callback body over
+ * the numeric surface — arithmetic → `f64`, comparison/logical → `bool`, `!` →
+ * `bool`, `-x` → the operand type, a literal by its kind, an identifier by `ctx`
+ * (the param + free-var types). Anything else fails loud (numeric arrays first).
+ */
+function typeCbBody(e: HirExpr, ctx: Map<string, RustType>): RustType {
+  switch (e.kind) {
+    case "number":
+      return { kind: "f64" };
+    case "bool":
+      return { kind: "bool" };
+    case "string":
+      return { kind: "String" };
+    case "ident": {
+      const t = ctx.get(e.name);
+      if (!t) {
+        throw new UnsupportedError({
+          type: `cannot lift callback: free variable '${e.name}' has unknown type`,
+        });
+      }
+      return t;
+    }
+    case "binary": {
+      if (["+", "-", "*", "/", "%"].includes(e.op)) return { kind: "f64" };
+      if (
+        ["<", ">", "<=", ">=", "===", "!==", "==", "!=", "&&", "||"].includes(
+          e.op,
+        )
+      ) {
+        return { kind: "bool" };
+      }
+      throw new UnsupportedError({
+        type: "callback body too complex to lift (numeric surface only)",
+      });
+    }
+    case "unary":
+      if (e.op === "!") return { kind: "bool" };
+      if (e.op === "-") return typeCbBody(e.operand, ctx);
+      throw new UnsupportedError({
+        type: "callback body too complex to lift (numeric surface only)",
+      });
+    default:
+      throw new UnsupportedError({
+        type: "callback body too complex to lift (numeric surface only)",
+      });
+  }
+}
+
+/**
+ * Lift a callback arrow's body to a top-level `__cb_<method>_<n>` fn (series
+ * 048): its params are the arrow's own params (typed by `elemType`, or `accType`
+ * for a reduce's first param) followed by its read-only Copy free vars; its
+ * return type is the bounded typer's result. Returns the callback's name, its
+ * param names, and the free-var idents to forward at the shim.
+ */
+function liftCallback(
   arrow: ArrowFunctionExpression,
   analysis: ModuleAnalysis,
-): { param: string; body: HirExpr } {
-  const { params, body } = arrowClosureN(arrow, analysis, 1);
-  return { param: params[0] as string, body };
+  method: string,
+  elemType: RustType,
+  arity: number,
+  accType?: RustType,
+): { cbName: string; paramNames: string[]; forwarded: HirExpr[] } {
+  const { params, bodyExpr } = arrowShape(arrow, arity);
+  const paramSet = new Set(params);
+  const freeNames = freeVarsOf(bodyExpr, paramSet, analysis);
+
+  // Param types: own params first, then each free var (Copy scalars only).
+  const ctx = new Map<string, RustType>();
+  const ownParams: HirParam[] =
+    arity === 2 && accType
+      ? [
+          { name: params[0] as string, ty: accType },
+          { name: params[1] as string, ty: elemType },
+        ]
+      : params.map((p) => ({ name: p, ty: elemType }));
+  for (const p of ownParams) ctx.set(p.name, p.ty);
+
+  const freeParams: HirParam[] = [];
+  const forwarded: HirExpr[] = [];
+  for (const name of freeNames) {
+    const t = analysis.bindingTypes.get(name);
+    if (!t) {
+      throw new UnsupportedError({
+        type: `cannot lift callback: free variable '${name}' has unknown type`,
+      });
+    }
+    if (!isCopyRustType(t)) {
+      throw new UnsupportedError({
+        type: `cannot lift callback: free variable '${name}' is not a Copy scalar (only read-only scalars forward)`,
+      });
+    }
+    ctx.set(name, t);
+    freeParams.push({ name, ty: t });
+    forwarded.push({ kind: "ident", name });
+  }
+
+  const body = lowerExpr(bodyExpr, analysis);
+  const ret = typeCbBody(body, ctx);
+  const cbName = `__cb_${method}_${++analysis.liftCounter}`;
+  analysis.liftedFns.push({
+    kind: "fn",
+    name: cbName,
+    isAsync: false,
+    params: [...ownParams, ...freeParams],
+    ret,
+    body: [{ kind: "return", value: body }],
+  });
+  return { cbName, paramNames: params, forwarded };
+}
+
+/**
+ * The element type of an adapter receiver (series 048): a receiver identifier of
+ * a known `Vec<E>` yields `E`; an array literal yields its first element's scalar
+ * type. Anything else (a chained call, an unknown binding) is fail-loud.
+ */
+function elementTypeOf(objExpr: Expression, analysis: ModuleAnalysis): RustType {
+  if (objExpr.type === "Identifier") {
+    const t = analysis.bindingTypes.get((objExpr as Identifier).name);
+    if (t && t.kind === "vec") return t.elem;
+    throw new UnsupportedError({
+      type: `cannot lift callback: receiver '${(objExpr as Identifier).name}' is not a known array`,
+    });
+  }
+  if (objExpr.type === "ArrayExpression") {
+    const first = (objExpr as ArrayExpression).elements[0];
+    if (first) return scalarLiteralType(first as Expression);
+    throw new UnsupportedError({
+      type: "cannot lift callback over an empty array literal",
+    });
+  }
+  throw new UnsupportedError({
+    type: "cannot lift callback: receiver element type unknown",
+  });
+}
+
+/** The scalar `RustType` of a literal expression (f64/String/bool), else fail-loud. */
+function scalarLiteralType(e: Expression): RustType {
+  if (e.type === "Literal") {
+    const v = (e as Literal).value;
+    if (typeof v === "number") return { kind: "f64" };
+    if (typeof v === "string") return { kind: "String" };
+    if (typeof v === "boolean") return { kind: "bool" };
+  }
+  throw new UnsupportedError({
+    type: "cannot lift callback: element type is not a scalar literal",
+  });
+}
+
+/** The `RustType` of a `reduce` initial value (a literal, or a known binding). */
+function initType(e: Expression, analysis: ModuleAnalysis): RustType {
+  if (e.type === "Literal") return scalarLiteralType(e);
+  if (e.type === "Identifier") {
+    const t = analysis.bindingTypes.get((e as Identifier).name);
+    if (t) return t;
+  }
+  throw new UnsupportedError({
+    type: "cannot lift reduce: initial value type unknown (numeric surface only)",
+  });
+}
+
+/**
+ * Resolve every `const`/`let`/`var` and function param to a `RustType` (series
+ * 048), name-based and last-write-wins. Annotated bindings/params use `lowerType`;
+ * an unannotated binding is typed from a scalar/array literal initializer. A type
+ * that fails to lower is skipped (best-effort) — the lift site fails loud if it
+ * later needs a missing entry.
+ */
+function collectBindingTypes(
+  program: Program,
+  structs: Set<string>,
+): Map<string, RustType> {
+  const out = new Map<string, RustType>();
+  const typeFrom = (
+    annotation: unknown,
+    init: Expression | null,
+  ): RustType | null => {
+    if (isAstNode(annotation)) {
+      const inner = (annotation as { typeAnnotation?: unknown }).typeAnnotation;
+      if (isAstNode(inner)) {
+        try {
+          return lowerType(inner as unknown as TSType, structs);
+        } catch {
+          return null;
+        }
+      }
+    }
+    return init ? inferInitType(init) : null;
+  };
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!isAstNode(node)) return;
+    if (node.type === "VariableDeclarator") {
+      const id = node.id;
+      if (isAstNode(id) && id.type === "Identifier") {
+        const ty = typeFrom(
+          (id as { typeAnnotation?: unknown }).typeAnnotation,
+          (node.init as Expression | null) ?? null,
+        );
+        if (ty) out.set(id.name as string, ty);
+      }
+    }
+    if (
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression"
+    ) {
+      for (const p of (node.params as unknown[]) ?? []) {
+        if (isAstNode(p) && p.type === "Identifier") {
+          const ty = typeFrom(
+            (p as { typeAnnotation?: unknown }).typeAnnotation,
+            null,
+          );
+          if (ty) out.set(p.name as string, ty);
+        }
+      }
+    }
+    for (const key in node) {
+      if (key === "type") continue;
+      visit(node[key]);
+    }
+  };
+  visit(program.body);
+  return out;
+}
+
+/** Infer a `RustType` from a scalar/array-literal initializer (best-effort, series 048). */
+function inferInitType(init: Expression): RustType | null {
+  if (init.type === "Literal") {
+    const v = (init as Literal).value;
+    if (typeof v === "number") return { kind: "f64" };
+    if (typeof v === "string") return { kind: "String" };
+    if (typeof v === "boolean") return { kind: "bool" };
+    return null;
+  }
+  if (init.type === "ArrayExpression") {
+    const first = (init as ArrayExpression).elements[0];
+    if (!first) return null;
+    const elem = inferInitType(first as Expression);
+    return elem ? { kind: "vec", elem } : null;
+  }
+  return null;
 }
 
 /**
@@ -2846,6 +3231,25 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
         return { kind: "struct", name: ref.typeName.name };
       }
       throw new UnsupportedError(ty);
+    }
+    case "TSFunctionType": {
+      // A function-type annotation `(a: A, b: B) => R` → a bare `fn`-pointer
+      // `fn(A, B) -> R` (series 048). oxc's TSFunctionType carries `params`
+      // (each an `Identifier` with its own `typeAnnotation`) and a `returnType`
+      // wrapped in a `TSTypeAnnotation`.
+      const f = ty as unknown as {
+        params: { typeAnnotation?: { typeAnnotation: TSType } | null }[];
+        returnType?: { typeAnnotation: TSType } | null;
+      };
+      const params = f.params.map((p) => {
+        const inner = p.typeAnnotation?.typeAnnotation;
+        if (!inner) throw new UnsupportedError(ty);
+        return lowerType(inner, structs);
+      });
+      const ret = f.returnType
+        ? lowerType(f.returnType.typeAnnotation, structs)
+        : UNIT;
+      return { kind: "fnPtr", params, ret };
     }
     case "TSNullKeyword":
     case "TSUndefinedKeyword":

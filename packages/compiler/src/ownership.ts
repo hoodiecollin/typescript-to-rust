@@ -452,7 +452,7 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
     case "iterMap":
     case "iterFilter":
       collectUses(e.receiver, movable, out);
-      collectUses(e.body, movable, out);
+      for (const f of e.forwarded) collectUses(f, movable, out);
       return;
     case "bumpVec":
       for (const el of e.elements) collectUses(el, movable, out);
@@ -743,7 +743,11 @@ function placeInExpr(e: HirExpr, liveOut: Live, ctx: PlaceCtx): void {
       case "iterMap":
       case "iterFilter":
         visit(x.receiver);
-        visit(x.body);
+        x.forwarded.forEach((_, i) => {
+          owning(x.forwarded[i] as HirExpr, (c) => {
+            x.forwarded[i] = c;
+          });
+        });
         return;
       case "bumpVec":
         x.elements.forEach((_, i) => {

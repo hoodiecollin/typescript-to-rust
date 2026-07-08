@@ -24,7 +24,7 @@
  */
 
 import type { FunctionDeclaration, Program, Statement } from "./ast";
-import type { RustType } from "./hir";
+import type { HirFn, RustType } from "./hir";
 
 /** JS array/collection methods that mutate the receiver in place. */
 const MUTATING_METHODS = new Set([
@@ -162,6 +162,26 @@ export interface ModuleAnalysis {
    * such a call consumes the iterator directly (no `.iter()`, bound by value).
    */
   generators: Set<string>;
+  /**
+   * Binding name → its resolved `RustType` (series 048). Populated by `lower()`
+   * (it needs `lowerType`) over every `const`/`let`/`var` and function param.
+   * Used by the callback-lifting pass to type a forwarded free variable and to
+   * resolve a receiver's element type. Name-based, last-write-wins (a documented
+   * limit, matching the rest of this intra-procedural analysis).
+   */
+  bindingTypes: Map<string, RustType>;
+  /**
+   * The top-level `fn`s synthesized by callback lifting (series 048), collected
+   * during lowering and appended to the module's `items` before the refine passes.
+   * Each is a `__cb_<method>_<n>` pure function whose params are the callback's own
+   * parameters followed by its read-only free variables.
+   */
+  liftedFns: HirFn[];
+  /**
+   * A per-module counter for the `__cb_<method>_<n>` naming (series 048),
+   * incremented once per lifted callback so two callbacks get distinct names.
+   */
+  liftCounter: number;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -272,6 +292,9 @@ function isCopyType(annotation: unknown, enums: ReadonlySet<string>): boolean {
   const inner = isNode(annotation) ? annotation.typeAnnotation : undefined;
   const t = isNode(inner) ? inner.type : undefined;
   if (t === "TSNumberKeyword" || t === "TSBooleanKeyword") return true;
+  // A function-type annotation lowers to a `fn`-pointer, which is `Copy` — so a
+  // fn-value param is passed by value, not borrowed (series 048).
+  if (t === "TSFunctionType") return true;
   // A C-like `enum` derives `Copy`, so it too passes by value (series 025).
   if (t === "TSTypeReference" && isNode(inner)) {
     const name = (inner.typeName as { name?: string } | undefined)?.name;
@@ -836,6 +859,10 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     rcScopes,
     arenaScopes,
     generators,
+    // Filled in by `lower()` (needs `lowerType`); empty/zero here.
+    bindingTypes: new Map(),
+    liftedFns: [],
+    liftCounter: 0,
   };
 }
 

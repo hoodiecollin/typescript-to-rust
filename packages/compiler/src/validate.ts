@@ -105,6 +105,8 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "TSStringKeyword",
   "TSBooleanKeyword",
   "TSVoidKeyword",
+  // A function-type annotation `(a: A, b: B) => R` → a `fn`-pointer (series 048).
+  "TSFunctionType",
   // Nullability (series 042): `T | undefined` / `T | null` → `Option<T>`. The
   // union/keyword shapes are modeled; `lowerType` maps the nullable ones and
   // fails loud on a union of two real types.

@@ -256,7 +256,7 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
     case "iterMap":
     case "iterFilter":
       eachExpr(e.receiver, fn);
-      eachExpr(e.body, fn);
+      for (const f of e.forwarded) eachExpr(f, fn);
       break;
     case "assign":
       eachExpr(e.target, fn);
