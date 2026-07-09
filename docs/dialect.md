@@ -330,6 +330,14 @@ Modeled: a free `async function` → `async fn`; an **`async` method** →
 `.await?`). Directly-awaited only — an un-polled future is rejected (un-awaited-call
 → `tokio::spawn` is series 051c).
 
+**`await` of a non-future drops the `await` (series 055).** In JS, `await` on a
+non-thenable just yields the value. So `await syncFn(...)` (a declared non-async
+free fn), `await obj.m(...)` (a non-async method), and `await x` / `await obj.field`
+(any non-call operand) **drop the `await`** and lower the operand as an ordinary
+expression — a fallible sync call still threads `?` (from `lowerCall`), and a
+spawned-handle identifier still keeps its real `.await`. There is no fail-loud
+`await` shape left.
+
 **Concurrency combinators (series 051a/b).** Under `await`, these shapes map onto
 tokio / `futures`:
 
@@ -372,9 +380,6 @@ The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
 | Heterogeneous `Promise.race` (arms don't unify to one type) | Not yet | `heterogeneous Promise.race (select! arms must unify to one type)` |
 | `.then` with a reject handler (two-arg `.then(onOk, onErr)`) | Not yet | `` `.then` with a reject handler (two-arg) — catch territory `` |
 | `.then` on a non-async-call receiver | Not yet | `` `.then` receiver must be a call to an async function `` |
-| `await` of a non-call expression (`await x`) that is not a spawned handle | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
-| `await` of a call to a non-async / non-free function | Not yet | `await of a call to a non-async function` |
-| `await` of a call to a non-async method | Not yet | `await of a call to a non-async method` |
 | Calling an async **method** without awaiting it (un-polled future) | Not yet | `call to an async method not directly awaited (an un-polled future never runs)` |
 | An async fn used **both** as a spawned shared-state task **and** a direct call | Not yet | `async fn used both as a spawned shared-state task and a direct call — split it` |
 | A shared capture the task-escape pass cannot bound (spawn nested in a branch/loop; unbounded `Vec<JoinHandle>`; non-wrappable shared type) | Not yet | `shared mutable state across tasks not provably safe …` / `… the task-escape pass cannot wrap in Arc/Arc<Mutex> …` |
