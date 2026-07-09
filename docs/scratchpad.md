@@ -51,9 +51,13 @@ docs/work, pending pickup as their own numbered series:
 - **025 — esoteric-feature *support*** (item 5's follow-on): `using`→`Drop` first,
   then parameter-properties, `enum`, sync generators→`Iterator`; async-iteration
   and decorators deferred/declined.
-- **026 — Rust-AST + pretty-printer** (item 6): recommendation is *defer* — keep
+- **026 — Rust-AST + pretty-printer** (item 6): **deferred indefinitely** — keep
   the string emitter + rustfmt until precedence/nesting makes a structured AST
-  worth it; doc records the trigger condition and the design when it fires.
+  worth it; doc records the trigger condition and the design when it fires. The
+  legibility motivation is now served without it: the CLI emits raw Rust by
+  default and `--fmt` runs it through rustfmt on demand (see
+  `packages/compiler/index.ts`), so 026 stays gated purely on an oracle-caught
+  precedence defect — **not** on readability. Nothing has triggered it.
 - **027 — `tslib` runtime crate** (item 8): **hybrid** — emit idiomatic native
   Rust for clean-mapping methods, route quirk-heavy ones through `tslib`; gated on
   value-position closures.

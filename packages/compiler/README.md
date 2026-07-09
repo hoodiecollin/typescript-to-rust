@@ -6,10 +6,19 @@ root**.
 ## Compile a file
 
 ```bash
-bun run ttr packages/compiler/sample.ts          # print emitted Rust
+bun run ttr packages/compiler/sample.ts          # print RAW emitted Rust to stdout
+bun run ttr packages/compiler/sample.ts --fmt    # rustfmt-normalize the output
+bun run ttr packages/compiler/sample.ts -o out.rs  # write the .rs to a path
+bun run ttr packages/compiler/sample.ts --emit   # write a sibling .rs next to the source
 bun run ttr packages/compiler/sample.ts --check  # also cargo check it
 bun run ttr packages/compiler/sample.ts --run    # also compile & run, show stdout
 ```
+
+Emitter output is **raw by default** (faithful for inspecting what the emitter
+produces); pass `--fmt` to run it through `rustfmt`. `--fmt` applies uniformly —
+to stdout, to any file written (`-o`/`--emit`), and to what `--check`/`--run`
+compiles. `-o` may be repeated and combines with `--emit`; when any file target
+is given, stdout stays quiet and each resolved path is reported on stderr.
 
 ## Tests
 

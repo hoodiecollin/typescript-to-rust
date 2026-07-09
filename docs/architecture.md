@@ -9,7 +9,7 @@ Implementation details and decisions that aren't obvious from the code.
 ├── Cargo.toml                     # Rust workspace (members = crates/*)
 ├── crates/ts-primitives/          # runtime crate: TsAny + Option-A helpers
 ├── packages/compiler/
-│   ├── index.ts                   # CLI: parse → lower → emit → rustfmt → check/run
+│   ├── index.ts                   # CLI: parse → lower → emit → [--fmt: rustfmt] → check/run
 │   ├── src/ast.ts                 # typed ESTree subset (the real runtime shape)
 │   ├── src/analysis.ts            # ownership/mutability inference (side tables)
 │   ├── src/validate.ts            # dialect validation (step 2): forbidden input
