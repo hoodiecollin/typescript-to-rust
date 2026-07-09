@@ -261,12 +261,13 @@ export function lower(program: Program): HirModule {
 
 /**
  * Rewrite each top-level `const f = (…) => …` (a single-declarator `const` bound
- * to a non-`async` arrow) into a synthetic `FunctionDeclaration`, leaving every
- * other statement untouched. Run before analysis so a normalized arrow's
+ * to an arrow, `async` or not) into a synthetic `FunctionDeclaration`, leaving
+ * every other statement untouched. Run before analysis so a normalized arrow's
  * parameter ownership and call-site borrows are inferred, and calls to it adapt
- * their arguments, exactly as for a `function`. A non-normalized arrow (async,
- * `let`/`var`-bound, value-position, nested) stays an expression and is rejected
- * downstream in `lowerExpr` — the documented deferral boundary.
+ * their arguments, exactly as for a `function`. An `async` arrow normalizes to an
+ * `async` fn (series 054b). A non-normalized arrow (`let`/`var`-bound,
+ * value-position, nested) stays an expression and is rejected downstream in
+ * `lowerExpr` — the documented deferral boundary.
  */
 function normalizeArrows(program: Program): Program {
   const body = program.body.map((stmt) => {
@@ -316,7 +317,7 @@ function arrowToFunctionDecl(
   };
 }
 
-/** A qualifying top-level `const <id> = <non-async arrow>`, else null. */
+/** A qualifying top-level `const <id> = <arrow>` (async or not), else null. */
 function topLevelConstArrow(
   stmt: Statement,
 ): { name: Identifier; arrow: ArrowFunctionExpression } | null {
@@ -326,7 +327,9 @@ function topLevelConstArrow(
   const d = decl.declarations[0];
   if (!d || d.init?.type !== "ArrowFunctionExpression") return null;
   const arrow = d.init as ArrowFunctionExpression;
-  if (arrow.async) return null;
+  // An `async` top-level const arrow normalizes to an `async` fn (series 054b):
+  // `arrowToFunctionDecl` carries `async` over, so it flows through the async
+  // free-fn path (`asyncFns` → `async fn` → awaitable) with no further work.
   return { name: d.id, arrow };
 }
 
@@ -1742,13 +1745,12 @@ function lowerMethod(
 ): HirFn {
   const fn = member.value;
   const name = member.key.name;
-  // async in a class is deferred: `asyncFns` tracks free functions only, so an
-  // async method could be defined but never soundly awaited. Fail-loud.
-  if (fn.async) {
-    throw new UnsupportedError({
-      type: "async method (async only on free functions this slice)",
-    });
-  }
+  // async methods (series 054a): `analysis.asyncMethods` records the method name
+  // so `await obj.m(...)` recognizes it (see `lowerAwait`). `isAsync: fn.async`
+  // flows to the emitter (`async fn m(&self, …)`); a throwing async method
+  // composes via the `fallibleMethods` branch below (`async fn … -> Result`),
+  // exactly like a free async fn. A bare un-awaited async method call stays
+  // fail-loud in `lowerCall` (un-polled future → spawn is 051c).
   const structs = analysis.structs;
   const params = fn.params.map((p) => lowerParam(p, undefined, structs));
   // Class inheritance (series 053b, INH10): a base-typed method param → `impl IA`.
@@ -2882,6 +2884,26 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   }
   const call = arg as CallExpression;
   const callee = call.callee;
+  // `await obj.m(...)` — an async method call (series 054a). The method must be
+  // in `analysis.asyncMethods`; the receiver + args lower via `lowerCall`'s method
+  // branch (with `awaited=true`, which returns the bare method expr). A fallible
+  // async method `?`-propagates by wrapping the `await` in `try` → `.await?`.
+  if (callee.type === "MemberExpression") {
+    const prop = (callee as MemberExpression).property;
+    const methodName = prop.type === "Identifier" ? (prop as Identifier).name : null;
+    if (!methodName || !analysis.asyncMethods.has(methodName)) {
+      throw new UnsupportedError({
+        type: "await of a call to a non-async method",
+      });
+    }
+    const awaited: HirExpr = {
+      kind: "await",
+      expr: lowerCall(call, analysis, true),
+    };
+    return analysis.fallibleMethods.has(methodName)
+      ? { kind: "try", expr: awaited }
+      : awaited;
+  }
   if (
     callee.type !== "Identifier" ||
     !analysis.asyncFns.has((callee as Identifier).name)
@@ -3013,6 +3035,39 @@ function lowerCall(
     // A user-declared class method of this name is a native call — never hijack
     // it with the library-method routing below (map/filter/at/pad*, 027/033).
     const isUserMethod = analysis.methodNames.has(methodName);
+    // An `async` method (series 054a) is only valid `await`ed — a bare call is an
+    // un-polled future that never runs (un-awaited-call → spawn is 051c). When
+    // awaited, return the bare method expr; `lowerAwait` adds `.await` and, for a
+    // fallible async method, the `?` (so we do *not* `try`-wrap here — that would
+    // put the `?` before the `.await`). Mirrors the free async-fn Identifier path.
+    if (analysis.asyncMethods.has(methodName)) {
+      if (!awaited) {
+        throw new UnsupportedError({
+          type: "call to an async method not directly awaited (an un-polled future never runs)",
+        });
+      }
+      return {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name: methodName,
+        args: call.arguments.map((a) => lowerExpr(a, analysis)),
+      };
+    }
+    // Async callback in an adapter (series 054c): the lift machinery can produce
+    // an `async fn __cb_*`, but driving the resulting `Vec<Future>` to values is
+    // `Promise.all(arr.map(f))` → `join_all`, which lands in series 051b. Reject
+    // an async callback here (before it is lifted) — the accepted half-wired seam.
+    if (!isUserMethod && LIFT_ADAPTERS.has(methodName)) {
+      const a0 = call.arguments[0];
+      if (
+        a0?.type === "ArrowFunctionExpression" &&
+        (a0 as ArrowFunctionExpression).async
+      ) {
+        throw new UnsupportedError({
+          type: `async callback in '.${methodName}' — dynamic async fan-out (Promise.all(arr.map(f)) → join_all) lands in series 051`,
+        });
+      }
+    }
     // Value-position closures over arrays (series 048): `xs.map/filter(arrow)` →
     // an iterator chain whose callback body is *lifted* to a top-level `__cb_*`
     // fn + a forwarding shim. `forEach` is a statement kept as a for-loop (see
@@ -3185,6 +3240,21 @@ function lowerCall(
 }
 
 // ── Callback lifting (series 048) ─────────────────────────────────────────────
+
+/**
+ * Array adapter methods whose arrow callback is lifted to a `__cb_*` fn (series
+ * 048). An `async` callback in one of these is fail-loud until series 051b wires
+ * the `join_all` consumer (series 054c guard).
+ */
+const LIFT_ADAPTERS = new Set([
+  "map",
+  "filter",
+  "find",
+  "some",
+  "every",
+  "reduce",
+  "sort",
+]);
 
 /** JS globals a callback body may read without them being *free variables*. */
 const CB_GLOBALS = new Set([
@@ -3431,7 +3501,11 @@ function liftCallback(
   analysis.liftedFns.push({
     kind: "fn",
     name: cbName,
-    isAsync: false,
+    // Async-aware lift (series 054c): an `async` callback lifts to an `async fn`.
+    // This is readiness for 051b (dynamic `join_all` fan-out consumes it); in 054
+    // the adapter guard (see `lowerCall`) rejects an async callback before it is
+    // lifted, so this stays `false` in practice until 051b removes that guard.
+    isAsync: arrow.async,
     params: [...ownParams, ...freeParams],
     ret,
     body: [{ kind: "return", value: body }],

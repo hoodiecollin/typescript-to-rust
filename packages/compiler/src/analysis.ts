@@ -91,6 +91,12 @@ export interface ModuleAnalysis {
   /** names of class methods that mutate `this` (→ a `&mut self` receiver) */
   mutatingMethods: Set<string>;
   /**
+   * `async` class **method names** (series 054a). An `await obj.M(...)` where `M`
+   * is here lowers to `recv.M(...).await`. Name-based (like `mutatingMethods` /
+   * `fallibleMethods`); the cross-class same-name edge is the documented limit.
+   */
+  asyncMethods: Set<string>;
+  /**
    * All declared class **method names**. A method call whose name is here is a
    * user method (native call), so it is *not* hijacked by the library-method
    * routing (`map`/`filter`/`at`/… → closures/`tslib`, series 027/033).
@@ -512,8 +518,13 @@ function callsMutatingThisMethod(
 /** Every method of a `class` declaration, with its class name. */
 function classMethods(
   program: Program,
-): { className: string; name: string; body: unknown }[] {
-  const out: { className: string; name: string; body: unknown }[] = [];
+): { className: string; name: string; body: unknown; async: boolean }[] {
+  const out: {
+    className: string;
+    name: string;
+    body: unknown;
+    async: boolean;
+  }[] = [];
   for (const stmt of program.body) {
     if (stmt.type !== "ClassDeclaration") continue;
     const decl = stmt as unknown as {
@@ -526,7 +537,8 @@ function classMethods(
       if (m.type === "MethodDefinition") {
         const name = identName((m as AnyNode).key);
         const value = (m as AnyNode).value;
-        if (name) out.push({ className, name, body: value });
+        const isAsync = !!(value as { async?: boolean } | undefined)?.async;
+        if (name) out.push({ className, name, body: value, async: isAsync });
       }
     }
   }
@@ -820,6 +832,11 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   // `this.withdraw()` is itself `&mut self`).
   const methods = classMethods(program);
   const methodNames = new Set<string>(methods.map((m) => m.name));
+  // `async` method names (series 054a). Name-based, like `mutatingMethods` /
+  // `fallibleMethods` — an `await obj.M(...)` recognizes `M` as async through
+  // this set (the same-name-across-classes edge is the documented method limit).
+  const asyncMethods = new Set<string>();
+  for (const m of methods) if (m.async) asyncMethods.add(m.name);
   const mutatingMethods = new Set<string>();
   for (const m of methods) if (mutatesThis(m.body)) mutatingMethods.add(m.name);
   for (;;) {
@@ -1030,6 +1047,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // Populated during lowering as `Object.entries` bindings are seen.
     entriesBindings: new Set(),
     mutatingMethods,
+    asyncMethods,
     methodNames,
     fallible,
     fallibleMethods,

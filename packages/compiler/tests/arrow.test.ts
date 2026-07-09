@@ -58,10 +58,12 @@ describe("arrow: top-level const arrow → free fn", () => {
     expect(rust).not.toContain("|n");
   });
 
-  test("ARROW5 (fail-loud) an async arrow is rejected", () => {
-    expect(() =>
-      compile(`const ping = async (): Promise<void> => { };`),
-    ).toThrow();
+  test("ARROW5 a top-level const async arrow normalizes to a free async fn (series 054b)", () => {
+    // Series 054b graduated this: an `async` top-level const arrow carries `async`
+    // through `arrowToFunctionDecl` and lowers as a free `async fn` (awaitable via
+    // `.await`). A value-position / `let`-bound async arrow stays rejected (ARROW6).
+    const rust = compile(`const ping = async (): Promise<void> => { };`);
+    expect(rust).toContain("async fn ping() {");
   });
 
   test("ARROW6 (fail-loud) a let-bound arrow is rejected", () => {
