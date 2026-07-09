@@ -74,12 +74,15 @@ describe("async: async/await → async fn + #[tokio::main]", () => {
     expect(rust).toContain("tokio::spawn(w())");
   });
 
-  test("ASYNC7 (fail-loud) await of a non-async call is rejected", () => {
-    expect(() =>
-      compile(
-        `function s(): string { return "x"; }\n` +
-          `async function g(): Promise<string> { return await s(); }`,
-      ),
-    ).toThrow();
+  test("ASYNC7 await of a non-async call drops the await, yields the value (series 055)", () => {
+    // `await s()` on a sync fn is not a future — the dialect drops the `await`
+    // and lowers the call as an ordinary expression (#13, series 055). The sync
+    // call appears with no `.await` on it.
+    const rust = compile(
+      `function s(): string { return "x"; }\n` +
+        `async function g(): Promise<string> { return await s(); }`,
+    );
+    expect(rust).toContain("return s();");
+    expect(/\bs\(\)\.await/.test(rust)).toBe(false);
   });
 });

@@ -3,8 +3,9 @@
  * lowers to `async fn m(&self, …) -> T`; `await obj.m(...)` lowers to
  * `recv.m(...).await`, and a fallible async method `?`-propagates via `.await?`
  * (mirroring the free async-fn path). A bare, un-awaited async method call is
- * fail-loud (un-polled future → spawn is 051c); `await` of a non-async method is
- * fail-loud. IDs map to docs/work/054-async-methods-arrows/specs.md.
+ * fail-loud (un-polled future → spawn is 051c). `await` of a non-async method
+ * now DROPS the `await` and yields the method's value (series 055 graduated the
+ * old fail-loud — AM8). IDs map to docs/work/054-async-methods-arrows/specs.md.
  *
  * Differential specs assert BOTH runtime behavior (Rust stdout == TS stdout ==
  * expected, via `runRust` + Bun) and the emitted `async fn` / `.await` shape.
@@ -120,14 +121,18 @@ console.log(v);`;
     expect(rust).toContain("d.fetch(5.0).await?");
   });
 
-  test("AM8 (fail-loud) await of a non-async method is rejected", () => {
+  test("AM8 (differential) await of a non-async method drops the await, yields the value (series 055)", async () => {
     const src = `class Db {
-  constructor() {}
-  get(): number { return 1; }
+  n: number;
+  constructor(n: number) { this.n = n; }
+  get(): number { return this.n; }
 }
-const d: Db = new Db();
-const v: number = await d.get();
-console.log(v);`;
-    expect(() => compile(src)).toThrow(/non-async method/);
+async function run(): Promise<void> {
+  const d: Db = new Db(1);
+  const v: number = await d.get();
+  console.log(v);
+}
+await run();`;
+    await behaves(src, "1");
   });
 });

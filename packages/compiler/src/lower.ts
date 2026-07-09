@@ -2975,10 +2975,13 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
       expr: { kind: "ident", name: (arg as Identifier).name },
     };
   }
+  // `await <non-call>` (a plain value, member access, literal, …) — awaiting a
+  // non-thenable in JS just yields the value on the next microtask tick (#13,
+  // series 055, "broad" policy). There is no future here, so drop the `await`
+  // and lower the operand as an ordinary expression. (A spawned-handle
+  // identifier was already peeled off above and keeps its real `.await`.)
   if (arg.type !== "CallExpression") {
-    throw new UnsupportedError({
-      type: "await of a non-call expression (only `await asyncFn(...)`)",
-    });
+    return lowerExpr(arg, analysis);
   }
   const call = arg as CallExpression;
   const callee = call.callee;
@@ -3019,10 +3022,12 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   if (callee.type === "MemberExpression") {
     const prop = (callee as MemberExpression).property;
     const methodName = prop.type === "Identifier" ? (prop as Identifier).name : null;
+    // `await obj.m(...)` where `m` is **not** async — a sync method returns a
+    // plain value, so awaiting it is a no-op (#13, series 055). Drop the
+    // `await`; `lowerCall` (via `lowerExpr`) still applies `?` for a fallible
+    // sync method.
     if (!methodName || !analysis.asyncMethods.has(methodName)) {
-      throw new UnsupportedError({
-        type: "await of a call to a non-async method",
-      });
+      return lowerExpr(arg, analysis);
     }
     const awaited: HirExpr = {
       kind: "await",
@@ -3032,13 +3037,15 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
       ? { kind: "try", expr: awaited }
       : awaited;
   }
+  // `await syncFn(...)` where `syncFn` is a declared non-async free fn (or any
+  // non-Identifier callee that is not a modeled future) — a sync call is not a
+  // future, so awaiting it just yields its value (#13, series 055). Drop the
+  // `await`; `lowerCall` still wraps a fallible sync fn in `?`.
   if (
     callee.type !== "Identifier" ||
     !analysis.asyncFns.has((callee as Identifier).name)
   ) {
-    throw new UnsupportedError({
-      type: "await of a call to a non-async function",
-    });
+    return lowerExpr(arg, analysis);
   }
   const awaited: HirExpr = {
     kind: "await",
