@@ -2342,6 +2342,35 @@ function lowerVarDecl(
   const mutable = analysis.mut.get(scope);
   return decl.declarations.map((d) => {
     if (!d.init) throw new UnsupportedError({ type: "uninitialized binding" });
+    // Tuple-destructuring a fixed-arity `Promise.all` (series 051a): a
+    // `const [a, b] = await Promise.all([…])` binds the `join!`/`try_join!` tuple
+    // as `let (a, b) = …`. Only this combinator initializer is a valid array
+    // pattern in a plain binding — a general array destructure stays fail-loud.
+    if ((d.id as { type: string }).type === "ArrayPattern") {
+      const init = lowerExpr(d.init, analysis);
+      if (!isJoinTuple(init)) {
+        throw new UnsupportedError({ type: "destructuring binding" });
+      }
+      const pat = d.id as unknown as {
+        elements?: ({ type: string; name?: string } | null)[];
+      };
+      const names = (pat.elements ?? []).map((el) => {
+        if (!el || el.type !== "Identifier" || !el.name) {
+          throw new UnsupportedError({
+            type: "Promise.all tuple destructure must bind plain identifiers",
+          });
+        }
+        return el.name;
+      });
+      return {
+        kind: "let",
+        name: names[0] as string,
+        mut: false,
+        ty: null,
+        init,
+        names,
+      };
+    }
     // Array/object destructuring in a plain binding is unsupported (only the
     // `for (const [k, v] of Object.entries(…))` pattern is, via `lowerForOf`).
     if ((d.id as { type: string }).type !== "Identifier") {
@@ -2884,6 +2913,15 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   }
   const call = arg as CallExpression;
   const callee = call.callee;
+
+  // ── Async concurrency combinators (series 051a) ─────────────────────────────
+  // All three 051a shapes appear under `await`; route them here before the plain
+  // async-method / async-fn paths below.
+  if (callee.type === "MemberExpression") {
+    const combinator = lowerAwaitCombinator(call, callee as MemberExpression, analysis);
+    if (combinator) return combinator;
+  }
+
   // `await obj.m(...)` — an async method call (series 054a). The method must be
   // in `analysis.asyncMethods`; the receiver + args lower via `lowerCall`'s method
   // branch (with `awaited=true`, which returns the bare method expr). A fallible
@@ -2919,6 +2957,176 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   return analysis.fallible.has((callee as Identifier).name)
     ? { kind: "try", expr: awaited }
     : awaited;
+}
+
+/**
+ * Route the three series-051a async-concurrency combinators, each of which
+ * appears under `await` with a `MemberExpression` callee:
+ *
+ *  - `recv.then(cb)` — a non-async single-expr `cb` → sequential `await` of the
+ *    receiver then the lifted `__cb_then_<n>` (no extra `.await`; `cb` is sync).
+ *  - `Promise.all([a(), b(), …])` — a fixed-arity array literal → `tokio::join!`
+ *    (a tuple), or `tokio::try_join!(…)?` when any element is fallible.
+ *  - `Promise.race([a(), b(), …])` — a fixed-arity array literal → `tokio::select!`
+ *    (first to complete); all arms must unify to one output type.
+ *
+ * Returns `null` when the callee is neither `.then` nor a `Promise.all/race` (so
+ * `lowerAwait` falls through to its async-method / async-fn handling).
+ */
+function lowerAwaitCombinator(
+  call: CallExpression,
+  callee: MemberExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const prop = callee.property;
+  const propName = prop.type === "Identifier" ? (prop as Identifier).name : null;
+
+  // `recv.then(cb)` — promise chaining.
+  if (propName === "then" && !callee.computed) {
+    // A two-arg `.then(onOk, onErr)` reject handler is `catch` territory (CONC9).
+    if (call.arguments.length >= 2) {
+      throw new UnsupportedError({
+        type: "`.then` with a reject handler (two-arg) — catch territory",
+      });
+    }
+    // The receiver must be a call to an async fn; lower it as an awaited receiver.
+    const recv = callee.object;
+    if (recv.type !== "CallExpression") {
+      throw new UnsupportedError({
+        type: "`.then` on a non-call receiver (only `asyncFn(...).then(cb)`)",
+      });
+    }
+    const recvCall = recv as CallExpression;
+    const recvCallee = recvCall.callee;
+    if (
+      recvCallee.type !== "Identifier" ||
+      !analysis.asyncFns.has((recvCallee as Identifier).name)
+    ) {
+      throw new UnsupportedError({
+        type: "`.then` receiver must be a call to an async function",
+      });
+    }
+    const recvAwaited: HirExpr = {
+      kind: "await",
+      expr: lowerCall(recvCall, analysis, true),
+    };
+    // The callback: a non-async single-expression arrow taking exactly one param.
+    const cb = call.arguments[0];
+    if (!cb || cb.type !== "ArrowFunctionExpression") {
+      throw new UnsupportedError({
+        type: "`.then` callback must be an arrow function",
+      });
+    }
+    // The resolved value type of the receiver (the `cb`'s single param type).
+    const elemType = asyncCallItemType(recvCall, analysis);
+    // `liftCallback` validates the arrow shape (rejects an async or multi-param
+    // arrow) and pushes the `fn __cb_then_<n>` into `analysis.liftedFns`.
+    const lifted = liftCallback(
+      cb as ArrowFunctionExpression,
+      analysis,
+      "then",
+      elemType,
+      1,
+    );
+    return {
+      kind: "call",
+      callee: lifted.cbName,
+      args: [
+        { borrow: "owned", expr: recvAwaited },
+        ...lifted.forwarded.map((f) => ({ borrow: "owned" as const, expr: f })),
+      ],
+    };
+  }
+
+  // `Promise.all([...])` / `Promise.race([...])`.
+  const obj = callee.object;
+  if (
+    obj.type === "Identifier" &&
+    (obj as Identifier).name === "Promise" &&
+    (propName === "all" || propName === "race")
+  ) {
+    const arg0 = call.arguments[0];
+    if (!arg0 || arg0.type !== "ArrayExpression") {
+      throw new UnsupportedError({
+        type: "Promise.all/race with a non-literal array (dynamic fan-out is series 051b)",
+      });
+    }
+    const elements = (arg0 as ArrayExpression).elements;
+    const calls = elements.map((el) => {
+      if (!el || el.type !== "CallExpression") {
+        throw new UnsupportedError({
+          type: "Promise.all/race element must be a call to an async function",
+        });
+      }
+      return el as CallExpression;
+    });
+    const futures = calls.map((el) => lowerCall(el, analysis, true));
+
+    if (propName === "all") {
+      const anyFallible = calls.some(
+        (el) =>
+          el.callee.type === "Identifier" &&
+          analysis.fallible.has((el.callee as Identifier).name),
+      );
+      return anyFallible
+        ? { kind: "try", expr: { kind: "tryJoin", futures } }
+        : { kind: "join", futures };
+    }
+
+    // `race` — every element's output type must unify to one `T` (select! arms).
+    const itemTypes = calls.map((el) => asyncCallItemType(el, analysis));
+    const first = JSON.stringify(itemTypes[0]);
+    if (itemTypes.some((t) => JSON.stringify(t) !== first)) {
+      throw new UnsupportedError({
+        type: "heterogeneous Promise.race (select! arms must unify to one type)",
+      });
+    }
+    return { kind: "select", futures };
+  }
+
+  return null;
+}
+
+/**
+ * Does a lowered expression produce a `join!`/`try_join!` tuple (series 051a)?
+ * A `Promise.all` lowers to `{kind:"join"}` (infallible) or `{kind:"try", expr:
+ * {kind:"tryJoin"}}` (fallible → `?`-propagated). Only these bind as a Rust
+ * tuple destructure `let (a, b) = …`.
+ */
+function isJoinTuple(expr: HirExpr): boolean {
+  if (expr.kind === "join") return true;
+  if (expr.kind === "try" && expr.expr.kind === "tryJoin") return true;
+  return false;
+}
+
+/**
+ * The resolved value type `T` of a call to an async fn returning `Promise<T>`,
+ * read from the callee's stored return annotation (`FnInfo.retAnn`). Fail-loud
+ * when the callee is not a known identifier, is unannotated, or its annotation
+ * is not `Promise<T>` (series 051a).
+ */
+function asyncCallItemType(
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): RustType {
+  const callee = call.callee;
+  if (callee.type !== "Identifier") throw new UnsupportedError(call);
+  const info = analysis.fns.get((callee as Identifier).name);
+  const ann = info?.retAnn ?? null;
+  // `Promise<T>` is a `TSTypeReference` named "Promise" with one type argument.
+  if (
+    !ann ||
+    ann.type !== "TSTypeReference" ||
+    (ann as Extract<TSType, { type: "TSTypeReference" }>).typeName.name !== "Promise"
+  ) {
+    throw new UnsupportedError({
+      type: "async combinator element callee must return `Promise<T>`",
+    });
+  }
+  const inner = (ann as Extract<TSType, { type: "TSTypeReference" }>).typeArguments
+    ?.params?.[0];
+  if (!inner) throw new UnsupportedError(call);
+  return lowerType(inner, analysis.structs);
 }
 
 function lowerCall(

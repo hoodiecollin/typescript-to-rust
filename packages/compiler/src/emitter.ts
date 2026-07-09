@@ -392,6 +392,12 @@ function block(stmts: HirStmt[]): string {
 function emitStmt(stmt: HirStmt): string {
   switch (stmt.kind) {
     case "let": {
+      // A tuple-destructuring binding (series 051a): `let (a, b) = join!(…)`.
+      // Rust infers the tuple type, so no annotation is emitted.
+      if (stmt.names) {
+        const pat = stmt.names.map(rid).join(", ");
+        return `let (${pat}) = ${emitExpr(stmt.init)};`;
+      }
       const mut = stmt.mut ? "mut " : "";
       const ty = stmt.ty ? `: ${emitType(stmt.ty)}` : "";
       return `let ${mut}${rid(stmt.name)}${ty} = ${emitExpr(stmt.init)};`;
@@ -650,6 +656,16 @@ function emitExpr(expr: HirExpr): string {
       return `Box::new(${emitExpr(expr.value)})`;
     case "await":
       return `${emitExpr(expr.expr)}.await`;
+    case "join":
+      return `tokio::join!(${expr.futures.map(emitExpr).join(", ")})`;
+    case "tryJoin":
+      return `tokio::try_join!(${expr.futures.map(emitExpr).join(", ")})`;
+    case "select": {
+      const arms = expr.futures
+        .map((f) => `        res = ${emitExpr(f)} => res,`)
+        .join("\n");
+      return `tokio::select! {\n${arms}\n    }`;
+    }
     case "iterMap":
       return `${emitExpr(expr.receiver)}.iter().map(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
     case "iterFilter":

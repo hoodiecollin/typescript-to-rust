@@ -23,7 +23,7 @@
  * reads the callee `FnInfo` produced here.
  */
 
-import type { FunctionDeclaration, Program, Statement } from "./ast";
+import type { FunctionDeclaration, Program, Statement, TSType } from "./ast";
 import type { HirFn, RustType } from "./hir";
 
 /** JS array/collection methods that mutate the receiver in place. */
@@ -59,6 +59,12 @@ export interface ParamInfo {
 
 export interface FnInfo {
   params: ParamInfo[];
+  /**
+   * The function's raw return-type annotation (`func.returnType?.typeAnnotation`),
+   * or `null` if unannotated. Series 051a reads this to unwrap an async fn's
+   * `Promise<T>` and compare `Promise.race` arm output types for homogeneity.
+   */
+  retAnn: TSType | null;
 }
 
 /** One declared field of a custom error class → an `AppError` variant field (049b). */
@@ -409,7 +415,7 @@ function analyzeFunction(
       optional: isOptionalParam(p),
     };
   });
-  return { params };
+  return { params, retAnn: fn.returnType?.typeAnnotation ?? null };
 }
 
 /** Is a param annotated with an extended base class type (→ `impl IA`, 053b)? */

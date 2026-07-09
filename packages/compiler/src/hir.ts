@@ -186,6 +186,27 @@ export type HirExpr =
   /** `expr.await` — suspend on a future (a call to an `async fn`) for its value. */
   | { kind: "await"; expr: HirExpr }
   /**
+   * `tokio::join!(f0, f1, …)` — drives all `futures` concurrently, yielding a
+   * tuple `(T0, T1, …)` of their resolved values (series 051a, fixed-arity
+   * `Promise.all` of infallible async calls). Each future is a *bare* async call
+   * (not individually awaited — the macro polls them).
+   */
+  | { kind: "join"; futures: HirExpr[] }
+  /**
+   * `tokio::try_join!(f0, f1, …)` — like `join!` but for fallible element
+   * futures; yields `Result<(T0, T1, …), E>`, short-circuiting on the first
+   * `Err`. Wrapped in a `{kind:"try"}` so the `?` propagates the tuple (series
+   * 051a, `Promise.all` where any element is fallible).
+   */
+  | { kind: "tryJoin"; futures: HirExpr[] }
+  /**
+   * `tokio::select! { res = f0 => res, … }` — polls all `futures` concurrently
+   * and yields the value of the *first* to complete (the losers are dropped).
+   * All arms must unify to one output type `T` (series 051a, fixed-arity
+   * `Promise.race`).
+   */
+  | { kind: "select"; futures: HirExpr[] }
+  /**
    * `xs.map(p => body)` → `xs.iter().map(|p| cbName(*p, forwarded…)).collect::<Vec<_>>()`
    * (series 048). The callback body is lifted to a top-level `fn cbName` (whose
    * params are `p` plus the read-only free vars); the shim forwards `*p` (the Copy
@@ -325,6 +346,13 @@ export type HirStmt =
       mut: boolean;
       ty: RustType | null;
       init: HirExpr;
+      /**
+       * Tuple-destructuring binding names (series 051a): when present, the `let`
+       * renders `let (a, b, …) = init` (no type annotation — Rust infers the
+       * tuple), and `name`/`ty` are ignored. Set only for a `const [a, b] =
+       * await Promise.all([…])` whose initializer is a `join!`/`try_join!` tuple.
+       */
+      names?: string[];
     }
   | { kind: "return"; value: HirExpr | null }
   | { kind: "expr"; expr: HirExpr }
