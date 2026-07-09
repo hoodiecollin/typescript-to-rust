@@ -491,6 +491,26 @@ export type HirStmt =
   | { kind: "break" }
   | { kind: "continue" }
   /**
+   * A generator state-machine suspend point (series 052). Inside a
+   * `HirGenerator`'s `next()` arms only: `self.state = <resumeState>; return
+   * Some(<value>);`. The suspend primitive is deliberately template-parameterized
+   * (a nameable node, CFG/liveness agnostic to `next` vs a future `poll_next`) so
+   * an async-generator (`Stream`) series can reuse the CFG/liveness/field-carry.
+   */
+  | { kind: "yieldReturn"; value: HirExpr; resumeState: number }
+  /**
+   * A generator state-machine transition (series 052): `self.state = <state>;`.
+   * The enclosing `loop { match self.state { … } }` re-enters the target arm in
+   * the same `next()` call (a straight-through, non-suspending step).
+   */
+  | { kind: "gotoState"; state: number }
+  /**
+   * A generator state-machine terminal (series 052): `self.state = <terminal>;
+   * return None;`. Parks the machine in its exhausted state so every subsequent
+   * `next()` also returns `None`.
+   */
+  | { kind: "genDone"; terminal: number }
+  /**
    * `throw new Error(msg)` → `return Err(value);` (`value` is the message). Under
    * a `"use panic"` scope (series 028a) `panic` is set and it emits
    * `panic!("{}", value);` instead — no `Result`, no propagation.
@@ -651,6 +671,37 @@ export interface HirEnum {
   variants: { name: string; disc: number | null }[];
 }
 
+/**
+ * A generator state machine (series 052) — the resumable lowering for a
+ * `function*` whose body has loops / branches / non-`yield` statements (the
+ * straight-line finite-yield shape stays the 035 `vec![…].into_iter()` `HirFn`).
+ * Emitted as a `struct` (`state: u32` + carried params + across-yield locals) +
+ * `impl New` + `impl Iterator for … { fn next(&mut self) { loop { match
+ * self.state { … } } } }` + the public `fn <name>(…) -> impl Iterator<Item = T>`
+ * wrapper. See docs/work/_archive/052-generator-state-machines/.
+ */
+export interface HirGenerator {
+  kind: "generator";
+  /** The public wrapper fn name (the source `function*` name, e.g. `range`). */
+  name: string;
+  /** The generated state-machine struct name (e.g. `RangeGen`). */
+  structName: string;
+  /** `Item = T` — from the `Generator<T>` / `IterableIterator<T>` annotation. */
+  item: RustType;
+  /** The wrapper fn / `new` params; each is also a struct field (captured owned). */
+  params: HirParam[];
+  /**
+   * Locals that are **live across a yield** and so must survive suspend/resume as
+   * struct fields (a loop counter, an accumulator). Initialized to
+   * `Default::default()` in `new` and overwritten by their defining state arm.
+   */
+  localFields: { name: string; ty: RustType }[];
+  /** The `match self.state` arms, in order (each a state number + its body). */
+  states: { id: number; body: HirStmt[] }[];
+  /** The reserved terminal state number (the `_ => return None` arm). */
+  terminal: number;
+}
+
 /** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */
 export type HirItem =
   | HirFn
@@ -658,7 +709,8 @@ export type HirItem =
   | HirClass
   | HirErrorEnum
   | HirEnum
-  | HirTrait;
+  | HirTrait
+  | HirGenerator;
 
 /**
  * A lowered module. Top-level *declarations* become `items`; top-level

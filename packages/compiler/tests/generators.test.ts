@@ -74,23 +74,27 @@ for (const x of g(5)) {
     );
   });
 
-  test("a non-yield statement in the body fails loud (state-machine slice)", () => {
-    expect(() =>
-      compile(`function* g(): Generator<number> {
+  test("a non-yield statement interleaved with a yield now behaves (state machine, series 052)", async () => {
+    await behaves(
+      `function* g(): Generator<number> {
   console.log("side effect");
   yield 1;
-}`),
-    ).toThrow(UnsupportedError);
+}
+for (const x of g()) { console.log(x); }`,
+      "side effect\n1",
+    );
   });
 
-  test("a yield inside a loop fails loud (needs a state machine)", () => {
-    expect(() =>
-      compile(`function* g(): Generator<number> {
+  test("a yield inside a loop now behaves (state machine, series 052)", async () => {
+    await behaves(
+      `function* g(): Generator<number> {
   for (let i = 0; i < 3; i = i + 1) {
     yield i;
   }
-}`),
-    ).toThrow(UnsupportedError);
+}
+for (const x of g()) { console.log(x); }`,
+      "0\n1\n2",
+    );
   });
 
   test("a generator without a `Generator<T>` return annotation fails loud", () => {

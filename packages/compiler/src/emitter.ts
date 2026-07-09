@@ -27,6 +27,7 @@ import type {
   HirErrorEnum,
   HirExpr,
   HirFn,
+  HirGenerator,
   HirItem,
   HirMatchArm,
   HirModule,
@@ -214,7 +215,78 @@ function emitItem(
       return emitEnum(item);
     case "trait":
       return emitTrait(item);
+    case "generator":
+      return emitGenerator(item);
   }
+}
+
+/**
+ * A generator state machine (series 052) → four Rust items:
+ *   1. `struct <StructName> { state: u32, <params>, <across-yield locals> }`
+ *   2. `impl <StructName> { fn new(<params>) -> Self { … } }` (params captured by
+ *      value; local fields seeded with `Default::default()`, overwritten by their
+ *      defining state arm)
+ *   3. `impl Iterator for <StructName> { type Item = T; fn next(&mut self) ->
+ *      Option<T> { loop { match self.state { <arms>, _ => return None } } } }`
+ *   4. `fn <name>(<params>) -> impl Iterator<Item = T> { <StructName>::new(…) }`
+ * The public wrapper keeps the 035 shape, so `for-of` consumption composes with
+ * no change.
+ */
+function emitGenerator(g: HirGenerator): string {
+  const sname = rid(g.structName);
+  const itemTy = emitType(g.item);
+
+  // 1. struct — `state: u32` first, then owned params, then across-yield locals.
+  const fieldLines = [
+    `${INDENT}state: u32,`,
+    ...g.params.map((p) => `${INDENT}${rid(p.name)}: ${emitType(p.ty)},`),
+    ...g.localFields.map((f) => `${INDENT}${rid(f.name)}: ${emitType(f.ty)},`),
+  ].join("\n");
+  const struct = `struct ${sname} {\n${fieldLines}\n}`;
+
+  // 2. impl New — params move in (field-init shorthand); locals default-seeded.
+  const ctorParams = g.params
+    .map((p) => `${rid(p.name)}: ${emitType(p.ty)}`)
+    .join(", ");
+  const ctorInits = [
+    "state: 0",
+    ...g.params.map((p) => rid(p.name)),
+    ...g.localFields.map((f) => `${rid(f.name)}: Default::default()`),
+  ].join(", ");
+  const newFn = [
+    `impl ${sname} {`,
+    `${INDENT}fn new(${ctorParams}) -> Self {`,
+    `${INDENT}${INDENT}${sname} { ${ctorInits} }`,
+    `${INDENT}}`,
+    `}`,
+  ].join("\n");
+
+  // 3. impl Iterator — the `loop { match self.state { … } }` driver.
+  const arms = g.states
+    .map((s) => {
+      const body = s.body.map((st) => indent(indent(emitStmt(st)))).join("\n");
+      return `${INDENT}${INDENT}${INDENT}${s.id} => {\n${body}\n${INDENT}${INDENT}${INDENT}}`;
+    })
+    .join("\n");
+  const iter = [
+    `impl Iterator for ${sname} {`,
+    `${INDENT}type Item = ${itemTy};`,
+    `${INDENT}fn next(&mut self) -> Option<${itemTy}> {`,
+    `${INDENT}${INDENT}loop {`,
+    `${INDENT}${INDENT}${INDENT}match self.state {`,
+    arms,
+    `${INDENT}${INDENT}${INDENT}${INDENT}_ => return None,`,
+    `${INDENT}${INDENT}${INDENT}}`,
+    `${INDENT}${INDENT}}`,
+    `${INDENT}}`,
+    `}`,
+  ].join("\n");
+
+  // 4. wrapper fn — the unchanged public `impl Iterator` surface.
+  const wrapArgs = g.params.map((p) => rid(p.name)).join(", ");
+  const wrapper = `fn ${rid(g.name)}(${ctorParams}) -> impl Iterator<Item = ${itemTy}> { ${sname}::new(${wrapArgs}) }`;
+
+  return [struct, newFn, iter, wrapper].join("\n\n");
 }
 
 /**
@@ -455,6 +527,18 @@ function emitStmt(stmt: HirStmt): string {
       return "break;";
     case "continue":
       return "continue;";
+    case "yieldReturn":
+      // A generator suspend point (052): record the resume arm, then hand the
+      // yielded value back to the caller.
+      return `self.state = ${stmt.resumeState};\nreturn Some(${emitExpr(stmt.value)});`;
+    case "gotoState":
+      // A straight-through generator transition (052) — the enclosing
+      // `loop { match self.state { … } }` re-enters the target arm.
+      return `self.state = ${stmt.state};`;
+    case "genDone":
+      // The generator's terminal transition (052): park in the exhausted state
+      // and return `None` (every later `next()` also returns `None`).
+      return `self.state = ${stmt.terminal};\nreturn None;`;
     case "throw":
       // Default: a propagated error `return Err(msg);`. Under `"use panic"`
       // (028a) it aborts with the message instead — no `Result`.

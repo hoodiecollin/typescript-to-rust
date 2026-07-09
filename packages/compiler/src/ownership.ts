@@ -363,6 +363,21 @@ function transfer(
       // (on success) — both are possible successors.
       return liveInOfSeq(s.tryBody, union(finLive, catchIn), ctx, movable, map);
     }
+    // Generator state-machine stmts (052) never reach this pass — a `HirGenerator`
+    // is its own item and the item loop above skips it (no `else` branch), and its
+    // arm bodies are built post-lowering. These arms exist only for exhaustiveness.
+    case "yieldReturn": {
+      map.set(s, liveAfter);
+      return union(exprUses(s.value, movable), liveAfter);
+    }
+    case "gotoState": {
+      map.set(s, liveAfter);
+      return liveAfter;
+    }
+    case "genDone": {
+      map.set(s, new Set());
+      return new Set();
+    }
   }
 }
 

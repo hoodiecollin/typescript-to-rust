@@ -64,6 +64,7 @@ import type {
   HirErrorEnum,
   HirExpr,
   HirFn,
+  HirGenerator,
   HirItem,
   HirMatchArm,
   HirModule,
@@ -484,7 +485,7 @@ function lowerFunction(
 function lowerGenerator(
   func: FunctionDeclaration,
   analysis: ModuleAnalysis,
-): HirFn {
+): HirFn | HirGenerator {
   if (!func.id) throw new UnsupportedError(func);
   const name = func.id.name;
   const info = analysis.fns.get(name);
@@ -513,48 +514,617 @@ function lowerGenerator(
 
   if (!func.body)
     throw new UnsupportedError({ type: "generator without a body" });
-  // Straight-line finite yields only: every statement must be a bare `yield e;`.
-  const elements: HirExpr[] = func.body.body.map((s) => {
-    const expr =
-      s.type === "ExpressionStatement"
-        ? (s as ExpressionStatement).expression
-        : null;
-    if (!expr || expr.type !== "YieldExpression") {
-      throw new UnsupportedError({
-        type: "generator body is not a straight-line sequence of `yield` (state-machine generators are a later slice)",
-      });
-    }
-    const y = expr as unknown as { delegate?: boolean; argument?: Expression };
-    if (y.delegate) {
-      throw new UnsupportedError({ type: "`yield*` delegation" });
-    }
-    if (!y.argument) {
-      throw new UnsupportedError({ type: "bare `yield` (no value)" });
-    }
-    return lowerExpr(y.argument, analysis);
+
+  // Shape dispatch (series 052). A **straight-line all-`yield`** body keeps the
+  // 035 `vec![…].into_iter()` lowering (no state machine); anything with loops,
+  // branches, or non-`yield` statements interleaved with yields becomes a
+  // resumable state machine (`buildGeneratorStateMachine`). A `yield*` / bare
+  // `yield` makes the body non-straight-line, so it falls to the state-machine
+  // path, which keeps them fail-loud residuals.
+  const isStraightLine = func.body.body.every((s) => {
+    if (s.type !== "ExpressionStatement") return false;
+    const e = (s as ExpressionStatement).expression as unknown as {
+      type: string;
+      delegate?: boolean;
+      argument?: Expression;
+    };
+    return e.type === "YieldExpression" && !e.delegate && !!e.argument;
   });
 
-  // `vec![e1, …].into_iter()` is an idiomatic `impl Iterator<Item = T>` — no
-  // state machine needed for the finite case.
-  const body: HirStmt[] = [
-    {
-      kind: "return",
-      value: {
-        kind: "method",
-        receiver: { kind: "array", elements },
-        name: "into_iter",
-        args: [],
+  if (isStraightLine) {
+    // `vec![e1, …].into_iter()` is an idiomatic `impl Iterator<Item = T>` — no
+    // state machine needed for the finite case.
+    const elements: HirExpr[] = func.body.body.map((s) => {
+      const y = (s as ExpressionStatement).expression as unknown as {
+        argument: Expression;
+      };
+      return lowerExpr(y.argument, analysis);
+    });
+    const body: HirStmt[] = [
+      {
+        kind: "return",
+        value: {
+          kind: "method",
+          receiver: { kind: "array", elements },
+          name: "into_iter",
+          args: [],
+        },
       },
-    },
-  ];
-  return {
-    kind: "fn",
-    name,
-    isAsync: false,
-    params,
-    ret: { kind: "implIterator", item },
-    body,
+    ];
+    return {
+      kind: "fn",
+      name,
+      isAsync: false,
+      params,
+      ret: { kind: "implIterator", item },
+      body,
+    };
+  }
+
+  return buildGeneratorStateMachine(func, name, params, item, analysis);
+}
+
+// ── Generator state machines (series 052) ────────────────────────────────────
+//
+// A `function*` with loops / branches / non-`yield` statements lowers to a
+// resumable state machine (`HirGenerator`): a `struct` (`state: u32` + carried
+// params + across-yield locals) with `impl Iterator { fn next() { loop { match
+// self.state { … } } } }`. The transform is two passes over a small intra-fn
+// CFG: (1) build basic blocks split at every `yield` and control-flow join;
+// (2) backward live-variable analysis to find locals **live across a yield** —
+// those become struct fields (params always are). The suspend primitive is a
+// nameable `yieldReturn` HIR node and the CFG/liveness are agnostic to `next`
+// vs a future `poll_next`, so an async-generator (`Stream`) series can reuse
+// this wholesale (see the 051↔052 overlap spike).
+
+/** A basic-block terminator in the generator CFG (AST-level conditions/values). */
+type GenTerm =
+  | { kind: "goto"; target: number }
+  | { kind: "branch"; cond: Expression; then: number; else: number }
+  | { kind: "yield"; value: Expression; resume: number }
+  | { kind: "done" };
+
+/** A basic block: straight-line leaf statements then a terminator. */
+interface GenBlock {
+  id: number;
+  stmts: Statement[];
+  term: GenTerm;
+}
+
+function buildGeneratorStateMachine(
+  func: FunctionDeclaration,
+  name: string,
+  params: HirParam[],
+  item: RustType,
+  analysis: ModuleAnalysis,
+): HirGenerator {
+  // A borrowed param can't be captured owned in the struct (it would need a
+  // lifetime-bearing generator struct) — the owned Option-A model can't express
+  // it. In scope all generator params are `Copy` scalars; this stays fail-loud.
+  for (const p of params) {
+    if (p.ty.kind === "ref") {
+      throw new UnsupportedError({
+        type: "state-machine generator with a borrowed (non-owned) parameter",
+      });
+    }
+  }
+  const body = func.body!;
+
+  // ── Pass 1: build the CFG ──────────────────────────────────────────────────
+  const blocks: GenBlock[] = [];
+  const newBlock = (): number => {
+    const id = blocks.length;
+    blocks.push({ id, stmts: [], term: { kind: "done" } });
+    return id;
   };
+  /** Every index here comes from `newBlock()`, so the block always exists. */
+  const bat = (i: number): GenBlock => blocks[i] as GenBlock;
+  const loopStack: { brk: number; cont: number }[] = [];
+
+  const buildStmt = (s: Statement, cur: number): number | null => {
+    switch (s.type) {
+      case "ExpressionStatement": {
+        const e = (s as ExpressionStatement).expression as unknown as {
+          type: string;
+          delegate?: boolean;
+          argument?: Expression;
+        };
+        if (e.type === "YieldExpression") {
+          if (e.delegate) {
+            throw new UnsupportedError({ type: "`yield*` delegation" });
+          }
+          if (!e.argument) {
+            throw new UnsupportedError({ type: "bare `yield` (no value)" });
+          }
+          const resume = newBlock();
+          bat(cur).term = { kind: "yield", value: e.argument, resume };
+          return resume;
+        }
+        bat(cur).stmts.push(s);
+        return cur;
+      }
+      case "VariableDeclaration":
+        bat(cur).stmts.push(s);
+        return cur;
+      case "IfStatement": {
+        const iff = s as IfStatement;
+        // A yield-free `if` is an ordinary leaf statement — keep it whole so the
+        // CFG cost is paid only for branches that actually suspend.
+        if (!containsYield(iff)) {
+          bat(cur).stmts.push(s);
+          return cur;
+        }
+        const thenEntry = newBlock();
+        const hasElse = !!iff.alternate;
+        const elseEntry = hasElse ? newBlock() : null;
+        const cont = newBlock();
+        bat(cur).term = {
+          kind: "branch",
+          cond: iff.test,
+          then: thenEntry,
+          else: hasElse ? (elseEntry as number) : cont,
+        };
+        const thenExit = buildSeq(blockBody(iff.consequent), thenEntry);
+        if (thenExit !== null)
+          bat(thenExit).term = { kind: "goto", target: cont };
+        if (hasElse) {
+          const elseExit = buildSeq(
+            blockBody(iff.alternate as Statement),
+            elseEntry as number,
+          );
+          if (elseExit !== null)
+            bat(elseExit).term = { kind: "goto", target: cont };
+        }
+        return cont;
+      }
+      case "ForStatement": {
+        const f = s as ForStatement;
+        if (!containsYield(f)) {
+          bat(cur).stmts.push(s);
+          return cur;
+        }
+        if (f.init) {
+          bat(cur).stmts.push(
+            f.init.type === "VariableDeclaration"
+              ? (f.init as unknown as Statement)
+              : exprStmt(f.init as Expression),
+          );
+        }
+        const test = newBlock();
+        const bodyB = newBlock();
+        const update = newBlock();
+        const cont = newBlock();
+        bat(cur).term = { kind: "goto", target: test };
+        bat(test).term = f.test
+          ? { kind: "branch", cond: f.test, then: bodyB, else: cont }
+          : { kind: "goto", target: bodyB };
+        loopStack.push({ brk: cont, cont: update });
+        const bodyExit = buildSeq(blockBody(f.body), bodyB);
+        loopStack.pop();
+        if (bodyExit !== null)
+          bat(bodyExit).term = { kind: "goto", target: update };
+        if (f.update) bat(update).stmts.push(exprStmt(f.update));
+        bat(update).term = { kind: "goto", target: test };
+        return cont;
+      }
+      case "WhileStatement": {
+        const w = s as WhileStatement;
+        if (!containsYield(w)) {
+          bat(cur).stmts.push(s);
+          return cur;
+        }
+        const test = newBlock();
+        const bodyB = newBlock();
+        const cont = newBlock();
+        bat(cur).term = { kind: "goto", target: test };
+        bat(test).term = {
+          kind: "branch",
+          cond: w.test,
+          then: bodyB,
+          else: cont,
+        };
+        loopStack.push({ brk: cont, cont: test });
+        const bodyExit = buildSeq(blockBody(w.body), bodyB);
+        loopStack.pop();
+        if (bodyExit !== null)
+          bat(bodyExit).term = { kind: "goto", target: test };
+        return cont;
+      }
+      case "BlockStatement":
+        return buildSeq((s as BlockStatement).body, cur);
+      case "BreakStatement": {
+        if ((s as BreakStatement).label) {
+          throw new UnsupportedError({ type: "labeled break" });
+        }
+        const top = loopStack[loopStack.length - 1];
+        if (!top) {
+          throw new UnsupportedError({
+            type: "`break` outside a loop in a generator",
+          });
+        }
+        bat(cur).term = { kind: "goto", target: top.brk };
+        return null;
+      }
+      case "ContinueStatement": {
+        if ((s as ContinueStatement).label) {
+          throw new UnsupportedError({ type: "labeled continue" });
+        }
+        const top = loopStack[loopStack.length - 1];
+        if (!top) {
+          throw new UnsupportedError({
+            type: "`continue` outside a loop in a generator",
+          });
+        }
+        bat(cur).term = { kind: "goto", target: top.cont };
+        return null;
+      }
+      case "ReturnStatement": {
+        if ((s as { argument?: Expression | null }).argument) {
+          throw new UnsupportedError({
+            type: "generator `return <value>` (only a bare `return` ends iteration)",
+          });
+        }
+        bat(cur).term = { kind: "done" };
+        return null;
+      }
+      default:
+        throw new UnsupportedError({
+          type: `unsupported statement in a state-machine generator: ${s.type}`,
+        });
+    }
+  };
+
+  function buildSeq(stmts: Statement[], startBlock: number): number | null {
+    let cur: number | null = startBlock;
+    for (const s of stmts) {
+      if (cur === null) {
+        throw new UnsupportedError({
+          type: "unreachable statement after return/break/continue in a generator",
+        });
+      }
+      cur = buildStmt(s, cur);
+    }
+    return cur;
+  }
+
+  const entry = newBlock(); // state 0
+  const exit = buildSeq(body.body, entry);
+  if (exit !== null) bat(exit).term = { kind: "done" };
+  const terminal = blocks.length; // the reserved `_ => None` state
+
+  // ── Pass 2: liveness → which locals become struct fields ───────────────────
+  const paramNames = new Set(params.map((p) => p.name));
+  const declaredLocals = collectDeclaredLocals(body.body); // source order
+  const universe = new Set<string>([...paramNames, ...declaredLocals]);
+
+  // `use[b]` is the **upward-exposed** reads (read before being defined within
+  // the block); `def[b]` is the locals declared in the block. Walking the block
+  // in order and killing a name at its declaration keeps a define-then-yield
+  // local (e.g. `const doubled = i*2; yield doubled;`) out of `use[b]`, so its
+  // liveness doesn't spuriously flow around a loop back-edge and promote it.
+  const useSet: Set<string>[] = [];
+  const defSet: Set<string>[] = [];
+  for (const b of blocks) {
+    const uses = new Set<string>();
+    const defs = new Set<string>();
+    const killed = new Set<string>();
+    const addUpwardReads = (node: unknown): void => {
+      const reads = new Set<string>();
+      collectRefs(node, universe, reads);
+      for (const r of reads) if (!killed.has(r)) uses.add(r);
+    };
+    for (const s of b.stmts) {
+      addUpwardReads(s); // reads (a declarator's init, an assignment's operands)
+      const declared = new Set<string>();
+      collectDeclaredLocalsInto(s, declared);
+      for (const d of declared) {
+        defs.add(d);
+        killed.add(d);
+      }
+    }
+    // The terminator's reads run after every statement in the block.
+    if (b.term.kind === "branch") addUpwardReads(b.term.cond);
+    if (b.term.kind === "yield") addUpwardReads(b.term.value);
+    useSet.push(uses);
+    defSet.push(defs);
+  }
+  const succ = (b: GenBlock): number[] => {
+    switch (b.term.kind) {
+      case "goto":
+        return [b.term.target];
+      case "branch":
+        return [b.term.then, b.term.else];
+      case "yield":
+        return [b.term.resume];
+      case "done":
+        return [];
+    }
+  };
+
+  const liveIn = blocks.map(() => new Set<string>());
+  const liveOut = blocks.map(() => new Set<string>());
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const out = new Set<string>();
+      for (const sc of succ(bat(i)))
+        for (const v of liveIn[sc] as Set<string>) out.add(v);
+      const inn = new Set(useSet[i]);
+      const defs = defSet[i] as Set<string>;
+      for (const v of out) if (!defs.has(v)) inn.add(v);
+      if (
+        !setEq(out, liveOut[i] as Set<string>) ||
+        !setEq(inn, liveIn[i] as Set<string>)
+      ) {
+        liveOut[i] = out;
+        liveIn[i] = inn;
+        changed = true;
+      }
+    }
+  }
+
+  // A local live-out of any *yielding* block must survive suspend → a field.
+  // Params are always fields (captured at construction).
+  const fieldNames = new Set<string>(paramNames);
+  for (const b of blocks) {
+    if (b.term.kind === "yield") {
+      for (const v of liveOut[b.id] as Set<string>) {
+        if (declaredLocals.includes(v)) fieldNames.add(v);
+      }
+    }
+  }
+
+  // ── Lower each block's leaf statements (field-aware `let` → assign) ─────────
+  const fieldTypes = new Map<string, RustType>();
+  for (const p of params) fieldTypes.set(p.name, p.ty);
+
+  const loweredBlocks = blocks.map((b) => {
+    const out: HirStmt[] = [];
+    for (const s of b.stmts) {
+      for (const st of lowerStatement(s, analysis, name)) {
+        // A field local's `let` becomes an assignment to `self.<field>` (the
+        // field-ref rewrite below turns the bare target into `self.x`); its
+        // declared type seeds the struct field.
+        if (st.kind === "let" && !st.names && fieldNames.has(st.name)) {
+          if (st.ty) fieldTypes.set(st.name, st.ty);
+          out.push({
+            kind: "expr",
+            expr: {
+              kind: "assign",
+              op: "=",
+              target: { kind: "ident", name: st.name },
+              value: st.init,
+            },
+          });
+        } else {
+          out.push(st);
+        }
+      }
+    }
+    return out;
+  });
+
+  // ── Assemble the `match` arms (append each block's terminator) ──────────────
+  const states = blocks.map((b) => {
+    const arm: HirStmt[] = [...(loweredBlocks[b.id] as HirStmt[])];
+    switch (b.term.kind) {
+      case "goto":
+        arm.push({ kind: "gotoState", state: b.term.target });
+        break;
+      case "branch":
+        arm.push({
+          kind: "if",
+          cond: lowerExpr(b.term.cond, analysis),
+          conseq: [{ kind: "gotoState", state: b.term.then }],
+          alt: [{ kind: "gotoState", state: b.term.else }],
+        });
+        break;
+      case "yield":
+        arm.push({
+          kind: "yieldReturn",
+          value: lowerExpr(b.term.value, analysis),
+          resumeState: b.term.resume,
+        });
+        break;
+      case "done":
+        arm.push({ kind: "genDone", terminal });
+        break;
+    }
+    return { id: b.id, body: rewriteFieldRefs(arm, fieldNames) };
+  });
+
+  const localFields = declaredLocals
+    .filter((n) => fieldNames.has(n))
+    .map((n) => ({
+      name: n,
+      ty: fieldTypes.get(n) ?? ({ kind: "f64" } as RustType),
+    }));
+
+  return {
+    kind: "generator",
+    name,
+    structName: capitalizeAscii(name) + "Gen",
+    item,
+    params,
+    localFields,
+    states,
+    terminal,
+  };
+}
+
+/** `{ type: "ExpressionStatement", expression: e }` — wrap an expr as a stmt. */
+function exprStmt(e: Expression): Statement {
+  return { type: "ExpressionStatement", expression: e } as unknown as Statement;
+}
+
+/** A statement's contained statement list (`{ … }` body, or a single statement). */
+function blockBody(s: Statement): Statement[] {
+  return s.type === "BlockStatement"
+    ? (s as BlockStatement).body
+    : [s];
+}
+
+/** Does this subtree contain a `yield` (not descending into nested functions)? */
+function containsYield(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  const n = node as { type?: string };
+  if (n.type === "YieldExpression") return true;
+  if (
+    n.type === "FunctionDeclaration" ||
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression"
+  ) {
+    return false; // an inner function's `yield` isn't ours
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    const v = (node as Record<string, unknown>)[key];
+    if (Array.isArray(v)) {
+      for (const el of v) if (containsYield(el)) return true;
+    } else if (containsYield(v)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** All local names declared (via `let`/`const`/`var`) anywhere in `stmts`, in
+ * source order, deduped. Descends through control flow (not nested functions). */
+function collectDeclaredLocals(stmts: Statement[]): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  const set = new Set<string>();
+  for (const s of stmts) collectDeclaredLocalsInto(s, set, order, seen);
+  return order;
+}
+
+function collectDeclaredLocalsInto(
+  node: unknown,
+  out: Set<string>,
+  order?: string[],
+  seen?: Set<string>,
+): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { type?: string };
+  if (
+    n.type === "FunctionDeclaration" ||
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression"
+  ) {
+    return;
+  }
+  if (n.type === "VariableDeclaration") {
+    for (const d of (n as unknown as { declarations: { id: unknown }[] })
+      .declarations) {
+      const id = d.id as { type?: string; name?: string };
+      if (id.type === "Identifier" && id.name) {
+        out.add(id.name);
+        if (order && seen && !seen.has(id.name)) {
+          seen.add(id.name);
+          order.push(id.name);
+        }
+      }
+    }
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    const v = (node as Record<string, unknown>)[key];
+    if (Array.isArray(v)) {
+      for (const el of v) collectDeclaredLocalsInto(el, out, order, seen);
+    } else {
+      collectDeclaredLocalsInto(v, out, order, seen);
+    }
+  }
+}
+
+/** Collect identifier *reads* in `node` whose name is in `universe`. Skips
+ * member property names (`o.f` — `f` is not a variable), a `VariableDeclarator`'s
+ * binding `id` (a declaration is a write, not a read — only its `init` is read),
+ * and nested functions. */
+function collectRefs(
+  node: unknown,
+  universe: Set<string>,
+  out: Set<string>,
+): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { type?: string };
+  if (n.type === "Identifier") {
+    const nm = (n as { name?: string }).name;
+    if (nm && universe.has(nm)) out.add(nm);
+    return;
+  }
+  if (
+    n.type === "FunctionDeclaration" ||
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression"
+  ) {
+    return;
+  }
+  if (n.type === "VariableDeclarator") {
+    collectRefs((n as unknown as { init: unknown }).init, universe, out);
+    return; // the binding `id` is a write, not a read
+  }
+  if (n.type === "MemberExpression") {
+    const m = n as unknown as {
+      object: unknown;
+      property: unknown;
+      computed: boolean;
+    };
+    collectRefs(m.object, universe, out);
+    if (m.computed) collectRefs(m.property, universe, out); // `o[e]` reads `e`
+    return; // a non-computed `.prop` name is not a variable read
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    const v = (node as Record<string, unknown>)[key];
+    if (Array.isArray(v)) {
+      for (const el of v) collectRefs(el, universe, out);
+    } else {
+      collectRefs(v, universe, out);
+    }
+  }
+}
+
+/** Rewrite every `{kind:"ident", name}` whose name is a field to `self.<name>`
+ * (a struct-field access). A generic structural walk over the lowered HIR — it
+ * never touches string field names, so struct-literal keys / method names are
+ * safe; the introduced `self` ident is not a field, so no double-rewrite. */
+function rewriteFieldRefs<T>(node: T, fields: Set<string>): T {
+  if (Array.isArray(node)) {
+    return node.map((n) => rewriteFieldRefs(n, fields)) as unknown as T;
+  }
+  if (node && typeof node === "object") {
+    const obj = node as { kind?: string; name?: string };
+    if (obj.kind === "ident" && obj.name && fields.has(obj.name)) {
+      return {
+        kind: "field",
+        object: { kind: "ident", name: "self" },
+        name: obj.name,
+      } as unknown as T;
+    }
+    const out: Record<string, unknown> = {};
+    for (const key in node) {
+      out[key] = rewriteFieldRefs(
+        (node as Record<string, unknown>)[key],
+        fields,
+      );
+    }
+    return out as unknown as T;
+  }
+  return node;
+}
+
+/** Set equality (same size + every member of `a` in `b`). */
+function setEq(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+
+/** Uppercase the first ASCII letter (`range` → `Range`) for a struct name. */
+function capitalizeAscii(s: string): string {
+  return s.length === 0 ? s : (s[0] as string).toUpperCase() + s.slice(1);
 }
 
 // ── Fallibility (throw / Result propagation) ─────────────────────────────────
