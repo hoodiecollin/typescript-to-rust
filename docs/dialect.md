@@ -346,9 +346,24 @@ tokio / `futures`:
 
 The fan-out `.map(f)` callback `f` may be an **inline non-async closure**
 (`id => asyncFn(id)` → `|id| async_fn(id)`) or a **lifted async arrow**
-(`async id => await asyncFn(id)` → a hoisted `async fn __cb_map_<n>`). `spawn` /
-`setTimeout` are series 051c. `tokio::select!` **drops** the losing arms (cancels them
-at their next await) — see [Semantic divergences](#semantic-divergences-from-typescript).
+(`async id => await asyncFn(id)` → a hoisted `async fn __cb_map_<n>`). `tokio::select!`
+**drops** the losing arms (cancels them at their next await) — see
+[Semantic divergences](#semantic-divergences-from-typescript).
+
+**Task spawning + shared state (series 051c).** An **un-awaited** async free call is no
+longer rejected — it schedules an eager task:
+
+| TypeScript | Rust |
+|---|---|
+| `const h = doWork()` (un-awaited async free call) | `let h = tokio::spawn(do_work())` → `JoinHandle<T>` (bare statement = fire-and-forget) |
+| `await h` (on a spawned handle) | `h.await.unwrap()` (a task panic aborts — a documented divergence) |
+| `setTimeout(fn, ms)` | `tokio::spawn(async move { tokio::time::sleep(…).await; <fn>; })` |
+| a binding passed to ≥2 spawned tasks (or 1 task + reused), read-only | wrapped `std::sync::Arc<T>`; `Arc::clone(&b)` per spawn (**inter-procedural** — the receiving async fn's param becomes `Arc<T>`) |
+| a binding shared into a task **and mutated** | wrapped `std::sync::Arc<std::sync::Mutex<T>>`; accesses through `.lock().unwrap()`; the callee's param + body are rewritten |
+
+The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
+`Send + 'static`-sound; anything else stays fail-loud (below). It **never** emits a
+`spawn` that would not compile.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
@@ -357,11 +372,12 @@ at their next await) — see [Semantic divergences](#semantic-divergences-from-t
 | Heterogeneous `Promise.race` (arms don't unify to one type) | Not yet | `heterogeneous Promise.race (select! arms must unify to one type)` |
 | `.then` with a reject handler (two-arg `.then(onOk, onErr)`) | Not yet | `` `.then` with a reject handler (two-arg) — catch territory `` |
 | `.then` on a non-async-call receiver | Not yet | `` `.then` receiver must be a call to an async function `` |
-| `await` of a non-call expression (`await x`) | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
+| `await` of a non-call expression (`await x`) that is not a spawned handle | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
 | `await` of a call to a non-async / non-free function | Not yet | `await of a call to a non-async function` |
 | `await` of a call to a non-async method | Not yet | `await of a call to a non-async method` |
-| Calling an async function without directly awaiting it (un-polled future) | Not yet | `call to an async function not directly awaited (an un-polled future never runs)` |
-| Calling an async method without directly awaiting it (un-polled future) | Not yet | `call to an async method not directly awaited (an un-polled future never runs)` |
+| Calling an async **method** without awaiting it (un-polled future) | Not yet | `call to an async method not directly awaited (an un-polled future never runs)` |
+| An async fn used **both** as a spawned shared-state task **and** a direct call | Not yet | `async fn used both as a spawned shared-state task and a direct call — split it` |
+| A shared capture the task-escape pass cannot bound (spawn nested in a branch/loop; unbounded `Vec<JoinHandle>`; non-wrappable shared type) | Not yet | `shared mutable state across tasks not provably safe …` / `… the task-escape pass cannot wrap in Arc/Arc<Mutex> …` |
 | `async` arrow **callback** in an array adapter (`arr.map(async …)`) — dynamic async fan-out is series 051 | Not yet | `async callback in '.<method>' — dynamic async fan-out (Promise.all(arr.map(f)) → join_all) lands in series 051` |
 | `async` arrow in value position (not a top-level `const`) | Not yet | `async arrow closure` |
 

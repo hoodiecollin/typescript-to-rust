@@ -216,12 +216,69 @@ concurrently-running body). New HIR is needed to carry the decision to the emitt
   `{ kind: "arcClone"; name }` capture-prep node and a `{ kind: "lockDeref"; … }` use
   node. (Exact node set is a 051c scaffold detail; the ownership pass populates them.)
 
+### Increment 2 — the inter-procedural task-escape pass (Collin, 2026-07-08)
+
+Increment 1 shipped the single-task, move-capture spawn surface (spawn / `JoinHandle`
+await / `setTimeout`, args restricted to Copy/literal). Increment 2 adds the **shared
+mutable state** analysis, and Collin chose the **inter-procedural** model: shared state
+crosses into a task as a **function argument** of the spawned async call, and the
+receiving async fn's **signature + body are rewritten** to the `Arc`/`Arc<Mutex>` form.
+
+**Worked example (CONC22 — a shared, mutated counter):**
+
+```ts
+async function incr(c: Counter): Promise<void> { c.n += 1; }
+const counter: Counter = { n: 0 };
+const h1 = incr(counter);      // spawn #1 captures counter
+const h2 = incr(counter);      // spawn #2 captures counter
+await h1; await h2;
+console.log(counter.n);        // parent reads after
+```
+```rust
+async fn incr(c: std::sync::Arc<std::sync::Mutex<Counter>>) { c.lock().unwrap().n += 1.0; }
+let counter = std::sync::Arc::new(std::sync::Mutex::new(Counter { n: 0.0 }));
+let h1 = tokio::spawn(incr(std::sync::Arc::clone(&counter)));
+let h2 = tokio::spawn(incr(std::sync::Arc::clone(&counter)));
+h1.await.unwrap(); h2.await.unwrap();
+println!("{}", counter.lock().unwrap().n);
+```
+
+**The algorithm.**
+
+1. **Capture graph.** For each `spawn`ed async call `f(…args…)`, record which of its
+   args are **bindings** (identifiers). A binding is a *task-escaping capture* if it is
+   passed to **≥2** spawned calls, **or** to **1** spawned call **and still used after
+   the spawn in the parent scope**. (A binding passed to exactly one spawn and never
+   used after is a plain move — increment 1's case, no wrap.)
+2. **`Arc` vs `Arc<Mutex>`.** The wrap is `Arc<Mutex<T>>` if the value is **mutated** —
+   either the receiving async fn mutates the param (its inferred param ownership is
+   `refMut`, the existing ownership signal), or the parent mutates the binding after a
+   spawn. Otherwise a shared **read** → plain `Arc<T>`.
+3. **Rewrite set.**
+   - **Binding declaration** → `Arc::new(<init>)` (read) / `Arc::new(Mutex::new(<init>))`
+     (mutated).
+   - **Each spawn-arg site** → `Arc::clone(&binding)` (a fresh handle moved into the task).
+   - **Parent uses after** → for `Arc<Mutex>`, a read/write goes through
+     `binding.lock().unwrap()` (`.n` field access composes: `counter.lock().unwrap().n`);
+     for plain `Arc`, reads compose via `Deref` (`binding.field` unchanged).
+   - **Receiving async fn** → its param type becomes `Arc<T>` / `Arc<Mutex<T>>`, and its
+     body's accesses to that param are rewritten to the lock form (mutated) or left as-is
+     (read, `Deref`). This is the inter-procedural part.
+
+**Conflict rule (fail-loud).** An async fn called **both** shared (spawned with a wrapped
+arg) **and** unshared (a direct `await f(plainValue)`) has an irreconcilable param type
+→ `UnsupportedError` ("async fn used both as a spawned shared-state task and a direct
+call — split it"). Increment 2 requires a shared-capture async fn be shared-only.
+
+**Fully-qualified paths.** Emit `std::sync::Arc` / `std::sync::Mutex` fully qualified (no
+`use` prelude), matching the emitter's `thiserror::`/`tokio::` convention. No new crate.
+
 **Honest boundary for 051c.** Only shapes the task-escape analysis can prove sound are
 emitted. A binding captured mutably by a task **whose lifetime the analysis cannot
-bound** (e.g. escaping into a `Vec<JoinHandle>` that is never joined), or shared state
-with an aliasing pattern the pass can't reduce to `Arc`/`Arc<Mutex>`, stays fail-loud
-(`UnsupportedError` — "shared mutable state across tasks not provably safe; hoist to
-an explicit `Arc<Mutex>`"). We never emit a `spawn` that would not compile.
+bound** (e.g. escaping into a `Vec<JoinHandle>` that is never joined), shared state with
+an aliasing pattern the pass can't reduce to `Arc`/`Arc<Mutex>`, or the shared/unshared
+conflict above, stays fail-loud (`UnsupportedError`). We never emit a `spawn` that would
+not compile.
 
 ## Cargo manifest additions
 
