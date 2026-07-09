@@ -205,7 +205,6 @@ no accessors, no generics.
 | `static` or computed-name method | Not yet | `static/computed class method` |
 | `get` / `set` accessor | Not yet | `class get accessor` / `class set accessor` |
 | Class with no explicit constructor | Not yet | `class without an explicit constructor` |
-| `async` method | Not yet | `async method (async only on free functions this slice)` |
 | Method without a body | Not yet | `method without a body` |
 | `[Symbol.dispose]()` method without a body | Not yet | `[Symbol.dispose] without a body` |
 
@@ -324,18 +323,24 @@ the escaping-`return` rule above — #16).
 
 ## async / await
 
-Modeled: a free `async function` → `async fn`; `Promise<T>` return → `T`;
-`await asyncFn(...)` → `.await`. Un-polled futures and cross-cutting async are
-rejected.
+Modeled: a free `async function` → `async fn`; an **`async` method** →
+`async fn m(&self, …)`; a **top-level `const` `async` arrow** (normalized to a free
+`async fn`, series 054b); `Promise<T>` return → `T`; `await asyncFn(...)` /
+`await obj.method(...)` → `.await` (a fallible async fn/method `?`-propagates via
+`.await?`). Directly-awaited only — an un-polled future is rejected (un-awaited-call
+→ `tokio::spawn` is series 051c). Concurrency combinators (`Promise.all`/`race`/…,
+timers, `spawn`) are series 051.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `await using` (async resource disposal) | Forbidden | `` `await using` (async resource disposal) `` |
-| `await` of a non-call expression (`await x`, `await x.m()`) | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
+| `await` of a non-call expression (`await x`) | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
 | `await` of a call to a non-async / non-free function | Not yet | `await of a call to a non-async function` |
+| `await` of a call to a non-async method | Not yet | `await of a call to a non-async method` |
 | Calling an async function without directly awaiting it (un-polled future) | Not yet | `call to an async function not directly awaited (an un-polled future never runs)` |
-| `async` method (see [Classes](#classes)) | Not yet | `async method (async only on free functions this slice)` |
-| `async` arrow closure (see [Closures](#closures--callbacks)) | Not yet | `async arrow closure` |
+| Calling an async method without directly awaiting it (un-polled future) | Not yet | `call to an async method not directly awaited (an un-polled future never runs)` |
+| `async` arrow **callback** in an array adapter (`arr.map(async …)`) — dynamic async fan-out is series 051 | Not yet | `async callback in '.<method>' — dynamic async fan-out (Promise.all(arr.map(f)) → join_all) lands in series 051` |
+| `async` arrow in value position (not a top-level `const`) | Not yet | `async arrow closure` |
 
 ---
 
@@ -402,8 +407,11 @@ Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
 ### Closures & callbacks
 
 Callback arrows (to `map`/`filter`/`reduce`/`sort`/`find`/`some`/`every`/`forEach`)
-must be non-async, have the exact arity the method expects, take plain-identifier
-parameters, and have an expression body or a single `return`.
+must have the exact arity the method expects, take plain-identifier parameters, and
+have an expression body or a single `return`. An **`async`** adapter callback is
+rejected in-dialect (the lift is async-aware, but driving the resulting `Vec<Future>`
+to values is `Promise.all(arr.map(f))` → `join_all`, series 051) — see [async /
+await](#async--await).
 
 **Lambda lifting (series 048).** Every expression-bodied adapter callback is
 *lifted* to a named top-level `fn __cb_<method>_<n>` whose params are the arrow's
@@ -416,7 +424,7 @@ a `fn`-pointer; a bare top-level fn or normalized arrow coerces to it
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `async` arrow callback | Not yet | `async arrow closure` |
+| `async` arrow callback in an adapter (dynamic async fan-out → series 051) | Not yet | `async callback in '.<method>' — dynamic async fan-out (Promise.all(arr.map(f)) → join_all) lands in series 051` |
 | Callback with the wrong parameter count | Not yet | `closure must take exactly <n> parameter(s)` |
 | Callback with a destructured/patterned parameter | Not yet | `closure parameter binding` |
 | Callback body that isn't an expression or a single `return` | Not yet | `closure body must be an expression or a single return` |
