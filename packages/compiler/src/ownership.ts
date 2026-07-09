@@ -490,6 +490,15 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
     case "rcClone":
       collectUses(e.expr, movable, out);
       return;
+    // Task-escape nodes (series 051c increment 2): a `lockAccess` reads its
+    // wrapped sub-expression's uses; an `arcClone` names an `Arc`-wrapped binding
+    // (not a movable non-Copy value — cloning the handle is the whole point), so
+    // it is a leaf here.
+    case "lockAccess":
+      collectUses(e.expr, movable, out);
+      return;
+    case "arcClone":
+      return;
     case "iterMap":
     case "iterFilter":
       collectUses(e.receiver, movable, out);
@@ -783,6 +792,14 @@ function placeInExpr(e: HirExpr, liveOut: Live, ctx: PlaceCtx): void {
       case "rcClone":
         visit(x.expr);
         return;
+      // Task-escape nodes (series 051c increment 2): recurse a `lockAccess`'s
+      // wrapped expr (a shared-binding read); an `arcClone` is a leaf (an
+      // `Arc`-handle clone, never a movable non-Copy value).
+      case "lockAccess":
+        visit(x.expr);
+        return;
+      case "arcClone":
+        return;
       case "iterMap":
       case "iterFilter":
         visit(x.receiver);
@@ -820,7 +837,10 @@ function collectLetBindings(
   for (const s of body) {
     switch (s.kind) {
       case "let":
-        if (isCloneableMovable(s.ty, structs)) movable.add(s.name);
+        // A task-escape share-wrapped binding (series 051c increment 2) is an
+        // `Arc<…>` handle, not a movable non-Copy value — its downstream uses are
+        // `Arc::clone`/`.lock()`, never a bare move. Never add it to `movable`.
+        if (!s.share && isCloneableMovable(s.ty, structs)) movable.add(s.name);
         break;
       case "if":
         collectLetBindings(s.conseq, movable, structs);

@@ -77,6 +77,7 @@ import type {
 } from "./hir";
 import { refineNumerics } from "./numeric";
 import { refineOwnership } from "./ownership";
+import { refineTaskEscape } from "./task-escape";
 import { refineRc } from "./rc";
 import { refineStrings } from "./strings";
 import { validate } from "./validate";
@@ -246,13 +247,24 @@ export function lower(program: Program): HirModule {
   // the directives have imposed their own ownership model: an `rc` alias is already
   // `Rc::clone` (not a bare move) and an arena `Vec` is already un-annotated, so the
   // clone pass leaves both alone and only fills the remaining plain-move gaps (037).
+  // The task-escape pass (series 051c increment 2) runs **before**
+  // `refineOwnership`: it rewrites shared spawn-arg captures to `Arc::clone`
+  // handles and the parent's later uses to `.lock().unwrap()`, so by the time the
+  // clone-inserting ownership pass runs, those sites are `arcClone`/`lockAccess`
+  // nodes (not bare movable idents) and it leaves them alone — no spurious
+  // `.clone()`. It runs *after* lowering has baked each callee param's `refMut`
+  // ownership signal into its `HirParam.ty` (the `Arc` vs `Arc<Mutex>` input), and
+  // after the numeric/string/rc/arena refinements so the wrapped inner types are
+  // final.
   return refineOwnership(
-    refineArena(
-      refineRc(
-        refineStrings(refineNumerics({ items, main, mainRet, mainAsync })),
-        { rcScopes: analysis.rcScopes, classes: analysis.classes },
+    refineTaskEscape(
+      refineArena(
+        refineRc(
+          refineStrings(refineNumerics({ items, main, mainRet, mainAsync })),
+          { rcScopes: analysis.rcScopes, classes: analysis.classes },
+        ),
+        analysis.arenaScopes,
       ),
-      analysis.arenaScopes,
     ),
   );
 }
@@ -3411,13 +3423,21 @@ function asyncCallItemType(
  */
 function assertSpawnArgsSafe(call: CallExpression, analysis: ModuleAnalysis): void {
   for (const arg of call.arguments) {
-    // A bare local: safe only if its type is provably `Copy`.
+    // A bare local. A provably-`Copy` local moves into the task leaving the
+    // original live (increment 1). A non-`Copy` local of a *wrappable* shape (a
+    // named struct, or a `String`/scalar) is deferred to the inter-procedural
+    // task-escape pass (`refineTaskEscape`, increment 2): it either stays a plain
+    // move (one spawn, never reused) or is wrapped in `Arc`/`Arc<Mutex>`. The
+    // pass proves soundness or fails loud — so we admit it into the HIR here and
+    // let that pass adjudicate. A local of *unknown* type stays fail-loud (the
+    // pass cannot classify what it cannot type).
     if (arg.type === "Identifier") {
       const name = (arg as Identifier).name;
       const ty = analysis.bindingTypes.get(name);
       if (ty && isCopyRustType(ty)) continue;
+      if (ty && isTaskWrappableType(ty)) continue;
       throw new UnsupportedError({
-        type: "value captured by a spawned task is used after the spawn (Arc wrapping is series 051c increment 2)",
+        type: "value captured by a spawned task has a shape the task-escape pass cannot wrap in Arc/Arc<Mutex> — not provably safe to spawn",
       });
     }
     // A literal (number/bool/string-literal) or other non-identifier arg carries
@@ -3425,11 +3445,30 @@ function assertSpawnArgsSafe(call: CallExpression, analysis: ModuleAnalysis): vo
     // `Copy`. These move into the task with nothing left behind.
     if (arg.type === "Literal") continue;
     // Anything else (a member access, a nested call, arithmetic, …) may capture
-    // a shared local transitively — reject conservatively (increment 2).
+    // a shared local transitively — the task-escape pass cannot reduce it to a
+    // single wrapped binding, so reject conservatively (fail-loud contract).
     throw new UnsupportedError({
-      type: "value captured by a spawned task is used after the spawn (Arc wrapping is series 051c increment 2)",
+      type: "value captured by a spawned task has a shape the task-escape pass cannot wrap in Arc/Arc<Mutex> — not provably safe to spawn",
     });
   }
+}
+
+/**
+ * A shared capture the task-escape pass (`refineTaskEscape`, series 051c
+ * increment 2) can wrap in `Arc<T>` / `Arc<Mutex<T>>`: a named `struct` (the
+ * common shared-object shape), or a `String`/scalar whole value. A borrowed,
+ * `Option`, collection, `Rc`, or trait-object type is *not* wrappable by the
+ * increment-2 pass — those stay fail-loud at the spawn site.
+ */
+function isTaskWrappableType(ty: RustType): boolean {
+  return (
+    ty.kind === "struct" ||
+    ty.kind === "String" ||
+    ty.kind === "f64" ||
+    ty.kind === "usize" ||
+    ty.kind === "i64" ||
+    ty.kind === "bool"
+  );
 }
 
 /**

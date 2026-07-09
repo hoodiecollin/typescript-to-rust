@@ -96,6 +96,14 @@ export type RustType =
   /** `Box<inner>` (series 053c) — an owned heap box; carries a `dyn IA` for a
    * heterogeneous collection element (`Vec<Box<dyn IA>>`). */
   | { kind: "box"; inner: RustType }
+  /**
+   * `std::sync::Arc<inner>` (a shared read handle) or, when `mutex`,
+   * `std::sync::Arc<std::sync::Mutex<inner>>` (shared interior-mutable handle) —
+   * series 051c increment 2's task-escape wrap. Produced only by
+   * `refineTaskEscape` for a binding/param captured by a spawned task; emitted
+   * fully qualified (no `use`).
+   */
+  | { kind: "arc"; inner: RustType; mutex: boolean }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -379,7 +387,23 @@ export type HirExpr =
    * (series 028c). Replaces a heap `array` literal in a `"use arena"` scope; the
    * arena binding name is `arena`.
    */
-  | { kind: "bumpVec"; arena: string; elements: HirExpr[] };
+  | { kind: "bumpVec"; arena: string; elements: HirExpr[] }
+  /**
+   * `std::sync::Arc::clone(&name)` — a fresh shared handle to a task-escaping
+   * capture, moved into a spawned task (series 051c increment 2, the
+   * inter-procedural task-escape pass). Replaces a bare-move spawn arg once the
+   * pass proves the binding must be wrapped (`Arc`/`Arc<Mutex>`).
+   */
+  | { kind: "arcClone"; name: string }
+  /**
+   * `<expr>.lock().unwrap()` — acquire the `Mutex` guard of an `Arc<Mutex<T>>`
+   * (series 051c increment 2). Composes under `field`/`assign`/deref: a field
+   * read `counter.n` becomes `counter.lock().unwrap().n` (`field` over a
+   * `lockAccess`), and a whole-value scalar read `counter` becomes
+   * `*counter.lock().unwrap()` (`unary "*"` over a `lockAccess`). Only ever
+   * produced by the task-escape pass over a `Arc<Mutex<T>>`-wrapped binding.
+   */
+  | { kind: "lockAccess"; expr: HirExpr };
 
 /** One step of a `mapBuild`: spread a whole source, or insert a single entry. */
 export type MapBuildPart =
@@ -402,6 +426,14 @@ export type HirStmt =
        * await Promise.all([…])` whose initializer is a `join!`/`try_join!` tuple.
        */
       names?: string[];
+      /**
+       * A task-escape share wrap (series 051c increment 2): the binding is shared
+       * into ≥2 spawned tasks (or one task and reused by the parent), so its
+       * declaration is wrapped. `"arc"` → `std::sync::Arc::new(<init>)` (shared
+       * read); `"arcMutex"` → `std::sync::Arc::new(std::sync::Mutex::new(<init>))`
+       * (shared mutation). Populated by `refineTaskEscape`; drives `emitStmt`.
+       */
+      share?: "arc" | "arcMutex";
     }
   | { kind: "return"; value: HirExpr | null }
   | { kind: "expr"; expr: HirExpr }

@@ -400,6 +400,18 @@ function emitStmt(stmt: HirStmt): string {
       }
       const mut = stmt.mut ? "mut " : "";
       const ty = stmt.ty ? `: ${emitType(stmt.ty)}` : "";
+      // A task-escape share wrap (series 051c increment 2): the initializer is
+      // wrapped in `Arc::new(…)` (shared read) / `Arc::new(Mutex::new(…))`
+      // (shared mutation). The binding's type annotation is dropped — Rust infers
+      // the `Arc<…>` — so the wrap reads cleanly.
+      if (stmt.share) {
+        const inner = emitExpr(stmt.init);
+        const wrapped =
+          stmt.share === "arcMutex"
+            ? `std::sync::Arc::new(std::sync::Mutex::new(${inner}))`
+            : `std::sync::Arc::new(${inner})`;
+        return `let ${mut}${rid(stmt.name)} = ${wrapped};`;
+      }
       return `let ${mut}${rid(stmt.name)}${ty} = ${emitExpr(stmt.init)};`;
     }
     case "return":
@@ -678,6 +690,10 @@ function emitExpr(expr: HirExpr): string {
       return `tokio::spawn(${emitExpr(expr.expr)})`;
     case "joinHandleAwait":
       return `${emitExpr(expr.expr)}.await.unwrap()`;
+    case "arcClone":
+      return `std::sync::Arc::clone(&${rid(expr.name)})`;
+    case "lockAccess":
+      return `${emitExpr(expr.expr)}.lock().unwrap()`;
     case "asyncMove": {
       const body = expr.stmts.map((s) => indent(emitStmt(s))).join("\n");
       return `async move {\n${body}\n    }`;
@@ -804,5 +820,9 @@ function emitType(ty: RustType): string {
       return `impl ${rid(ty.trait)}`;
     case "box":
       return `Box<${emitType(ty.inner)}>`;
+    case "arc":
+      return ty.mutex
+        ? `std::sync::Arc<std::sync::Mutex<${emitType(ty.inner)}>>`
+        : `std::sync::Arc<${emitType(ty.inner)}>`;
   }
 }
