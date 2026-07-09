@@ -328,12 +328,29 @@ Modeled: a free `async function` → `async fn`; an **`async` method** →
 `async fn`, series 054b); `Promise<T>` return → `T`; `await asyncFn(...)` /
 `await obj.method(...)` → `.await` (a fallible async fn/method `?`-propagates via
 `.await?`). Directly-awaited only — an un-polled future is rejected (un-awaited-call
-→ `tokio::spawn` is series 051c). Concurrency combinators (`Promise.all`/`race`/…,
-timers, `spawn`) are series 051.
+→ `tokio::spawn` is series 051c).
+
+**Concurrency combinators (series 051a).** Under `await`, three fixed-arity shapes
+map onto tokio macros:
+
+| TypeScript | Rust |
+|---|---|
+| `await asyncFn(...).then(cb)` (non-async single-expr `cb`) | `__cb_then_<n>(asyncFn(...).await)` (the `cb` lifts to a named `fn`; no `.then`) |
+| `await Promise.all([a(), b(), …])` (array literal, infallible) | `tokio::join!(a(), b(), …)` → a tuple (`const [a,b] = …` → `let (a, b) = …`) |
+| `await Promise.all([…])` where any element is fallible | `tokio::try_join!(…)?` → the tuple after `?` |
+| `await Promise.race([a(), b(), …])` (array literal, homogeneous) | `tokio::select! { res = a() => res, … }` (first to complete; losers dropped) |
+
+Dynamic fan-out (`Promise.all(arr.map(f))` → `join_all`), timers, and `spawn` are
+series 051b/c. `tokio::select!` **drops** the losing arms (cancels them at their next
+await) — see [Semantic divergences](#semantic-divergences-from-typescript).
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `await using` (async resource disposal) | Forbidden | `` `await using` (async resource disposal) `` |
+| `Promise.all` / `Promise.race` with a non-literal array (dynamic fan-out) | Not yet | `Promise.all/race with a non-literal array (dynamic fan-out is series 051b)` |
+| Heterogeneous `Promise.race` (arms don't unify to one type) | Not yet | `heterogeneous Promise.race (select! arms must unify to one type)` |
+| `.then` with a reject handler (two-arg `.then(onOk, onErr)`) | Not yet | `` `.then` with a reject handler (two-arg) — catch territory `` |
+| `.then` on a non-async-call receiver | Not yet | `` `.then` receiver must be a call to an async function `` |
 | `await` of a non-call expression (`await x`) | Not yet | `await of a non-call expression (only `await asyncFn(...)`)` |
 | `await` of a call to a non-async / non-free function | Not yet | `await of a call to a non-async function` |
 | `await` of a call to a non-async method | Not yet | `await of a call to a non-async method` |
