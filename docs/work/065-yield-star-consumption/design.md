@@ -103,11 +103,22 @@ in 065 but is a *scope* boundary, not a capability one. It does **not** need nig
   with liveness across yields. The extension is a **`resume(&mut self, sent: V) ->
   GenStep<Y, R>`** method that binds `sent` as the value of the `yield` expression in
   the resumed state arm — pure stable Rust, same technique 052 uses for `next()`.
-- **A bidirectional generator emits a different shape** — a custom resumable type
-  with `.resume(v)`, **not** `impl Iterator` — so it does not compose with
-  `for-of` / `.collect()` / `yield*`. The per-generator signal is clean: if any
-  `yield`'s **result is read**, the generator is bidirectional and gets the resume
-  machine; otherwise it stays `impl Iterator` (today's path).
+- **The send entry point can't be `Iterator::next` — a signature mismatch, not a
+  deeper limit.** `Iterator::next(&mut self)` takes **no parameter**, so there is
+  nowhere to thread the sent value. The send value therefore needs a *separate
+  inherent method* `resume(&mut self, sent: V) -> GenStep<Y>`. That mismatch — **not**
+  the state machine, which is identical to 052 — is the whole reason bidirectional
+  isn't "just `Iterator`."
+- **It can still ALSO `impl Iterator`.** When the sent type `TNext` is defaultable
+  (notably: includes `undefined`), the same struct additionally implements
+  `Iterator` with `fn next(&mut self) { self.resume(<default>) }`. This is **faithful**
+  — JS `for (const x of gen())` also passes `undefined` into each `next()`. So a
+  bidirectional generator can expose **both** surfaces on one struct: `impl Iterator`
+  (for `for-of` / `.collect()` / `yield*`) **and** `resume(v)` (for the send path) —
+  it is *not* necessarily a distinct, iterator-less type. Whether to always emit both,
+  or only `impl Iterator` when `TNext` is defaultable, is the open design question in
+  the follow-on. The per-generator signal for *needing* `resume` is clean: any
+  `yield` whose **result is read** makes the generator bidirectional.
 - **Types** come from TS's third generator type param `Generator<Y, R, TNext>`
   (`TNext` = resume-in type); unannotated → fail-loud. The first `next()`'s argument
   is discarded (no pending `yield` yet), matching JS.
