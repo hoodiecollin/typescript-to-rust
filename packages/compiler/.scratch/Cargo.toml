@@ -24,8 +24,15 @@ tslib = { path = "../../../crates/tslib" }
 # Async lowering targets tokio: TS `async function` → `async fn`, and the
 # generated `main` becomes `#[tokio::main]`. Pinned so the offline cache stays
 # warm; the harness fetches it online on a cold cache. Unused by non-async
-# output (a present-but-unused dependency costs nothing at check time).
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# output (a present-but-unused dependency costs nothing at check time). The
+# `time` feature backs awaited timers (series 051b): `await sleep(ms)` →
+# `tokio::time::sleep(...)`, which does not compile without it.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# futures backs dynamic async fan-out (series 051b): `Promise.all(arr.map(f))` /
+# `Promise.allSettled` → `futures::future::join_all` / `try_join_all` (fully
+# qualified — no `use` prelude). Present-but-unused by fan-out-free output (costs
+# nothing at check time).
+futures = "0.3"
 # indexmap backs `Record`/object types (series 041): JS objects and `Map`s
 # iterate in *insertion order*, which `std::collections::HashMap` does not
 # preserve; `IndexMap` does, so `Object.keys`/`values` observe JS order. A

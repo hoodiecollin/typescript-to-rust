@@ -613,6 +613,52 @@ function calledNames(body: unknown): Set<string> {
 }
 
 /**
+ * Callees inside a dynamic fan-out callback (series 051b): the arrow bodies of
+ * `Promise.all(arr.map(f))`. `walkOwn` stops at an arrow boundary, so a fallible
+ * async call inside the map callback is invisible to the enclosing scope's
+ * `callsFree` — yet a fallible `Promise.all` fan-out emits `try_join_all(…).await?`,
+ * whose `?` requires the enclosing scope to be `Result`. This descends *only* into
+ * the `Promise.all` fan-out arrows (NOT `Promise.allSettled`, which never
+ * `?`-propagates — each settled outcome stays `Result<T, String>`) so the fallible
+ * inner callee counts toward the enclosing scope's fallibility.
+ */
+function fanOutCalledNames(body: unknown): Set<string> {
+  const names = new Set<string>();
+  walkOwn(body, (n) => {
+    if (n.type !== "CallExpression") return;
+    const callee = n.callee;
+    // `Promise.all(<arg>)`.
+    if (
+      !isNode(callee) ||
+      callee.type !== "MemberExpression" ||
+      !isNode(callee.object) ||
+      identName(callee.object) !== "Promise" ||
+      identName(callee.property) !== "all"
+    ) {
+      return;
+    }
+    const args = n.arguments as AnyNode[] | undefined;
+    const arg0 = args?.[0];
+    // `<arr>.map(<arrow>)`.
+    if (
+      !isNode(arg0) ||
+      arg0.type !== "CallExpression" ||
+      !isNode(arg0.callee) ||
+      arg0.callee.type !== "MemberExpression" ||
+      identName(arg0.callee.property) !== "map"
+    ) {
+      return;
+    }
+    const mapArgs = arg0.arguments as AnyNode[] | undefined;
+    const arrow = mapArgs?.[0];
+    if (!isNode(arrow) || arrow.type !== "ArrowFunctionExpression") return;
+    // Descend the arrow body explicitly (walkOwn stops at the boundary above).
+    for (const inner of calledNames(arrow.body)) names.add(inner);
+  });
+  return names;
+}
+
+/**
  * Method names this body calls (`obj.M(…)` / `this.M(…)`), restricted to `known`
  * declared class-method names so built-ins (`.push`, `console.log`) never count.
  */
@@ -718,10 +764,15 @@ function analyzeFallible(
 
   const scopes: FallScope[] = [];
   const record = (key: string, body: unknown, extra: Partial<FallScope>) => {
+    const callsFree = calledNames(body);
+    // A fallible `Promise.all(arr.map(f))` fan-out `?`-propagates in this scope, so
+    // its inner callee counts here even though it sits inside the map arrow (series
+    // 051b; `walkOwn` otherwise stops at the arrow boundary).
+    for (const c of fanOutCalledNames(body)) callsFree.add(c);
     scopes.push({
       key,
       throws: bodyThrows(body),
-      callsFree: calledNames(body),
+      callsFree,
       callsMethod: calledMethodNames(body, methodUniverse),
       newsClass: newedClassNames(body),
       ...extra,

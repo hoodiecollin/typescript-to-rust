@@ -2334,6 +2334,27 @@ function isArrayFindCall(e: Expression): boolean {
   );
 }
 
+/**
+ * Is `e` an `await Promise.allSettled(...)` (series 051b)? Its result type is
+ * `Vec<Result<T, String>>`, which no dialect TS annotation expresses (the
+ * dialect has no `PromiseSettledResult`); Rust infers it, so the binding is
+ * allowed un-annotated (like a `join!` tuple destructure).
+ */
+function isAllSettledAwait(e: Expression): boolean {
+  if (e.type !== "AwaitExpression") return false;
+  const arg = (e as AwaitExpression).argument;
+  if (arg.type !== "CallExpression") return false;
+  const callee = (arg as CallExpression).callee;
+  if (callee.type !== "MemberExpression") return false;
+  const m = callee as MemberExpression;
+  return (
+    m.object.type === "Identifier" &&
+    (m.object as Identifier).name === "Promise" &&
+    m.property.type === "Identifier" &&
+    (m.property as Identifier).name === "allSettled"
+  );
+}
+
 function lowerVarDecl(
   decl: VariableDeclaration,
   analysis: ModuleAnalysis,
@@ -2399,7 +2420,8 @@ function lowerVarDecl(
       !isObviousLiteralInit(d.init) &&
       !isObjectEntriesCall(d.init) &&
       !isJsonParseCall(d.init) &&
-      !isArrayFindCall(d.init)
+      !isArrayFindCall(d.init) &&
+      !isAllSettledAwait(d.init)
     ) {
       throw new UnsupportedError({
         type: `binding '${d.id.name}' without a type annotation`,
@@ -2914,6 +2936,27 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   const call = arg as CallExpression;
   const callee = call.callee;
 
+  // `await sleep(ms)` — the dialect's one modeled delay primitive (series 051b).
+  // `sleep` is a recognized built-in (like `console.log`), NOT a user async fn;
+  // its single `number` arg → `Duration::from_millis(ms as u64)`. Checked before
+  // the generic async-fn Identifier handling below.
+  if (
+    callee.type === "Identifier" &&
+    (callee as Identifier).name === "sleep" &&
+    !analysis.asyncFns.has("sleep")
+  ) {
+    const msArg = call.arguments[0];
+    if (!msArg || call.arguments.length !== 1) {
+      throw new UnsupportedError({
+        type: "sleep expects exactly one numeric argument",
+      });
+    }
+    return {
+      kind: "await",
+      expr: { kind: "sleep", ms: lowerExpr(msArg, analysis) },
+    };
+  }
+
   // ── Async concurrency combinators (series 051a) ─────────────────────────────
   // All three 051a shapes appear under `await`; route them here before the plain
   // async-method / async-fn paths below.
@@ -3038,17 +3081,41 @@ function lowerAwaitCombinator(
     };
   }
 
-  // `Promise.all([...])` / `Promise.race([...])`.
+  // `Promise.all([...])` / `Promise.race([...])` / `Promise.allSettled(...)`.
   const obj = callee.object;
   if (
     obj.type === "Identifier" &&
     (obj as Identifier).name === "Promise" &&
-    (propName === "all" || propName === "race")
+    (propName === "all" || propName === "race" || propName === "allSettled")
   ) {
     const arg0 = call.arguments[0];
-    if (!arg0 || arg0.type !== "ArrayExpression") {
+
+    // ── Dynamic fan-out (series 051b) — `Promise.all(arr.map(f))` /
+    // `Promise.allSettled(arr.map(f))`. The sole argument is `arr.map(f)`, a
+    // CallExpression whose callee is a `.map` MemberExpression. `race` never
+    // takes this form (its fan-out has no tuple/select! shape).
+    if (
+      (propName === "all" || propName === "allSettled") &&
+      arg0 &&
+      arg0.type === "CallExpression" &&
+      (arg0 as CallExpression).callee.type === "MemberExpression" &&
+      ((arg0 as CallExpression).callee as MemberExpression).property.type ===
+        "Identifier" &&
+      (((arg0 as CallExpression).callee as MemberExpression).property as Identifier)
+        .name === "map"
+    ) {
+      return lowerDynamicFanOut(
+        arg0 as CallExpression,
+        propName as "all" | "allSettled",
+        analysis,
+      );
+    }
+
+    // `allSettled` accepts ONLY the `arr.map(f)` fan-out (051b); an array-literal
+    // form is not modeled here — fall through to the fail-loud below.
+    if (propName === "allSettled" || !arg0 || arg0.type !== "ArrayExpression") {
       throw new UnsupportedError({
-        type: "Promise.all/race with a non-literal array (dynamic fan-out is series 051b)",
+        type: "Promise.all/allSettled argument must be an array literal or arr.map(f)",
       });
     }
     const elements = (arg0 as ArrayExpression).elements;
@@ -3085,6 +3152,172 @@ function lowerAwaitCombinator(
   }
 
   return null;
+}
+
+/**
+ * Lower a dynamic async fan-out (series 051b): `Promise.all(arr.map(f))` or
+ * `Promise.allSettled(arr.map(f))`, where `arr` is a homogeneous array and `f`
+ * is a `.map` callback in EITHER accepted form:
+ *
+ *   1. **inline** — `id => fetchRow(id)` (a non-async arrow whose body is a call
+ *      to an async fn, i.e. it *returns* a future). Emits an inline closure
+ *      `|id| fetch_row(id)`; Rust infers the future type — no lift, no typer.
+ *   2. **lifted** — `async id => await fetchRow(id)` (an async arrow awaiting an
+ *      async call). Lifts to `async fn __cb_map_<n>(id: T) -> R { return
+ *      fetch_row(id).await; }`, emitting `.map(__cb_map_n)`.
+ *
+ * Both drive `arr.into_iter().map(<closure|cb>)` through `join_all`
+ * (infallible / allSettled) or `try_join_all` (`?`-propagated, fallible `all`):
+ *
+ *   - `Promise.all` + infallible → `join_all(...).await` → `Vec<T>`.
+ *   - `Promise.all` + fallible  → `try_join_all(...).await?` (short-circuit).
+ *   - `Promise.allSettled`      → `join_all(...).await` → `Vec<Result<T, String>>`
+ *     (each fallible element's output is already `Result<T, String>`; never
+ *     short-circuits).
+ */
+function lowerDynamicFanOut(
+  mapCall: CallExpression,
+  propName: "all" | "allSettled",
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const mapCallee = mapCall.callee as MemberExpression;
+  const arr = mapCallee.object as Expression;
+  const f = mapCall.arguments[0];
+  if (!f || f.type !== "ArrowFunctionExpression") {
+    throw new UnsupportedError({
+      type: "dynamic fan-out `arr.map(f)` callback must be an arrow function",
+    });
+  }
+  const arrow = f as ArrowFunctionExpression;
+  if (arrow.params.length !== 1) {
+    throw new UnsupportedError({
+      type: "dynamic fan-out callback must take exactly one parameter",
+    });
+  }
+  const paramName = arrow.params[0]?.name;
+  if (!paramName) {
+    throw new UnsupportedError({
+      type: "dynamic fan-out callback parameter binding",
+    });
+  }
+
+  // Locate the inner async call and whether its callee is fallible.
+  let innerCall: CallExpression;
+  if (arrow.async) {
+    // Lifted form: `async id => await fetchRow(id)` — body is an `await` of a call.
+    const body = arrow.expression
+      ? (arrow.body as Expression)
+      : null;
+    const awaitExpr =
+      body?.type === "AwaitExpression" ? (body as AwaitExpression) : null;
+    if (!awaitExpr || awaitExpr.argument.type !== "CallExpression") {
+      throw new UnsupportedError({
+        type: "lifted fan-out callback must be `async x => await asyncFn(x)`",
+      });
+    }
+    innerCall = awaitExpr.argument as CallExpression;
+  } else {
+    // Inline form: `id => fetchRow(id)` — body is directly a call.
+    const body = arrow.expression ? (arrow.body as Expression) : null;
+    if (!body || body.type !== "CallExpression") {
+      throw new UnsupportedError({
+        type: "inline fan-out callback must be `x => asyncFn(x)`",
+      });
+    }
+    innerCall = body as CallExpression;
+  }
+  const innerCallee = innerCall.callee;
+  if (
+    innerCallee.type !== "Identifier" ||
+    !analysis.asyncFns.has((innerCallee as Identifier).name)
+  ) {
+    throw new UnsupportedError({
+      type: "dynamic fan-out callback body must call an async function",
+    });
+  }
+  const innerName = (innerCallee as Identifier).name;
+  const itemType = asyncCallItemType(innerCall, analysis);
+  const fallible = analysis.fallible.has(innerName);
+
+  // The `.map` argument: an inline closure or a bare path to a lifted async fn.
+  let mapArg: HirExpr;
+  if (arrow.async) {
+    // Lift to `async fn __cb_map_<n>(paramName: T_param) -> itemType`. The param
+    // type is the map element type: prefer `arr`'s Vec element type, else fall
+    // back to the arrow param annotation, else fail-loud.
+    const paramType = fanOutParamType(arr, arrow, analysis);
+    const cbName = `__cb_map_${++analysis.liftCounter}`;
+    analysis.liftedFns.push({
+      kind: "fn",
+      name: cbName,
+      isAsync: true,
+      params: [{ name: paramName, ty: paramType }],
+      ret: itemType,
+      body: [
+        {
+          kind: "return",
+          value: {
+            kind: "await",
+            expr: lowerCall(innerCall, analysis, true),
+          },
+        },
+      ],
+    });
+    mapArg = { kind: "ident", name: cbName };
+  } else {
+    // Inline closure `|paramName| <bare async call>`.
+    mapArg = {
+      kind: "closure",
+      params: [paramName],
+      body: lowerCall(innerCall, analysis, true),
+    };
+  }
+
+  // `arr.into_iter().map(<mapArg>)`.
+  const iter: HirExpr = {
+    kind: "method",
+    receiver: {
+      kind: "method",
+      receiver: lowerExpr(arr, analysis),
+      name: "into_iter",
+      args: [],
+    },
+    name: "map",
+    args: [mapArg],
+  };
+
+  if (propName === "allSettled") {
+    // Each element's output is `Result<T, String>`; Rust infers `Vec<Result<…>>`.
+    return { kind: "joinAll", iter };
+  }
+  // `Promise.all`: fallible → `try_join_all(...)?`; infallible → `join_all(...)`.
+  return fallible
+    ? { kind: "try", expr: { kind: "tryJoinAll", iter } }
+    : { kind: "joinAll", iter };
+}
+
+/**
+ * The map element type for a lifted async fan-out callback (series 051b): the
+ * element type of `arr` (a known `Vec<E>` binding or an array literal), else the
+ * arrow param's own type annotation, else fail-loud with a clear message.
+ */
+function fanOutParamType(
+  arr: Expression,
+  arrow: ArrowFunctionExpression,
+  analysis: ModuleAnalysis,
+): RustType {
+  // Prefer the array's element type (`elementTypeOf` handles Vec bindings and
+  // array literals). If it cannot resolve, fall back to the arrow param annotation.
+  try {
+    return elementTypeOf(arr, analysis);
+  } catch {
+    const param = arrow.params[0];
+    const ann = param?.typeAnnotation?.typeAnnotation;
+    if (ann) return lowerType(ann as TSType, analysis.structs);
+    throw new UnsupportedError({
+      type: "cannot resolve lifted fan-out callback parameter type (annotate the array or the callback parameter)",
+    });
+  }
 }
 
 /**

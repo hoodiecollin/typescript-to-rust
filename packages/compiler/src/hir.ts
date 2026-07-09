@@ -207,6 +207,32 @@ export type HirExpr =
    */
   | { kind: "select"; futures: HirExpr[] }
   /**
+   * `|a, b| body` — an inline closure (series 051b). The dynamic fan-out
+   * inline form `ids.map(id => fetchRow(id))` emits `|id| fetch_row(id)`, whose
+   * future type Rust infers (no lift, no typer).
+   */
+  | { kind: "closure"; params: string[]; body: HirExpr }
+  /**
+   * `futures::future::join_all(iter).await` — drives a `Vec` of same-typed
+   * futures to a `Vec<T>` (series 051b, dynamic `Promise.all(arr.map(f))` over
+   * infallible element futures, and `Promise.allSettled` over fallible ones,
+   * where each future's output is already `Result<T, String>`).
+   */
+  | { kind: "joinAll"; iter: HirExpr }
+  /**
+   * `futures::future::try_join_all(iter).await` — like `join_all` but for
+   * fallible element futures; yields `Result<Vec<T>, E>`, short-circuiting on
+   * the first `Err`. Wrapped in a `{kind:"try"}` so the `?` propagates the
+   * `Vec` (series 051b, dynamic `Promise.all` over fallible fan-out).
+   */
+  | { kind: "tryJoinAll"; iter: HirExpr }
+  /**
+   * `tokio::time::sleep(std::time::Duration::from_millis(ms as u64))` — the
+   * dialect's one modeled delay primitive (series 051b, `await sleep(ms)`).
+   * Wrapped in a `{kind:"await"}` to suspend on it.
+   */
+  | { kind: "sleep"; ms: HirExpr }
+  /**
    * `xs.map(p => body)` → `xs.iter().map(|p| cbName(*p, forwarded…)).collect::<Vec<_>>()`
    * (series 048). The callback body is lifted to a top-level `fn cbName` (whose
    * params are `p` plus the read-only free vars); the shim forwards `*p` (the Copy

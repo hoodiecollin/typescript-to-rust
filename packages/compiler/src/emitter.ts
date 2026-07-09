@@ -666,6 +666,14 @@ function emitExpr(expr: HirExpr): string {
         .join("\n");
       return `tokio::select! {\n${arms}\n    }`;
     }
+    case "closure":
+      return `|${expr.params.map(rid).join(", ")}| ${emitExpr(expr.body)}`;
+    case "joinAll":
+      return `futures::future::join_all(${emitExpr(expr.iter)}).await`;
+    case "tryJoinAll":
+      return `futures::future::try_join_all(${emitExpr(expr.iter)}).await`;
+    case "sleep":
+      return `tokio::time::sleep(std::time::Duration::from_millis(${emitExpr(expr.ms)} as u64))`;
     case "iterMap":
       return `${emitExpr(expr.receiver)}.iter().map(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
     case "iterFilter":
