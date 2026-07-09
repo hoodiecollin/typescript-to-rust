@@ -330,8 +330,8 @@ Modeled: a free `async function` → `async fn`; an **`async` method** →
 `.await?`). Directly-awaited only — an un-polled future is rejected (un-awaited-call
 → `tokio::spawn` is series 051c).
 
-**Concurrency combinators (series 051a).** Under `await`, three fixed-arity shapes
-map onto tokio macros:
+**Concurrency combinators (series 051a/b).** Under `await`, these shapes map onto
+tokio / `futures`:
 
 | TypeScript | Rust |
 |---|---|
@@ -339,15 +339,21 @@ map onto tokio macros:
 | `await Promise.all([a(), b(), …])` (array literal, infallible) | `tokio::join!(a(), b(), …)` → a tuple (`const [a,b] = …` → `let (a, b) = …`) |
 | `await Promise.all([…])` where any element is fallible | `tokio::try_join!(…)?` → the tuple after `?` |
 | `await Promise.race([a(), b(), …])` (array literal, homogeneous) | `tokio::select! { res = a() => res, … }` (first to complete; losers dropped) |
+| `await Promise.all(arr.map(f))` (dynamic fan-out, infallible) | `futures::future::join_all(arr.into_iter().map(…)).await` → `Vec<T>` |
+| `await Promise.all(arr.map(f))` where `f`'s call is fallible | `futures::future::try_join_all(…).await?` → `Vec<T>` (short-circuit) |
+| `await Promise.allSettled(arr.map(f))` | `futures::future::join_all(…).await` → `Vec<Result<T, String>>` (no short-circuit) |
+| `await sleep(ms)` (the modeled delay primitive) | `tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await` |
 
-Dynamic fan-out (`Promise.all(arr.map(f))` → `join_all`), timers, and `spawn` are
-series 051b/c. `tokio::select!` **drops** the losing arms (cancels them at their next
-await) — see [Semantic divergences](#semantic-divergences-from-typescript).
+The fan-out `.map(f)` callback `f` may be an **inline non-async closure**
+(`id => asyncFn(id)` → `|id| async_fn(id)`) or a **lifted async arrow**
+(`async id => await asyncFn(id)` → a hoisted `async fn __cb_map_<n>`). `spawn` /
+`setTimeout` are series 051c. `tokio::select!` **drops** the losing arms (cancels them
+at their next await) — see [Semantic divergences](#semantic-divergences-from-typescript).
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `await using` (async resource disposal) | Forbidden | `` `await using` (async resource disposal) `` |
-| `Promise.all` / `Promise.race` with a non-literal array (dynamic fan-out) | Not yet | `Promise.all/race with a non-literal array (dynamic fan-out is series 051b)` |
+| `Promise.all` / `Promise.allSettled` argument that is neither an array literal nor `arr.map(f)` | Not yet | `Promise.all/allSettled argument must be an array literal or arr.map(f)` |
 | Heterogeneous `Promise.race` (arms don't unify to one type) | Not yet | `heterogeneous Promise.race (select! arms must unify to one type)` |
 | `.then` with a reject handler (two-arg `.then(onOk, onErr)`) | Not yet | `` `.then` with a reject handler (two-arg) — catch territory `` |
 | `.then` on a non-async-call receiver | Not yet | `` `.then` receiver must be a call to an async function `` |

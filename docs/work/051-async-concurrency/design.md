@@ -118,14 +118,26 @@ does not have. A heterogeneous `race` is fail-loud.
 tuple; it maps to `futures::future::join_all`, which drives a `Vec` of same-typed
 futures to a `Vec<T>`:
 
-```ts
-const rows = await Promise.all(ids.map(id => fetchRow(id)));
-```
-```rust
-let rows: Vec<Row> = futures::future::join_all(ids.into_iter().map(|id| fetch_row(id))).await;
-```
+**Both callback shapes are accepted (Collin, 2026-07-08).** The `.map(f)` fan-out
+callback may be either form, both driving to an iterator of futures fed to `join_all`:
 
-The `.map(f)` callback lifts via #9/#14 (it is an async arrow producing a future).
+1. **Inline non-async closure** — `ids.map(id => fetchRow(id))` (a non-async arrow
+   whose body is a call to an async fn, i.e. it *returns* a future). Emits an inline
+   `|id| fetch_row(id)` closure; Rust infers the future type — no lift, no typer.
+
+   ```ts
+   const rows: Array<Row> = await Promise.all(ids.map(id => fetchRow(id)));
+   ```
+   ```rust
+   let rows: Vec<Row> = futures::future::join_all(ids.into_iter().map(|id| fetch_row(id))).await;
+   ```
+
+2. **Lifted async arrow** — `ids.map(async id => await fetchRow(id))` (consumes the
+   054c async-lift readiness). Lifts to `async fn __cb_map_<n>(id: T) -> R`, emitting
+   `.map(__cb_map_n)`. The body is an `await` of an async call, so its return type `R`
+   comes from `asyncCallItemType` (the Promise-inner of the inner call) — **not** the
+   numeric-surface typer, which stays unchanged. `join_all(ids.into_iter().map(__cb_map_n))`.
+
 `join_all` on **fallible** element futures yields `Vec<Result<T, E>>` — which is
 exactly `allSettled`'s shape, so `Promise.allSettled([...])` → the same `join_all`,
 typed `Vec<Result<T, String>>` (each settled outcome is a `Result`; `E` stays

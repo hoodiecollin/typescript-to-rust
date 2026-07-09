@@ -29,11 +29,16 @@ one fail-loud spec per slice.
 
 ## 051b — dynamic `join_all` / `allSettled` + timers (`packages/compiler/tests/conc-dynamic.test.ts`)
 
-- **CONC10** `await Promise.all(ids.map(id => fetchRow(id)))` → emitted contains
-  `futures::future::join_all(` and `.await`, result typed `Vec<`; the manifest gains
+- **CONC10** `await Promise.all(ids.map(id => fetchRow(id)))` (**inline non-async
+  closure** form) → emitted contains `futures::future::join_all(`, an inline
+  `.map(|id| fetch_row(id))`, and `.await`, result typed `Vec<`; the manifest gains
   `futures`.
+- **CONC10b** `await Promise.all(ids.map(async id => await fetchRow(id)))` (**lifted
+  async-arrow** form, consuming 054c) → emitted contains `join_all(` over
+  `.map(__cb_map_` and a hoisted `async fn __cb_map_` whose return type is the
+  Promise-inner of the inner call. Both forms produce the same `Vec<T>`.
 - **CONC11** (differential) the dynamic fan-out over `[1, 2, 3]` prints the same
-  `Vec` of results in both TS and Rust, in order.
+  `Vec` of results in both TS and Rust, in order (assert for both callback forms).
 - **CONC12** `Promise.allSettled([...])` → `join_all` yielding `Vec<Result<T, String>>`;
   emitted result type contains `Vec<Result<`.
 - **CONC13** (differential) `allSettled` over a mix of a resolving and a throwing call
