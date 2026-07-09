@@ -2355,6 +2355,21 @@ function isAllSettledAwait(e: Expression): boolean {
   );
 }
 
+/**
+ * Is `e` an un-awaited async **free** call `doWork()` — the initializer of a
+ * `JoinHandle<T>` binding (series 051c increment 1, `const h = doWork()`)? Its
+ * result type is a `JoinHandle<T>`, which no dialect TS annotation expresses (the
+ * dialect has no `JoinHandle`); Rust infers it, so the binding is allowed
+ * un-annotated (like a `join!` tuple destructure or an `allSettled` await).
+ */
+function isSpawnInit(e: Expression, analysis: ModuleAnalysis): boolean {
+  return (
+    e.type === "CallExpression" &&
+    (e as CallExpression).callee.type === "Identifier" &&
+    analysis.asyncFns.has(((e as CallExpression).callee as Identifier).name)
+  );
+}
+
 function lowerVarDecl(
   decl: VariableDeclaration,
   analysis: ModuleAnalysis,
@@ -2421,7 +2436,8 @@ function lowerVarDecl(
       !isObjectEntriesCall(d.init) &&
       !isJsonParseCall(d.init) &&
       !isArrayFindCall(d.init) &&
-      !isAllSettledAwait(d.init)
+      !isAllSettledAwait(d.init) &&
+      !isSpawnInit(d.init, analysis)
     ) {
       throw new UnsupportedError({
         type: `binding '${d.id.name}' without a type annotation`,
@@ -2436,6 +2452,12 @@ function lowerVarDecl(
     // Track an `Object.entries(...)` binding so `es[i][0]`/`es[i][1]` can lower to
     // tuple field access (series 043).
     if (isObjectEntriesCall(d.init)) analysis.entriesBindings.add(d.id.name);
+    // Track a `JoinHandle` binding (series 051c increment 1): a binding whose
+    // lowered init is a `{kind:"spawn"}` node (an un-awaited async call) is a
+    // `JoinHandle<T>`. A later `await h` on it lowers to `joinHandleAwait`
+    // (`h.await.unwrap()`). Statements lower top-to-bottom, so this is recorded
+    // before the `await`.
+    if (init.kind === "spawn") analysis.joinHandleBindings.add(d.id.name);
     // Class inheritance (series 053c): a heterogeneous base-typed array binding
     // is `Vec<Box<dyn IA>>`. Rewrite its declared type and record it as a `dyn`
     // binding so a later `.field` read routes through a trait accessor and a
@@ -2928,6 +2950,19 @@ function isConsoleLog(callee: Expression): boolean {
  */
 function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   const arg = expr.argument;
+  // `await h` where `h` is a spawned-task handle (series 051c increment 1) →
+  // `h.await.unwrap()`. A `JoinHandle`'s `.await` yields `Result<T, JoinError>`;
+  // `.unwrap()` surfaces a task panic (a documented divergence). Checked before
+  // the call-only guard below, since the awaited value here is a bare binding.
+  if (
+    arg.type === "Identifier" &&
+    analysis.joinHandleBindings.has((arg as Identifier).name)
+  ) {
+    return {
+      kind: "joinHandleAwait",
+      expr: { kind: "ident", name: (arg as Identifier).name },
+    };
+  }
   if (arg.type !== "CallExpression") {
     throw new UnsupportedError({
       type: "await of a non-call expression (only `await asyncFn(...)`)",
@@ -3362,11 +3397,125 @@ function asyncCallItemType(
   return lowerType(inner, analysis.structs);
 }
 
+/**
+ * Conservatism guard for `tokio::spawn` (series 051c increment 1). The spawned
+ * future is `Send + 'static`, so every argument is *moved* into the task. We
+ * admit only args that are provably safe to move here: literals and `Copy`
+ * locals (moving a `Copy` value leaves the original live). A bare identifier of
+ * a **non-`Copy`** (owning) type, or of unknown type, is fail-loud — it is the
+ * shared-capture / task-escape case increment 2 (`Arc`/`Arc<Mutex>`) handles.
+ * We NEVER emit a `spawn` we can't prove satisfies `Send + 'static`.
+ *
+ * This is deliberately conservative (it rejects a non-`Copy` arg even when it
+ * happens not to be reused) — always sound, per the fail-loud contract.
+ */
+function assertSpawnArgsSafe(call: CallExpression, analysis: ModuleAnalysis): void {
+  for (const arg of call.arguments) {
+    // A bare local: safe only if its type is provably `Copy`.
+    if (arg.type === "Identifier") {
+      const name = (arg as Identifier).name;
+      const ty = analysis.bindingTypes.get(name);
+      if (ty && isCopyRustType(ty)) continue;
+      throw new UnsupportedError({
+        type: "value captured by a spawned task is used after the spawn (Arc wrapping is series 051c increment 2)",
+      });
+    }
+    // A literal (number/bool/string-literal) or other non-identifier arg carries
+    // no shared aliasing — a string literal is a fresh `String`, a number is
+    // `Copy`. These move into the task with nothing left behind.
+    if (arg.type === "Literal") continue;
+    // Anything else (a member access, a nested call, arithmetic, …) may capture
+    // a shared local transitively — reject conservatively (increment 2).
+    throw new UnsupportedError({
+      type: "value captured by a spawned task is used after the spawn (Arc wrapping is series 051c increment 2)",
+    });
+  }
+}
+
+/**
+ * `setTimeout(fn, ms)` → `tokio::spawn(async move { sleep(ms).await; <fn>; })`
+ * — a fire-and-forget delayed task (series 051c increment 1). The delayed body
+ * is the existing `sleep` node (series 051b) awaited, followed by `fn`'s work:
+ *   - an inline non-async arrow → its body inlined (a block body's statements,
+ *     or an expression body as one expr statement);
+ *   - a bare identifier naming a top-level fn → a call to it.
+ * `ms` is any expression (typically a `number` literal). A captured non-Copy
+ * local inside `fn` that is shared stays fail-loud (increment 2).
+ */
+function lowerSetTimeout(call: CallExpression, analysis: ModuleAnalysis): HirExpr {
+  if (call.arguments.length !== 2) {
+    throw new UnsupportedError({
+      type: "setTimeout expects exactly (fn, ms)",
+    });
+  }
+  const [fn, msArg] = call.arguments;
+  if (!fn || !msArg) throw new UnsupportedError(call);
+
+  // The awaited-sleep prelude of the delayed task.
+  const sleepStmt: HirStmt = {
+    kind: "expr",
+    expr: { kind: "await", expr: { kind: "sleep", ms: lowerExpr(msArg, analysis) } },
+  };
+
+  let bodyStmts: HirStmt[];
+  if (fn.type === "ArrowFunctionExpression" || fn.type === "FunctionExpression") {
+    const arrow = fn as ArrowFunctionExpression;
+    if (arrow.async) {
+      throw new UnsupportedError({ type: "setTimeout with an async callback" });
+    }
+    if (arrow.params.length !== 0) {
+      throw new UnsupportedError({
+        type: "setTimeout callback takes no arguments",
+      });
+    }
+    if (arrow.body.type === "BlockStatement") {
+      bodyStmts = lowerStatements(
+        (arrow.body as BlockStatement).body,
+        analysis,
+        SCRIPT_SCOPE,
+      );
+    } else {
+      bodyStmts = [
+        { kind: "expr", expr: lowerExpr(arrow.body as Expression, analysis) },
+      ];
+    }
+  } else if (fn.type === "Identifier") {
+    // A bare fn name → a call statement `named();`.
+    bodyStmts = [
+      {
+        kind: "expr",
+        expr: { kind: "call", callee: (fn as Identifier).name, args: [] },
+      },
+    ];
+  } else {
+    throw new UnsupportedError({
+      type: "setTimeout callback must be an inline arrow or a bare fn name",
+    });
+  }
+
+  return {
+    kind: "spawn",
+    expr: { kind: "asyncMove", stmts: [sleepStmt, ...bodyStmts] },
+  };
+}
+
 function lowerCall(
   call: CallExpression,
   analysis: ModuleAnalysis,
   awaited = false,
 ): HirExpr {
+  // `setTimeout(fn, ms)` — a fire-and-forget delayed task (series 051c
+  // increment 1) → `tokio::spawn(async move { sleep(ms).await; <fn body>; })`.
+  // `fn` is an inline non-async arrow (its body is inlined) or a bare
+  // top-level fn name (called); `ms` a number. Handled before the generic call
+  // paths so it is not treated as an ordinary user call.
+  if (
+    call.callee.type === "Identifier" &&
+    (call.callee as Identifier).name === "setTimeout" &&
+    !analysis.fns.has("setTimeout")
+  ) {
+    return lowerSetTimeout(call, analysis);
+  }
   // console.log(...) → println!
   if (isConsoleLog(call.callee)) {
     return {
@@ -3414,9 +3563,19 @@ function lowerCall(
     // async fns are never fallible (async + throw is rejected), so no `?`.
     if (analysis.asyncFns.has(name)) {
       if (!awaited) {
-        throw new UnsupportedError({
-          type: "call to an async function not directly awaited (an un-polled future never runs)",
-        });
+        // An un-awaited async **free** call → `tokio::spawn(f(args))`, an
+        // eagerly-scheduled task returning a `JoinHandle<T>` (series 051c
+        // increment 1). Reverses the 014 fail-loud. Applies to a bare
+        // fire-and-forget statement and to a `const h = doWork()` handle
+        // binding (which `lowerVarDecl` records in `joinHandleBindings`).
+        //
+        // Conservatism: the spawned future is `Send + 'static`, so its args
+        // are moved in. Increment 1 admits Copy args and a single owned
+        // move-in; an arg that is a non-Copy local *used again after the
+        // spawn* is the shared-capture case → fail-loud (increment 2 adds the
+        // `Arc`/`Arc<Mutex>` task-escape pass). See `spawnArgsSafe`.
+        assertSpawnArgsSafe(call, analysis);
+        return { kind: "spawn", expr: callExpr };
       }
       return callExpr;
     }

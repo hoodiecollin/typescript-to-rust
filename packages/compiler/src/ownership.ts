@@ -479,6 +479,14 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
     case "rcNew":
       collectUses(e.kind === "rcNew" ? e.inner : e.expr, movable, out);
       return;
+    // A `spawn`/`joinHandleAwait` reads its sub-expression's uses (series 051c);
+    // an `asyncMove` block is a `'static` task body whose captures move in — its
+    // statements are not re-traversed for parent-scope liveness here (increment 1
+    // admits only Copy/owned-move-in captures; the task-escape pass is inc. 2).
+    case "spawn":
+    case "joinHandleAwait":
+      collectUses(e.expr, movable, out);
+      return;
     case "rcClone":
       collectUses(e.expr, movable, out);
       return;
@@ -765,6 +773,8 @@ function placeInExpr(e: HirExpr, liveOut: Live, ctx: PlaceCtx): void {
         return;
       case "try":
       case "await":
+      case "spawn":
+      case "joinHandleAwait":
         visit(x.expr);
         return;
       case "rcNew":

@@ -233,6 +233,29 @@ export type HirExpr =
    */
   | { kind: "sleep"; ms: HirExpr }
   /**
+   * `tokio::spawn(<expr>)` → schedules `<expr>` (a bare async call, or an
+   * `asyncMove` block) as an eagerly-polled task, yielding a `JoinHandle<T>`
+   * (series 051c increment 1). Maps an un-awaited async call (previously
+   * fail-loud) and the `setTimeout` delayed task. The spawned future is
+   * `Send + 'static`, so its captures are moved in — increment 1 admits only
+   * Copy args / a single owned move-in; shared capture stays fail-loud
+   * (increment 2 adds the `Arc`/`Arc<Mutex>` task-escape pass).
+   */
+  | { kind: "spawn"; expr: HirExpr }
+  /**
+   * `<expr>.await.unwrap()` — await a `JoinHandle` for its task's value (series
+   * 051c increment 1). Distinct from the plain `await` node so the emitter picks
+   * `.await.unwrap()` (a `JoinHandle`'s `.await` yields `Result<T, JoinError>`;
+   * `.unwrap()` surfaces a task panic — a documented divergence).
+   */
+  | { kind: "joinHandleAwait"; expr: HirExpr }
+  /**
+   * `async move { <stmts> }` — an owned-capture async block (series 051c
+   * increment 1), the body of a `setTimeout`'s spawned delayed task
+   * (`sleep(ms).await;` then the lifted `fn` body).
+   */
+  | { kind: "asyncMove"; stmts: HirStmt[] }
+  /**
    * `xs.map(p => body)` → `xs.iter().map(|p| cbName(*p, forwarded…)).collect::<Vec<_>>()`
    * (series 048). The callback body is lifted to a top-level `fn cbName` (whose
    * params are `p` plus the read-only free vars); the shim forwards `*p` (the Copy

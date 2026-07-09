@@ -64,10 +64,14 @@ describe("async: async/await → async fn + #[tokio::main]", () => {
     expect(rust).not.toContain("tokio");
   });
 
-  test("ASYNC6 (fail-loud) an un-awaited async call is rejected", () => {
-    expect(() =>
-      compile(`async function w(): Promise<string> { return "x"; }\nw();`),
-    ).toThrow();
+  test("ASYNC6 an un-awaited async call → `tokio::spawn` (series 051c inc. 1)", () => {
+    // 051c reverses the pre-spawn fail-loud (per issue #13 / design.md): a bare
+    // un-awaited async free call is now an eagerly-scheduled task (fire-and-forget
+    // — the JoinHandle is dropped), matching JS's eager-promise semantics.
+    const rust = compile(
+      `async function w(): Promise<string> { return "x"; }\nw();`,
+    );
+    expect(rust).toContain("tokio::spawn(w())");
   });
 
   test("ASYNC7 (fail-loud) await of a non-async call is rejected", () => {

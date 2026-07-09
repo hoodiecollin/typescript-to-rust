@@ -60,9 +60,14 @@ describe("async×errors: fallible async fn → async fn -> Result", () => {
     expect(rust).not.toContain(".await?");
   });
 
-  test("ATHROW5 (fail-loud) a non-awaited fallible async call is still rejected", () => {
-    expect(() =>
-      compile(`async function w(): Promise<string> { throw new Error("x"); }\nw();`),
-    ).toThrow();
+  test("ATHROW5 a non-awaited fallible async call → `tokio::spawn` (series 051c inc. 1)", () => {
+    // 051c reverses the pre-spawn fail-loud (issue #13 / design.md): a bare
+    // un-awaited async free call becomes an eagerly-scheduled task. A fallible
+    // async fn spawns as `JoinHandle<Result<T, E>>` (fire-and-forget); the task's
+    // `Err` is not observed by the parent — a documented divergence, not a reject.
+    const rust = compile(
+      `async function w(): Promise<string> { throw new Error("x"); }\nw();`,
+    );
+    expect(rust).toContain("tokio::spawn(w())");
   });
 });

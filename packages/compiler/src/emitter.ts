@@ -674,6 +674,14 @@ function emitExpr(expr: HirExpr): string {
       return `futures::future::try_join_all(${emitExpr(expr.iter)}).await`;
     case "sleep":
       return `tokio::time::sleep(std::time::Duration::from_millis(${emitExpr(expr.ms)} as u64))`;
+    case "spawn":
+      return `tokio::spawn(${emitExpr(expr.expr)})`;
+    case "joinHandleAwait":
+      return `${emitExpr(expr.expr)}.await.unwrap()`;
+    case "asyncMove": {
+      const body = expr.stmts.map((s) => indent(emitStmt(s))).join("\n");
+      return `async move {\n${body}\n    }`;
+    }
     case "iterMap":
       return `${emitExpr(expr.receiver)}.iter().map(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
     case "iterFilter":

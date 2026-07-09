@@ -94,6 +94,14 @@ export interface ModuleAnalysis {
    * lowering (like `structFields`).
    */
   entriesBindings: Set<string>;
+  /**
+   * Names of bindings whose initializer lowered to a `{kind:"spawn"}` node — a
+   * `JoinHandle<T>` (series 051c increment 1, `const h = doWork()`). A later
+   * `await h` on such a binding lowers to `{kind:"joinHandleAwait"}` →
+   * `h.await.unwrap()` (not the plain `.await`). Populated during lowering, in
+   * statement order, so the binding is recorded before its later `await`.
+   */
+  joinHandleBindings: Set<string>;
   /** names of class methods that mutate `this` (→ a `&mut self` receiver) */
   mutatingMethods: Set<string>;
   /**
@@ -1103,6 +1111,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     structFields: new Map(),
     // Populated during lowering as `Object.entries` bindings are seen.
     entriesBindings: new Set(),
+    // Populated during lowering when a binding's init is a `spawn` node (051c).
+    joinHandleBindings: new Set(),
     mutatingMethods,
     asyncMethods,
     methodNames,
