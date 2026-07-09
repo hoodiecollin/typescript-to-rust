@@ -145,9 +145,19 @@ Nullability note: `T | undefined` and `T | null` lower to `Option<T>`. That is t
 
 ## Generators
 
-Only the simplest finite shape is modeled: a **named, non-async `function*`** whose
-body is a straight-line sequence of `yield <value>;` statements, annotated
-`Generator<T>` / `IterableIterator<T>` / `Iterable<T>`.
+A **named, non-async `function*`** annotated `Generator<T>` /
+`IterableIterator<T>` / `Iterable<T>` is modeled two ways by body shape:
+
+- **Straight-line finite yields** (`yield a; yield b; …`) → `vec![a, b, …]
+  .into_iter()` (series 035). No state machine.
+- **Loops / branches / non-`yield` statements interleaved with yields** (series
+  052) → a resumable **state-machine `struct` + `impl Iterator`**: a `state: u32`
+  discriminant plus the generator's params and any local **live across a yield**
+  become struct fields; `next()` is a `loop { match self.state { … } }` that runs
+  non-yielding states straight through and `return Some(v)` at each yield after
+  recording the resume state. The public wrapper stays `fn g(…) -> impl
+  Iterator<Item = T>`, so `for-of` consumption composes unchanged. A local not
+  live across any yield stays a bare `let` inside its state arm.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
@@ -157,7 +167,9 @@ body is a straight-line sequence of `yield <value>;` statements, annotated
 | Generator with no `Generator<T>` / `IterableIterator<T>` return annotation | Not yet | `generator without a `Generator<T>` / `IterableIterator<T>` return annotation` |
 | That annotation missing its item type argument | Not yet | `generator without an item type` |
 | Generator without a body | Not yet | `generator without a body` |
-| Body is not a straight-line sequence of `yield` (loops, conditionals, locals, any non-yield statement) | Not yet | `generator body is not a straight-line sequence of `yield` (state-machine generators are a later slice)` |
+| State-machine generator with a borrowed (non-owned) param — can't be captured by value across a suspend | Not yet | `state-machine generator with a borrowed (non-owned) parameter` |
+| `yield` inside a `try`/`catch` (or any other unsupported statement) in a state-machine generator | Not yet | `unsupported statement in a state-machine generator: <type>` |
+| Generator `return <value>` (only a bare `return` ends iteration) | Not yet | `generator `return <value>` (only a bare `return` ends iteration)` |
 | `yield*` delegation | Not yet | `` `yield*` delegation `` |
 | Bare `yield` with no value | Not yet | `bare `yield` (no value)` |
 

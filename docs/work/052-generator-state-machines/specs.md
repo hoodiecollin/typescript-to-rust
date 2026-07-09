@@ -11,7 +11,7 @@ sequence** the generator does. The 035 straight-line path must stay green
   the right sequence:
   ```ts
   function* range(n: number): Generator<number> {
-    for (let i = 0; i < n; i++) { yield i; }
+    for (let i = 0; i < n; i = i + 1) { yield i; }
   }
   for (const x of range(3)) { console.log(x); }   // 0, 1, 2
   ```
@@ -47,8 +47,8 @@ sequence** the generator does. The 035 straight-line path must stay green
 - **GEN8** (differential) a mutated accumulator carried across yields:
   ```ts
   function* sums(n: number): Generator<number> {
-    let sum = 0;
-    for (let i = 0; i < n; i++) { sum += i; yield sum; }
+    let sum: number = 0;
+    for (let i = 0; i < n; i = i + 1) { sum = sum + i; yield sum; }
   }
   for (const x of sums(4)) { console.log(x); }   // 0, 1, 3, 6
   ```
@@ -59,9 +59,11 @@ sequence** the generator does. The 035 straight-line path must stay green
 
 ## 052d — fail-loud residuals (`packages/compiler/tests/generator-failloud.test.ts`)
 
-- **GEN10** (fail-loud) a **reference held across a yield** is rejected with
-  `UnsupportedError` — e.g. a `&`/`&mut` local bound before a `yield` and read
-  after it (the hard borrow case; the struct can't carry a lifetime-bearing ref).
+- **GEN10** (fail-loud) a **non-owned (borrowed) value carried across a yield**
+  is rejected with `UnsupportedError` — the owned struct can't hold a borrow
+  across a suspend. Concrete manifestation: a **borrowed param** (a `string`
+  param → `&str`) in a state-machine generator (`state-machine generator with a
+  borrowed (non-owned) parameter`).
 - **GEN11** (fail-loud) a `yield` inside a `try`/`catch` (nested `try` across
   yields) stays `UnsupportedError`.
 - **GEN12** (regression) the 035 straight-line finite generator

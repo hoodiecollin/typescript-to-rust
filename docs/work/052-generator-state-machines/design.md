@@ -35,7 +35,7 @@ consumption path (`lowerForOf`, the `analysis.generators` branch) composes with
 
 ```ts
 function* range(n: number): Generator<number> {
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < n; i = i + 1) {   // dialect idiom: `i = i + 1`, not `i++`
     yield i;
   }
 }
@@ -166,11 +166,14 @@ residual below.
 
 ## Fail-loud residuals (stay `UnsupportedError`)
 
-- **A reference held across a yield point** — a `&`/`&mut` local (e.g. a borrow of
-  a param or of an element) that is live across a `yield`. Carrying it in the
-  struct would require a self-referential / lifetime-bearing generator struct,
-  which the owned Option-A model doesn't express. This is the hard borrow case;
-  it stays fail-loud (the user rebinds to an owned/index value).
+- **A non-owned (borrowed) value carried across a yield point** — the owned
+  Option-A model captures every carried value **by value** in the struct, so a
+  value that can only be a borrow can't survive a suspend (it would need a
+  self-referential / lifetime-bearing generator struct). The concrete
+  manifestation is a **borrowed param** (`state-machine generator with a borrowed
+  (non-owned) parameter`) — e.g. a `string`/struct param, which lowers to `&str`
+  / `&T`. It stays fail-loud (the user rebinds to an owned/index value). Copy
+  scalar params (`number`, `boolean`) are owned and compose.
 - **Nested `try` across yields** — a `yield` inside a `try`/`catch` (suspension
   across an unwinding scope) has no clean state-machine encoding here; stays
   fail-loud.
