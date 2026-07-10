@@ -61,23 +61,26 @@ describe("arrow: top-level const arrow → free fn", () => {
   test("ARROW5 a top-level const async arrow normalizes to a free async fn (series 054b)", () => {
     // Series 054b graduated this: an `async` top-level const arrow carries `async`
     // through `arrowToFunctionDecl` and lowers as a free `async fn` (awaitable via
-    // `.await`). A value-position / `let`-bound async arrow stays rejected (ARROW6).
+    // `.await`).
     const rust = compile(`const ping = async (): Promise<void> => { };`);
     expect(rust).toContain("async fn ping() {");
   });
 
-  test("ARROW6 (fail-loud) a let-bound arrow is rejected", () => {
-    expect(() =>
-      compile(`let f = (n: number): number => { return n; };`),
-    ).toThrow();
+  test("ARROW6 a let-bound arrow promotes to a free fn (graduated, series 058)", () => {
+    // Series 058 graduated this: a top-level non-reassigned `let` arrow promotes to
+    // a direct free `fn` (same as a `const` arrow).
+    const rust = compile(`let f = (n: number): number => { return n; };`);
+    expect(rust).toContain("fn f(n: f64) -> f64");
   });
 
-  test("ARROW7 (fail-loud) a nested/local arrow is rejected", () => {
-    expect(() =>
-      compile(
-        `const g = (n: number): number => { ` +
-          `const h = (m: number): number => { return m; }; return h(n); };`,
-      ),
-    ).toThrow();
+  test("ARROW7 a nested/local arrow hoists to `__arrow_n` + a fn-pointer (graduated, series 058)", () => {
+    // Series 058 graduated this: the local arrow hoists to a top-level `fn
+    // __arrow_n` and the binding holds a `fn`-pointer.
+    const rust = compile(
+      `const g = (n: number): number => { ` +
+        `const h = (m: number): number => { return m; }; return h(n); };`,
+    );
+    expect(rust).toContain("fn __arrow_0(m: f64) -> f64");
+    expect(rust).toContain("let h: fn(f64) -> f64 = __arrow_0");
   });
 });
