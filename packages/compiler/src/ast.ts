@@ -129,6 +129,13 @@ export interface ObjectExpression extends Span {
   properties: Property[];
 }
 
+/** A `{ x, y }` destructuring pattern — a destructuring *param* (series 058). */
+export interface ObjectPattern extends Span {
+  type: "ObjectPattern";
+  properties: Property[];
+  typeAnnotation?: TSTypeAnnotation | null;
+}
+
 export type Expression =
   | Identifier
   | Literal
@@ -233,6 +240,8 @@ export interface TSPropertySignature extends Span {
   typeAnnotation: TSTypeAnnotation | null;
   optional: boolean;
   computed: boolean;
+  /** `readonly x: T` — assignment to this field is rejected (series 059). */
+  readonly?: boolean;
 }
 
 export interface TSInterfaceBody extends Span {

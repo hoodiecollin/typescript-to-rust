@@ -55,6 +55,12 @@ export interface ParamInfo {
    * an omitted trailing one with `None`.
    */
   optional: boolean;
+  /**
+   * The param's raw type annotation (series 059) — lets a call site lower an
+   * object-literal argument into a `struct` literal against the declared param
+   * type (the 032 residual). `null` if unannotated.
+   */
+  annotation: TSType | null;
 }
 
 export interface FnInfo {
@@ -198,6 +204,22 @@ export interface ModuleAnalysis {
    * limit, matching the rest of this intra-procedural analysis).
    */
   bindingTypes: Map<string, RustType>;
+  /**
+   * Struct name → the set of its `readonly` field names (series 059). An
+   * assignment to such a field (`s.f = …`) is a `DialectError`; construction (a
+   * struct literal) is allowed. Populated by `lower()`. Empty here.
+   */
+  readonlyFields: Map<string, Set<string>>;
+  /**
+   * Interface inheritance (series 059). `baseInterfaces` = interface names that are
+   * `extends`ed (so they get a getter trait `I<name>`). `interfaceExtends` maps a
+   * derived interface to its immediate base. `dynInterfaceBindings` maps a param
+   * bound to a base-interface type (`&impl IA`) → the base name, so a field read
+   * through it routes to the getter. Populated by `lower()`.
+   */
+  baseInterfaces: Set<string>;
+  interfaceExtends: Map<string, string>;
+  dynInterfaceBindings: Map<string, string>;
   /**
    * The top-level `fn`s synthesized by callback lifting (series 048), collected
    * during lowering and appended to the module's `items` before the refine passes.
@@ -408,12 +430,14 @@ function analyzeFunction(
     const isCopy = isCopyType(p.typeAnnotation, enums);
     // A base-typed param becomes `impl IA` (by value, series 053b/INH10), so it
     // must be passed owned — force `move` regardless of read-only use.
+    const annotation = p.typeAnnotation?.typeAnnotation ?? null;
     if (isBaseTypedParam(p, extendedBases)) {
       return {
         name: p.name,
         ownership: "move" as const,
         isCopy: false,
         optional: isOptionalParam(p),
+        annotation,
       };
     }
     return {
@@ -421,6 +445,7 @@ function analyzeFunction(
       ownership: classifyParam(p.name, fn.body, isCopy),
       isCopy,
       optional: isOptionalParam(p),
+      annotation,
     };
   });
   return { params, retAnn: fn.returnType?.typeAnnotation ?? null };
@@ -450,9 +475,36 @@ function mutableBindings(
   mutatingMethods: Set<string>,
 ): Set<string> {
   const mut = new Set<string>();
+  // Bindings aliased by a bare-identifier initializer (`const b = a`) — for these,
+  // field-mutation-induced `mut` is withheld (series 059): a mutated *and* aliased
+  // value is the shared-mutable-aliasing case the ownership clone pass turns into a
+  // silent divergence, so it must stay fail-loud (cargo-caught) until series 062.
+  const aliased = new Set<string>();
+  walk(body, (n) => {
+    if (n.type === "VariableDeclarator" && isNode(n.init) && n.init.type === "Identifier") {
+      const src = identName(n.init);
+      if (src) aliased.add(src);
+    }
+  });
   walk(body, (n) => {
     const assigned = assignmentTarget(n);
     if (assigned) mut.add(assigned);
+
+    // A local struct field mutation `s.x = …` needs `mut s` (series 059). This is
+    // *local* only — it does not flow into param ownership (`&mut Point` through a
+    // borrowed param rides #23), so it lives here, not in `assignmentTarget`.
+    if (n.type === "AssignmentExpression" && isNode(n.left)) {
+      const left = n.left as AnyNode;
+      if (
+        left.type === "MemberExpression" &&
+        !left.computed &&
+        isNode(left.object) &&
+        (left.object as AnyNode).type === "Identifier"
+      ) {
+        const name = identName(left.object);
+        if (name && name !== "self" && !aliased.has(name)) mut.add(name);
+      }
+    }
 
     const mutating = isMutatingMethodCall(n);
     if (mutating) mut.add(mutating.object);
@@ -1129,6 +1181,10 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     generators,
     // Filled in by `lower()` (needs `lowerType`); empty/zero here.
     bindingTypes: new Map(),
+    readonlyFields: new Map(),
+    baseInterfaces: new Set(),
+    interfaceExtends: new Map(),
+    dynInterfaceBindings: new Map(),
     liftedFns: [],
     liftCounter: 0,
     superclass,

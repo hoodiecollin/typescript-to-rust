@@ -18,8 +18,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseSync } from "oxc-parser";
 import type { Program } from "./src/ast";
-import { emit } from "./src/emitter";
+import { emitModule } from "./src/emitter";
 import { checkRust, formatRust, runRust, summarizeErrors } from "./src/harness";
+import { lower } from "./src/lower";
 
 const USAGE =
   "usage: bun run index.ts <file.ts> [--fmt] [-o <path>] [--emit] [--check|--run]";
@@ -91,8 +92,15 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const emitted = emit(parsed.program as unknown as Program);
+  const mod = lower(parsed.program as unknown as Program);
+  const emitted = emitModule(mod);
   const rust = fmt ? await formatRust(emitted) : emitted;
+
+  // Non-fatal diagnostics (series 056) — e.g. the bitwise wide-int divergence —
+  // surface on stderr, independent of `--fmt` (which only touches the source text).
+  for (const warning of new Set(mod.warnings ?? [])) {
+    console.error(`warning: ${warning}`);
+  }
 
   // Resolve every file destination (explicit `-o` paths plus `--emit` sibling).
   const targets = [...outPaths];

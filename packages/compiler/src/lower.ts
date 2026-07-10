@@ -40,6 +40,7 @@ import type {
   MethodDefinition,
   NewExpression,
   ObjectExpression,
+  ObjectPattern,
   Param,
   Program,
   PropertyDefinition,
@@ -49,9 +50,11 @@ import type {
   TSEnumDeclaration,
   TSInterfaceDeclaration,
   TSType,
+  TSTypeAnnotation,
   ThrowStatement,
   TryStatement,
   VariableDeclaration,
+  VariableDeclarator,
   WhileStatement,
 } from "./ast";
 import { DialectError, UnsupportedError } from "./errors";
@@ -76,6 +79,7 @@ import type {
   RustType,
   SelfRecv,
 } from "./hir";
+import { refineBitwise } from "./bitwise";
 import { refineNumerics } from "./numeric";
 import { refineOwnership } from "./ownership";
 import { refineTaskEscape } from "./task-escape";
@@ -156,6 +160,22 @@ export function lower(program: Program): HirModule {
   // and a receiver's element type. Needs `lowerType`, so it runs here, not in
   // `analyzeModule`.
   analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
+  // `readonly` field names per struct (series 059) — assignment to one is a
+  // `DialectError` (construction stays allowed).
+  analysis.readonlyFields = collectReadonlyFields(normalized);
+  // Interface inheritance (series 059): which interfaces are `extends`ed (→ a
+  // getter trait) and each derived interface's base.
+  for (const stmt of normalized.body) {
+    if (stmt.type !== "TSInterfaceDeclaration") continue;
+    const decl = stmt as TSInterfaceDeclaration;
+    for (const h of decl.extends as { expression?: { name?: string } }[]) {
+      const baseName = h.expression?.name;
+      if (baseName) {
+        analysis.baseInterfaces.add(baseName);
+        analysis.interfaceExtends.set(decl.id.name, baseName);
+      }
+    }
+  }
   // Error-class shapes (series 049b): validate each `class X extends Error` and
   // collect its ordered typed fields into `analysis.errorClasses`, *before* any
   // function body is lowered — a `throw new X(…)` inside a body constructs the
@@ -186,7 +206,11 @@ export function lower(program: Program): HirModule {
       );
     } else if (stmt.type === "TSInterfaceDeclaration") {
       items.push(
-        lowerInterface(stmt as TSInterfaceDeclaration, analysis.structs),
+        lowerInterface(
+          stmt as TSInterfaceDeclaration,
+          analysis.structs,
+          analysis,
+        ),
       );
     } else if (stmt.type === "TSEnumDeclaration") {
       items.push(lowerEnum(stmt as TSEnumDeclaration));
@@ -239,6 +263,11 @@ export function lower(program: Program): HirModule {
   // forwarders + on-demand accessors). Runs after all bodies are lowered so
   // `analysis.dynFieldReads` (populated by polymorphic field reads) is complete.
   items.push(...synthesizeTraits(items, analysis));
+  // Interface inheritance (series 059): synthesize a by-value getter trait for each
+  // extended base interface and give the base + every derived interface struct an
+  // `impl I<Base>`. Preserves TS subtype polymorphism (pass a `B` where an `A` is
+  // expected, via `&impl IA`).
+  items.push(...synthesizeInterfaceTraits(items, analysis));
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`, then the
@@ -261,7 +290,11 @@ export function lower(program: Program): HirModule {
     refineTaskEscape(
       refineArena(
         refineRc(
-          refineStrings(refineNumerics({ items, main, mainRet, mainAsync })),
+          refineStrings(
+            refineNumerics(
+              refineBitwise({ items, main, mainRet, mainAsync }),
+            ),
+          ),
           { rcScopes: analysis.rcScopes, classes: analysis.classes },
         ),
         analysis.arenaScopes,
@@ -283,12 +316,225 @@ export function lower(program: Program): HirModule {
  * `lowerExpr` — the documented deferral boundary.
  */
 function normalizeArrows(program: Program): Program {
-  const body = program.body.map((stmt) => {
-    const found = topLevelConstArrow(stmt);
-    if (!found) return stmt;
-    return arrowToFunctionDecl(found.name, found.arrow);
-  });
-  return { ...program, body };
+  // Top-level fn signatures — used to synthesize the `fn`-pointer annotation of a
+  // fn-*value* binding (`const op = add`, series 058 Fork 1 case B).
+  const fnSigs = new Map<string, FunctionDeclaration>();
+  for (const stmt of program.body) {
+    if (stmt.type === "FunctionDeclaration" && (stmt as FunctionDeclaration).id) {
+      const f = stmt as FunctionDeclaration;
+      if (f.id) fnSigs.set(f.id.name, f);
+    }
+  }
+  const ctx: LiftCtx = {
+    hoisted: [],
+    counter: { n: 0 },
+    fnSigs,
+    reassigned: collectReassignedNames(program.body),
+  };
+  const body = liftStmts(program.body, ctx, true);
+  return { ...program, body: [...body, ...ctx.hoisted] };
+}
+
+/** State threaded through the arrow-lift transform (series 058). */
+interface LiftCtx {
+  /** `__arrow_n` fns extracted from inline arrows, appended at module scope. */
+  hoisted: FunctionDeclaration[];
+  counter: { n: number };
+  /** Top-level fn declarations, for typing a fn-value binding as a `fn`-pointer. */
+  fnSigs: Map<string, FunctionDeclaration>;
+  /** Every identifier reassigned somewhere (`x = …`) — a reassigned arrow binding
+   * can't be a direct `fn`, so it takes the `fn`-pointer path. */
+  reassigned: Set<string>;
+}
+
+/**
+ * Arrow-binding lift (series 058). Rewrite each `const`/`let`/`var` declarator
+ * whose init is a non-capturing arrow, at any scope:
+ *   - A **top-level, non-reassigned** arrow binding promotes to a direct free `fn`
+ *     (the shipped 015 behavior, now also for `let`/`var` and `async`).
+ *   - Any **other** arrow binding (nested scope, or reassigned) hoists the arrow to
+ *     a top-level `fn __arrow_n` and keeps a `fn`-pointer binding (`let f:
+ *     fn(..)->.. = __arrow_n`), synthesizing the pointer annotation from the arrow.
+ *   - A **fn-value** binding (`const op = add`) gets the same synthesized pointer
+ *     annotation so it needs no user annotation.
+ * Multiple declarators split into per-binding statements. `async` in the
+ * `fn`-pointer path fails loud (no `fn`-pointer form for a future-returning fn).
+ */
+function liftStmts(
+  stmts: Statement[],
+  ctx: LiftCtx,
+  topLevel: boolean,
+): Statement[] {
+  const out: Statement[] = [];
+  for (const stmt of stmts) {
+    const recursed = liftNested(stmt, ctx);
+    if (recursed.type === "VariableDeclaration") {
+      out.push(...liftVarDecl(recursed as VariableDeclaration, ctx, topLevel));
+    } else {
+      out.push(recursed);
+    }
+  }
+  return out;
+}
+
+/** Recurse the transform into a statement's nested scopes (fn bodies, blocks, …). */
+function liftNested(stmt: Statement, ctx: LiftCtx): Statement {
+  switch (stmt.type) {
+    case "FunctionDeclaration": {
+      const f = stmt as FunctionDeclaration;
+      if (f.body) {
+        f.body = { ...f.body, body: liftStmts(f.body.body, ctx, false) };
+      }
+      return f;
+    }
+    case "BlockStatement": {
+      const b = stmt as BlockStatement;
+      return { ...b, body: liftStmts(b.body, ctx, false) };
+    }
+    case "IfStatement": {
+      const s = stmt as IfStatement;
+      return {
+        ...s,
+        consequent: liftNested(s.consequent, ctx),
+        alternate: s.alternate ? liftNested(s.alternate, ctx) : null,
+      };
+    }
+    case "WhileStatement":
+    case "ForStatement":
+    case "ForOfStatement": {
+      const s = stmt as WhileStatement | ForStatement | ForOfStatement;
+      return { ...s, body: liftNested(s.body, ctx) };
+    }
+    case "TryStatement": {
+      const s = stmt as TryStatement;
+      return {
+        ...s,
+        block: liftNested(s.block, ctx) as BlockStatement,
+        handler: s.handler
+          ? { ...s.handler, body: liftNested(s.handler.body, ctx) as BlockStatement }
+          : s.handler,
+        finalizer: s.finalizer
+          ? (liftNested(s.finalizer, ctx) as BlockStatement)
+          : null,
+      };
+    }
+    default:
+      return stmt;
+  }
+}
+
+/** Transform one `const`/`let`/`var` declaration into per-declarator statements. */
+function liftVarDecl(
+  decl: VariableDeclaration,
+  ctx: LiftCtx,
+  topLevel: boolean,
+): Statement[] {
+  const out: Statement[] = [];
+  for (const d of decl.declarations) {
+    const init = d.init;
+    if (init?.type === "ArrowFunctionExpression") {
+      const arrow = init as ArrowFunctionExpression;
+      const name = (d.id as Identifier).name;
+      if (topLevel && !ctx.reassigned.has(name)) {
+        // Direct promotion → a free `fn` (async carries over); recurse to lift any
+        // arrows nested in its body.
+        out.push(liftNested(arrowToFunctionDecl(d.id as Identifier, arrow), ctx));
+      } else {
+        // `fn`-pointer path: hoist the arrow, keep a typed pointer binding.
+        if (arrow.async) {
+          throw new UnsupportedError({
+            type: "a nested or reassigned `async` arrow binding (no fn-pointer form)",
+          });
+        }
+        const fnName = `__arrow_${ctx.counter.n++}`;
+        const id: Identifier = { ...(d.id as Identifier), name: fnName };
+        ctx.hoisted.push(
+          liftNested(arrowToFunctionDecl(id, arrow), ctx) as FunctionDeclaration,
+        );
+        out.push(
+          singleDecl(decl.kind, {
+            ...d,
+            id: annotateAsFn(d.id as Identifier, arrow.params, arrow.returnType),
+            init: { type: "Identifier", name: fnName, start: init.start, end: init.end },
+          }),
+        );
+      }
+    } else if (
+      init?.type === "Identifier" &&
+      !(d.id as Identifier).typeAnnotation &&
+      ctx.fnSigs.has((init as Identifier).name)
+    ) {
+      // Fn-value binding (`const op = add`) → synthesize the fn-pointer annotation.
+      const sig = ctx.fnSigs.get((init as Identifier).name) as FunctionDeclaration;
+      out.push(
+        singleDecl(decl.kind, {
+          ...d,
+          id: annotateAsFn(d.id as Identifier, sig.params, sig.returnType ?? null),
+        }),
+      );
+    } else {
+      out.push(singleDecl(decl.kind, d));
+    }
+  }
+  return out;
+}
+
+/** Wrap one declarator in its own single-declarator `VariableDeclaration`. */
+function singleDecl(
+  kind: VariableDeclaration["kind"],
+  d: VariableDeclarator,
+): VariableDeclaration {
+  return {
+    type: "VariableDeclaration",
+    kind,
+    declarations: [d],
+    start: d.start,
+    end: d.end,
+  };
+}
+
+/** Attach a synthesized `(P…) => R` type annotation to a binding id (series 058). */
+function annotateAsFn(
+  id: Identifier,
+  params: Identifier[],
+  returnType: TSTypeAnnotation | null | undefined,
+): Identifier {
+  if (id.typeAnnotation) return id;
+  const fnType = {
+    type: "TSFunctionType",
+    params,
+    returnType: returnType ?? null,
+    start: id.start,
+    end: id.end,
+  } as unknown as TSType;
+  return {
+    ...id,
+    typeAnnotation: {
+      type: "TSTypeAnnotation",
+      typeAnnotation: fnType,
+      start: id.start,
+      end: id.end,
+    },
+  };
+}
+
+/** Collect every identifier name that is the target of an assignment (`x = …`). */
+function collectReassignedNames(stmts: Statement[]): Set<string> {
+  const names = new Set<string>();
+  const walk = (n: unknown): void => {
+    if (!n || typeof n !== "object") return;
+    if (Array.isArray(n)) {
+      for (const c of n) walk(c);
+      return;
+    }
+    const node = n as { type?: string; left?: { type?: string; name?: string } };
+    if (node.type === "AssignmentExpression" && node.left?.type === "Identifier") {
+      if (node.left.name) names.add(node.left.name);
+    }
+    for (const v of Object.values(n as Record<string, unknown>)) walk(v);
+  };
+  walk(stmts);
+  return names;
 }
 
 /**
@@ -328,22 +574,6 @@ function arrowToFunctionDecl(
     start: arrow.start,
     end: arrow.end,
   };
-}
-
-/** A qualifying top-level `const <id> = <arrow>` (async or not), else null. */
-function topLevelConstArrow(
-  stmt: Statement,
-): { name: Identifier; arrow: ArrowFunctionExpression } | null {
-  if (stmt.type !== "VariableDeclaration") return null;
-  const decl = stmt as VariableDeclaration;
-  if (decl.kind !== "const" || decl.declarations.length !== 1) return null;
-  const d = decl.declarations[0];
-  if (!d || d.init?.type !== "ArrowFunctionExpression") return null;
-  const arrow = d.init as ArrowFunctionExpression;
-  // An `async` top-level const arrow normalizes to an `async` fn (series 054b):
-  // `arrowToFunctionDecl` carries `async` over, so it flows through the async
-  // free-fn path (`asyncFns` → `async fn` → awaitable) with no further work.
-  return { name: d.id, arrow };
 }
 
 // ── Directives (series 028) ──────────────────────────────────────────────────
@@ -1709,11 +1939,21 @@ function hirHasAwait(node: unknown): boolean {
 function lowerInterface(
   decl: TSInterfaceDeclaration,
   structs: Set<string>,
+  analysis: ModuleAnalysis,
 ): HirStruct {
-  if (decl.extends && decl.extends.length > 0) {
-    throw new UnsupportedError({ type: "interface extends (inheritance)" });
+  // Interface inheritance (series 059): flatten the base interface's fields into
+  // this struct (so construction + Debug work), and record it so trait synthesis
+  // gives it an `impl I<Base>`. Multi-level `extends` chains via `structFields`
+  // (already flattened for the base when it was itself derived).
+  const inherited: { name: string; ty: RustType }[] = [];
+  for (const h of decl.extends as { expression?: { name?: string } }[]) {
+    const baseName = h.expression?.name;
+    if (!baseName) continue;
+    for (const f of analysis.structFields.get(baseName) ?? []) {
+      inherited.push({ name: f.name, ty: f.ty });
+    }
   }
-  const fields = decl.body.body.map((m) => {
+  const own = decl.body.body.map((m) => {
     if (m.type !== "TSPropertySignature" || m.computed) {
       throw new UnsupportedError({ type: "unsupported interface member" });
     }
@@ -1732,6 +1972,10 @@ function lowerInterface(
       ),
     };
   });
+  // Base fields first (a derived struct reads cleanly), then own fields; a shadowed
+  // field keeps the derived declaration.
+  const seen = new Set(own.map((f) => f.name));
+  const fields = [...inherited.filter((f) => !seen.has(f.name)), ...own];
   return { kind: "struct", name: decl.id.name, fields };
 }
 
@@ -1953,6 +2197,17 @@ function applyBaseParamTraits(
       const base = inner.name;
       p.ty = { kind: "implTrait", trait: traitNameOf(base) };
       analysis.dynBindings.set(p.name, base);
+    } else if (
+      inner.kind === "struct" &&
+      analysis.baseInterfaces.has(inner.name)
+    ) {
+      // Interface inheritance (series 059): a base-interface param becomes
+      // `&impl IA` (borrowed, read-only) — a field read routes to the getter.
+      const base = inner.name;
+      const traitTy: RustType = { kind: "implTrait", trait: traitNameOf(base) };
+      p.ty =
+        p.ty.kind === "ref" ? { ...p.ty, inner: traitTy } : traitTy;
+      analysis.dynInterfaceBindings.set(p.name, base);
     }
   }
 }
@@ -2043,6 +2298,59 @@ function synthesizeTraits(
     }
   }
   return traits;
+}
+
+/**
+ * Interface-inheritance trait synthesis (series 059). For each extended base
+ * interface `A`, build `trait IA` with a by-value getter per A-field, and give the
+ * base struct + every derived interface struct an `impl IA` (the base's fields are
+ * flattened into each, so `self.x.clone()` always resolves). This is what lets a
+ * `B` pass where an `A` is expected — a base-typed param is `&impl IA`.
+ */
+function synthesizeInterfaceTraits(
+  items: HirItem[],
+  analysis: ModuleAnalysis,
+): HirTrait[] {
+  const structByName = new Map<string, HirStruct>();
+  for (const it of items) {
+    if (it.kind === "struct") structByName.set(it.name, it);
+  }
+  const traits: HirTrait[] = [];
+  for (const base of analysis.baseInterfaces) {
+    const baseStruct = structByName.get(base);
+    if (!baseStruct) continue;
+    const getters = baseStruct.fields.map((f) => ({ field: f.name, ty: f.ty }));
+    const traitName = traitNameOf(base);
+    traits.push({
+      kind: "trait",
+      name: traitName,
+      methods: [],
+      accessors: [],
+      byValueAccessors: getters,
+    });
+    for (const s of structByName.values()) {
+      if (s.name === base || interfaceExtendsBase(s.name, base, analysis)) {
+        (s.implTraits ??= []).push({ trait: traitName, getters });
+      }
+    }
+  }
+  return traits;
+}
+
+/** Does interface `name` transitively `extends` `ancestor` (series 059)? */
+function interfaceExtendsBase(
+  name: string,
+  ancestor: string,
+  analysis: ModuleAnalysis,
+): boolean {
+  let cur: string | undefined = analysis.interfaceExtends.get(name);
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur)) {
+    if (cur === ancestor) return true;
+    seen.add(cur);
+    cur = analysis.interfaceExtends.get(cur);
+  }
+  return false;
 }
 
 /** A forwarder trait method `fn m(&self, …) -> R { self.base.m(…) }` (053b). */
@@ -2375,15 +2683,69 @@ function lowerParam(
   info: { ownership: "move" | "ref" | "refMut" } | undefined,
   structs: Set<string>,
 ): HirParam {
+  // A destructuring param `({x, y}: Point)` (series 058) → a Rust struct-pattern
+  // param `Point { x, y }: Point`. Requires a *named struct* type to pattern
+  // against; taken owned (the borrow inference is name-based and can't see it).
+  if ((p as { type?: string }).type === "ObjectPattern") {
+    return lowerDestructuringParam(p as unknown as ObjectPattern, structs);
+  }
   if (!p.typeAnnotation) {
     throw new UnsupportedError({
       type: `parameter '${p.name}' without a type annotation`,
       start: p.start,
     });
   }
+  return lowerScalarParam(p, info, structs);
+}
+
+/**
+ * A destructuring param `({x, y}: Point)` → the struct-pattern param
+ * `Point { x, y }: Point` (series 058). Named-struct-typed only; a shorthand
+ * property binds the field name, a renamed one (`{x: a}`) binds `x: a`; a rest
+ * element (`{...r}`) and an anonymous object type fail loud.
+ */
+function lowerDestructuringParam(
+  p: ObjectPattern,
+  structs: Set<string>,
+): HirParam {
+  if (!p.typeAnnotation) {
+    throw new UnsupportedError({
+      type: "a destructuring param without a (named-struct) type annotation",
+    });
+  }
+  const ty = lowerType(p.typeAnnotation.typeAnnotation, structs);
+  if (ty.kind !== "struct") {
+    throw new UnsupportedError({
+      type: "a destructuring param whose type is not a named struct",
+    });
+  }
+  const fields = p.properties.map((prop) => {
+    if ((prop as { type?: string }).type !== "Property") {
+      throw new UnsupportedError({ type: "a rest element in a destructuring param" });
+    }
+    const key = prop.key as Identifier;
+    const value = prop.value as Identifier;
+    return prop.shorthand ? key.name : `${key.name}: ${value.name}`;
+  });
+  return {
+    name: `__pat_${ty.name}`,
+    ty,
+    pat: `${ty.name} { ${fields.join(", ")} }`,
+  };
+}
+
+function lowerScalarParam(
+  p: Identifier,
+  info: { ownership: "move" | "ref" | "refMut" } | undefined,
+  structs: Set<string>,
+): HirParam {
   // An optional param `(x?: T)` is `Option<T>` (series 042); `(x: T | undefined)`
-  // already lowers to `option` via the union in `lowerType`.
-  const annotated = lowerType(p.typeAnnotation.typeAnnotation, structs);
+  // already lowers to `option` via the union in `lowerType`. (`typeAnnotation` is
+  // guaranteed present — `lowerParam` gates on it before delegating here.)
+  const annotated = lowerType(
+    (p.typeAnnotation as TSTypeAnnotation).typeAnnotation,
+    structs,
+  );
   const optional =
     (p as { optional?: boolean }).optional === true ||
     annotated.kind === "option";
@@ -2884,6 +3246,30 @@ function isObviousLiteralInit(expr: Expression): boolean {
   return false;
 }
 
+/** Bitwise operators whose result type is inferred by construction (series 056). */
+const BITWISE_OPS = new Set(["&", "|", "^", "<<", ">>", ">>>"]);
+
+/**
+ * Does an initializer contain a bitwise operator (series 056)? A bitwise result is
+ * typed by construction (`refineBitwise` widens it to `i128`, or coerces it to
+ * `f64` at a float boundary), so — like `Object.entries` / `<array>.find` — an
+ * untyped binding to one needs no annotation. Recurses through arithmetic so
+ * `const x = (a & b) + 1` is covered too.
+ */
+function isBitwiseInit(e: Expression | null): boolean {
+  if (e == null) return false;
+  if (e.type === "BinaryExpression") {
+    const b = e as { operator: string; left: Expression; right: Expression };
+    if (BITWISE_OPS.has(b.operator)) return true;
+    return isBitwiseInit(b.left) || isBitwiseInit(b.right);
+  }
+  if (e.type === "UnaryExpression") {
+    const u = e as unknown as { operator: string; argument: Expression };
+    return u.operator === "~" || isBitwiseInit(u.argument);
+  }
+  return false;
+}
+
 /**
  * The struct `RustType` of a comparison operand when it is a struct-typed binding
  * (series 047c) — resolved from `analysis.bindingTypes` (the 046/048 binding→type
@@ -3019,7 +3405,8 @@ function lowerVarDecl(
       !isJsonParseCall(d.init) &&
       !isArrayFindCall(d.init) &&
       !isAllSettledAwait(d.init) &&
-      !isSpawnInit(d.init, analysis)
+      !isSpawnInit(d.init, analysis) &&
+      !isBitwiseInit(d.init)
     ) {
       throw new UnsupportedError({
         type: `binding '${d.id.name}' without a type annotation`,
@@ -3236,22 +3623,29 @@ function collectStructFields(
   for (const stmt of program.body) {
     if (stmt.type === "TSInterfaceDeclaration") {
       const decl = stmt as TSInterfaceDeclaration;
-      if (decl.extends && decl.extends.length > 0) continue;
       const fields: { name: string; ty: RustType }[] = [];
+      // Interface inheritance (series 059): flatten each already-processed base's
+      // fields first (declared earlier, so its entry is complete — including its
+      // own transitive bases). A later shadowing own field wins.
+      for (const h of decl.extends as { expression?: { name?: string } }[]) {
+        const baseName = h.expression?.name;
+        if (baseName) fields.push(...(map.get(baseName) ?? []));
+      }
       for (const m of decl.body.body) {
         if (
           m.type === "TSPropertySignature" &&
           !m.computed &&
           m.typeAnnotation
         ) {
-          fields.push({
-            name: m.key.name,
-            ty: fieldRustType(
-              m.typeAnnotation.typeAnnotation,
-              m.optional === true,
-              structs,
-            ),
-          });
+          const ty = fieldRustType(
+            m.typeAnnotation.typeAnnotation,
+            m.optional === true,
+            structs,
+          );
+          const existing = fields.findIndex((f) => f.name === m.key.name);
+          if (existing >= 0) fields[existing] = { name: m.key.name, ty };
+          else fields.push({ name: m.key.name, ty });
+          continue;
         }
       }
       map.set(decl.id.name, fields);
@@ -3288,6 +3682,62 @@ function collectStructFields(
     }
   }
   return map;
+}
+
+/**
+ * Collect each declared struct's `readonly` field names (series 059) — from
+ * `readonly` interface members and `readonly` class properties. An assignment to
+ * one is rejected (`DialectError`) in `lowerExpr`; construction is unaffected.
+ */
+function collectReadonlyFields(program: Program): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const stmt of program.body) {
+    if (stmt.type === "TSInterfaceDeclaration") {
+      const decl = stmt as TSInterfaceDeclaration;
+      const ro = new Set<string>();
+      for (const m of decl.body.body) {
+        if (m.type === "TSPropertySignature" && !m.computed && m.readonly) {
+          ro.add(m.key.name);
+        }
+      }
+      if (ro.size > 0) map.set(decl.id.name, ro);
+    } else if (stmt.type === "ClassDeclaration") {
+      const decl = stmt as ClassDeclaration;
+      if (!decl.id) continue;
+      const ro = new Set<string>();
+      for (const m of decl.body.body) {
+        const pd = m as { type: string; readonly?: boolean; computed?: boolean; key?: { name?: string } };
+        if (pd.type === "PropertyDefinition" && !pd.computed && pd.readonly && pd.key?.name) {
+          ro.add(pd.key.name);
+        }
+      }
+      if (ro.size > 0) map.set(decl.id.name, ro);
+    }
+  }
+  return map;
+}
+
+/**
+ * Reject an assignment to a `readonly` field (series 059). Fires on a non-computed
+ * `s.f = …` (or `this.f = …`) where `f` is `readonly` on `s`'s struct type. The
+ * receiver's struct is resolved from `bindingTypes` (a local) or the class under
+ * lowering (`this`). Construction (a struct literal) never reaches here.
+ */
+function checkReadonlyAssign(target: Expression, analysis: ModuleAnalysis): void {
+  if (target.type !== "MemberExpression") return;
+  const m = target as MemberExpression;
+  if (m.computed || m.property.type !== "Identifier") return;
+  const field = (m.property as Identifier).name;
+  let structName: string | undefined;
+  if (m.object.type === "Identifier") {
+    const t = analysis.bindingTypes.get((m.object as Identifier).name);
+    if (t?.kind === "struct") structName = t.name;
+  }
+  if (structName && analysis.readonlyFields.get(structName)?.has(field)) {
+    throw new DialectError(
+      `assignment to readonly field '${field}' of '${structName}'`,
+    );
+  }
 }
 
 /** A record key: a string literal or a bare identifier, both a `String`. */
@@ -3403,9 +3853,10 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
     }
     case "UnaryExpression": {
       const u = expr as unknown as { operator: string; argument: Expression };
-      // `-x` (negation) and `!x` (logical not) map directly. `+x`, `~x`,
-      // `typeof`/`void`/`delete` have no clean typed target — fail loud.
-      if (u.operator !== "-" && u.operator !== "!") {
+      // `-x` (negation) and `!x` (logical not) map directly; `~x` (bitwise NOT,
+      // series 056) passes through as a `unary "~"` that `refineBitwise` rewrites
+      // to `!` over an `i128`. `+x`, `typeof`/`void`/`delete` fail loud.
+      if (u.operator !== "-" && u.operator !== "!" && u.operator !== "~") {
         throw new UnsupportedError({ type: `unary operator '${u.operator}'` });
       }
       return {
@@ -3420,6 +3871,9 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         left: Expression;
         right: Expression;
       };
+      // Assignment to a `readonly` field is rejected (series 059); construction
+      // (a struct literal) is unaffected — this fires only on `s.f = …`.
+      checkReadonlyAssign(a.left, analysis);
       // A `=` write to a *string-keyed* computed member is a HashMap insert, not
       // an index-assign — Rust's `Index` on `HashMap` is read-only (series 031,
       // gap E). A numeric index is a `Vec` write and stays an index-assign.
@@ -4170,7 +4624,13 @@ function lowerCall(
         if (param.ownership === "ref") borrow = "ref";
         else if (param.ownership === "refMut") borrow = "refMut";
       }
-      args.push({ borrow, expr: lowerExpr(a, analysis) });
+      // An object-literal argument lowers against the callee's declared param type
+      // (series 059) — the 032 residual: `f({x:1, y:2})` → `f(Point { x, y })`.
+      const expr =
+        a.type === "ObjectExpression" && param?.annotation
+          ? lowerTyped(a, lowerType(param.annotation, analysis.structs), analysis)
+          : lowerExpr(a, analysis);
+      args.push({ borrow, expr });
     }
     const callExpr: HirExpr = { kind: "call", callee: name, args };
     // A call to an `async` function is only valid `await`ed — a bare call is an
@@ -5154,6 +5614,20 @@ function lowerMember(
       return {
         kind: "path",
         segments: [(member.object as Identifier).name, prop],
+      };
+    }
+    // Interface inheritance (series 059): a field read through a base-interface
+    // param (`&impl IA`) routes to the by-value getter `a.x()` — all base fields
+    // are accessible (no downcast gating; interfaces flatten their bases).
+    if (
+      member.object.type === "Identifier" &&
+      analysis.dynInterfaceBindings.has((member.object as Identifier).name)
+    ) {
+      return {
+        kind: "method",
+        receiver: lowerExpr(member.object, analysis),
+        name: prop,
+        args: [],
       };
     }
     // Class inheritance (series 053c): a field read through a `dyn IA` element
