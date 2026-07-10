@@ -35,6 +35,7 @@ import type {
   FunctionExpression,
   Identifier,
   IfStatement,
+  LabeledStatement,
   Literal,
   MemberExpression,
   MethodDefinition,
@@ -60,6 +61,7 @@ import type {
 import { DialectError, UnsupportedError } from "./errors";
 import type {
   Borrow,
+  ElemMode,
   HirArg,
   HirCatchArm,
   HirClass,
@@ -286,7 +288,8 @@ export function lower(program: Program): HirModule {
   // ownership signal into its `HirParam.ty` (the `Arc` vs `Arc<Mutex>` input), and
   // after the numeric/string/rc/arena refinements so the wrapped inner types are
   // final.
-  return refineOwnership(
+  return fixStringScrutinees(
+    refineOwnership(
     refineTaskEscape(
       refineArena(
         refineRc(
@@ -300,7 +303,74 @@ export function lower(program: Program): HirModule {
         analysis.arenaScopes,
       ),
     ),
+    ),
   );
+}
+
+/**
+ * String-scrutinee fixup (series 064). `lowerSwitch` renders a `String`-typed
+ * scrutinee as `match <s>.as_str() { "a" => … }`. `.as_str()` is stable on an
+ * owned `String`, but *unstable* on a `&str` — and `refineStrings` turns a
+ * read-only string *param* into `&str`. So, once param types are final, unwrap
+ * `<s>.as_str()` back to a bare `<s>` when `<s>` is a `&str`/`str` parameter (a
+ * `&str` matches string-literal patterns directly). Owned-`String` scrutinees keep
+ * `.as_str()`. Mutates the module in place.
+ */
+function fixStringScrutinees(module: HirModule): HirModule {
+  const doBody = (params: HirParam[], stmts: HirStmt[]): void => {
+    const strRefParams = new Set<string>();
+    for (const p of params) {
+      if (
+        p.ty.kind === "str" ||
+        (p.ty.kind === "ref" && p.ty.inner.kind === "str")
+      ) {
+        strRefParams.add(p.name);
+      }
+    }
+    walkMatchDiscs(stmts, strRefParams);
+  };
+  for (const item of module.items) {
+    if (item.kind === "fn") doBody(item.params, item.body);
+    else if (item.kind === "class") {
+      if (item.ctor) doBody(item.ctor.params, item.ctor.body);
+      for (const m of item.methods) doBody(m.params, m.body);
+    }
+  }
+  doBody([], module.main);
+  return module;
+}
+
+/** Recursively unwrap `<s>.as_str()` match scrutinees where `s` is a `&str` param. */
+function walkMatchDiscs(stmts: HirStmt[], strRefParams: Set<string>): void {
+  for (const s of stmts) {
+    if (s.kind === "match") {
+      const d = s.disc;
+      if (
+        d.kind === "method" &&
+        d.name === "as_str" &&
+        d.args.length === 0 &&
+        d.receiver.kind === "ident" &&
+        strRefParams.has(d.receiver.name)
+      ) {
+        s.disc = d.receiver;
+      }
+      for (const arm of s.arms) walkMatchDiscs(arm.body, strRefParams);
+    } else if (s.kind === "if") {
+      walkMatchDiscs(s.conseq, strRefParams);
+      if (s.alt) walkMatchDiscs(s.alt, strRefParams);
+    } else if (
+      s.kind === "while" ||
+      s.kind === "forIn" ||
+      s.kind === "forRange" ||
+      s.kind === "block"
+    ) {
+      walkMatchDiscs(s.body, strRefParams);
+    } else if (s.kind === "tryCatch") {
+      walkMatchDiscs(s.tryBody, strRefParams);
+      walkMatchDiscs(s.catchBody, strRefParams);
+      if (s.finallyBody) walkMatchDiscs(s.finallyBody, strRefParams);
+    }
+  }
 }
 
 // ── Arrow normalization ──────────────────────────────────────────────────────
@@ -2814,17 +2884,15 @@ function lowerStatement(
       return [lowerForOf(stmt as ForOfStatement, analysis, scope)];
     case "SwitchStatement":
       return [lowerSwitch(stmt as SwitchStatement, analysis, scope)];
+    case "LabeledStatement":
+      return [lowerLabeled(stmt as LabeledStatement, analysis, scope)];
     case "BreakStatement": {
-      if ((stmt as BreakStatement).label) {
-        throw new UnsupportedError({ type: "labeled break" });
-      }
-      return [{ kind: "break" }];
+      const label = (stmt as BreakStatement).label;
+      return [{ kind: "break", label: label ? label.name : undefined }];
     }
     case "ContinueStatement": {
-      if ((stmt as ContinueStatement).label) {
-        throw new UnsupportedError({ type: "labeled continue" });
-      }
-      return [{ kind: "continue" }];
+      const label = (stmt as ContinueStatement).label;
+      return [{ kind: "continue", label: label ? label.name : undefined }];
     }
     case "ThrowStatement":
       return [lowerThrow(stmt as ThrowStatement, analysis, scope)];
@@ -2915,30 +2983,6 @@ function lowerAlternate(
   return lowerBlock(alt, analysis, scope);
 }
 
-/**
- * Does `node` contain a `continue` that targets *this* loop — i.e. one not
- * nested inside another loop (which owns its own `continue`)? Used to reject an
- * unsound `continue` in the C-`for` desugar. A `switch`/`if`/block is transparent
- * to `continue`; a nested `while`/`for`/`for…of` is a barrier.
- */
-function hasOwnContinue(node: unknown): boolean {
-  if (Array.isArray(node)) return node.some(hasOwnContinue);
-  if (!isAstNode(node)) return false;
-  if (node.type === "ContinueStatement") return true;
-  if (
-    node.type === "WhileStatement" ||
-    node.type === "ForStatement" ||
-    node.type === "ForOfStatement"
-  ) {
-    return false;
-  }
-  for (const key in node) {
-    if (key === "type") continue;
-    if (hasOwnContinue((node as Record<string, unknown>)[key])) return true;
-  }
-  return false;
-}
-
 function isAstNode(x: unknown): x is { type: string; [k: string]: unknown } {
   return (
     typeof x === "object" &&
@@ -2961,10 +3005,45 @@ function isAstNode(x: unknown): x is { type: string; [k: string]: unknown } {
  * is avoided. `break` is untouched: a bare `break` exits the `while`, exactly as
  * the `for` would. A `for` with no `update` needs no rewrite (nothing to skip).
  */
+/**
+ * Lower a labeled loop `label: <loop>` (series 064). The label threads to the
+ * loop HIR node (`while`/`forIn`, or the `while` inside a C-`for`'s desugar block,
+ * carried to a `forRange` by `promoteRanges`), so `break`/`continue label` render
+ * `break 'label`/`continue 'label`. Only a loop may be labeled; a non-loop labeled
+ * statement is fail-loud (Rust labels loops/blocks, not arbitrary statements).
+ */
+function lowerLabeled(
+  stmt: LabeledStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt {
+  const label = stmt.label.name;
+  const inner = stmt.body;
+  if (inner.type === "ForStatement") {
+    return lowerFor(inner as ForStatement, analysis, scope, label);
+  }
+  if (inner.type === "ForOfStatement") {
+    return lowerForOf(inner as ForOfStatement, analysis, scope, label);
+  }
+  if (inner.type === "WhileStatement") {
+    const w = inner as WhileStatement;
+    return {
+      kind: "while",
+      cond: lowerExpr(w.test, analysis),
+      body: lowerBlock(w.body, analysis, scope),
+      label,
+    };
+  }
+  throw new UnsupportedError({
+    type: "a label on a non-loop statement (only loops may be labeled)",
+  });
+}
+
 function lowerFor(
   stmt: ForStatement,
   analysis: ModuleAnalysis,
   scope: string,
+  label?: string,
 ): HirStmt {
   const init: HirStmt[] = stmt.init
     ? stmt.init.type === "VariableDeclaration"
@@ -2977,18 +3056,22 @@ function lowerFor(
     : null;
 
   let body = lowerBlock(stmt.body, analysis, scope);
-  // An own `continue` skips the bottom `update`; inline the update before each so
-  // the loop variable still advances. Only meaningful when there is an `update`.
-  if (update && hasOwnContinue(stmt.body)) {
-    body = inlineUpdateBeforeContinue(body, update);
+  // A `continue` skips the bottom `update`; inline the update before each so the
+  // loop variable still advances. Covers a bare `continue` (own) and — when this
+  // loop is labeled (064) — a `continue <label>` nested in an inner loop.
+  if (update) {
+    body = inlineUpdateBeforeContinue(body, update, label, true);
+    body.push(update);
   }
-  if (update) body.push(update);
 
   const cond: HirExpr = stmt.test
     ? lowerExpr(stmt.test, analysis)
     : { kind: "bool", value: true };
 
-  return { kind: "block", body: [...init, { kind: "while", cond, body }] };
+  return {
+    kind: "block",
+    body: [...init, { kind: "while", cond, body, label }],
+  };
 }
 
 /**
@@ -3002,39 +3085,77 @@ function lowerFor(
 function inlineUpdateBeforeContinue(
   stmts: HirStmt[],
   update: HirStmt,
+  label: string | undefined,
+  ownScope: boolean,
 ): HirStmt[] {
-  return stmts.map((s) => inlineUpdateInStmt(s, update));
+  return stmts.map((s) => inlineUpdateInStmt(s, update, label, ownScope));
 }
 
-function inlineUpdateInStmt(stmt: HirStmt, update: HirStmt): HirStmt {
+/**
+ * Inline `update` before each `continue` that advances *this* loop. `ownScope` is
+ * true at the loop's own level (a bare `continue` targets it) and false once we
+ * descend into a nested loop (a bare `continue` there belongs to the inner loop —
+ * already handled by its own desugar; only a `continue <label>` targeting *this*
+ * loop still needs the update). `if`/`block`/`match` are transparent to `continue`.
+ */
+function inlineUpdateInStmt(
+  stmt: HirStmt,
+  update: HirStmt,
+  label: string | undefined,
+  ownScope: boolean,
+): HirStmt {
   switch (stmt.kind) {
-    case "continue":
-      return { kind: "block", body: [update, { kind: "continue" }] };
+    case "continue": {
+      const targetsThis =
+        (ownScope && !stmt.label) || (label != null && stmt.label === label);
+      return targetsThis
+        ? { kind: "block", body: [update, stmt], fromForContinue: true }
+        : stmt;
+    }
     case "if":
       return {
         kind: "if",
         cond: stmt.cond,
-        conseq: inlineUpdateBeforeContinue(stmt.conseq, update),
-        alt: stmt.alt ? inlineUpdateBeforeContinue(stmt.alt, update) : null,
+        conseq: inlineUpdateBeforeContinue(stmt.conseq, update, label, ownScope),
+        alt: stmt.alt
+          ? inlineUpdateBeforeContinue(stmt.alt, update, label, ownScope)
+          : null,
       };
     case "block":
       return {
         kind: "block",
-        body: inlineUpdateBeforeContinue(stmt.body, update),
+        body: inlineUpdateBeforeContinue(stmt.body, update, label, ownScope),
       };
     case "match":
       return {
         kind: "match",
         disc: stmt.disc,
         arms: stmt.arms.map((a) => ({
-          guard: a.guard,
-          body: inlineUpdateBeforeContinue(a.body, update),
+          ...a,
+          body: inlineUpdateBeforeContinue(a.body, update, label, ownScope),
         })),
       };
+    case "while":
+    case "forIn":
+    case "forRange":
+      // A nested loop: descend only to reach a `continue <label>` targeting *this*
+      // loop (ownScope false — its own bare `continue`s are already handled).
+      return label == null
+        ? stmt
+        : mapLoopBody(stmt, (b) =>
+            inlineUpdateBeforeContinue(b, update, label, false),
+          );
     default:
-      // `while`/`forIn` own their own `continue` (barrier); other stmts carry none.
       return stmt;
   }
+}
+
+/** Rebuild a loop statement with its body passed through `f` (series 064). */
+function mapLoopBody(
+  stmt: Extract<HirStmt, { kind: "while" | "forIn" | "forRange" }>,
+  f: (body: HirStmt[]) => HirStmt[],
+): HirStmt {
+  return { ...stmt, body: f(stmt.body) };
 }
 
 /**
@@ -3047,6 +3168,7 @@ function lowerForOf(
   stmt: ForOfStatement,
   analysis: ModuleAnalysis,
   scope: string,
+  label?: string,
 ): HirStmt {
   const decl = stmt.left.declarations[0];
   if (!decl || stmt.left.declarations.length !== 1) {
@@ -3087,6 +3209,7 @@ function lowerForOf(
         args: [],
       },
       body: lowerBlock(stmt.body, analysis, scope),
+      label,
     };
   }
   // A `for (const x of g())` over a call to a sync generator (series 025d)
@@ -3099,22 +3222,55 @@ function lowerForOf(
     analysis.generators.has(
       ((stmt.right as CallExpression).callee as Identifier).name,
     );
-  const iter: HirExpr = overGenerator
-    ? lowerExpr(stmt.right, analysis)
-    : {
+  // Named-struct destructuring `for (const { x, y } of pts)` (series 064) → a Rust
+  // struct pattern `for Point { x, y } in &pts`. Same "named/statically-shaped
+  // only" boundary as 058's destructuring params: an anonymous element is
+  // fail-loud. Borrow mode (the fields read `&T`); mutation/consume of a
+  // destructured element is out of scope.
+  if (declId.type === "ObjectPattern") {
+    const structPat = destructureForOfPattern(stmt, analysis);
+    return {
+      kind: "forIn",
+      pat: structPat,
+      iter: {
         kind: "method",
         receiver: lowerExpr(stmt.right, analysis),
         name: "iter",
         args: [],
-      };
+      },
+      body: lowerBlock(stmt.body, analysis, scope),
+      label,
+    };
+  }
+  // for-of element ownership (series 064): a read-only element iterates `&xs`
+  // (the default `.iter()`); an element *mutated in place* (`x.f = …`) iterates
+  // `&mut xs`, binding `&mut T`. Only for a plain identifier binding over a
+  // non-generator, non-`dyn` iterable — the consume→owned/cloned case (needing
+  // liveness of `xs` after the loop) stays a fail-loud residual.
+  const elemName = decl.id.name;
+  const isDyn =
+    stmt.right.type === "Identifier" &&
+    analysis.dynBindings.has((stmt.right as Identifier).name);
+  const mutatesElement =
+    !overGenerator &&
+    !isDyn &&
+    elemName != null &&
+    forOfElementMutated(stmt.body, elemName);
+
+  const iter: HirExpr =
+    overGenerator || mutatesElement
+      ? lowerExpr(stmt.right, analysis)
+      : {
+          kind: "method",
+          receiver: lowerExpr(stmt.right, analysis),
+          name: "iter",
+          args: [],
+        };
   // Class inheritance (series 053c): iterating a `Vec<Box<dyn IA>>` binds each
   // element as a `&Box<dyn IA>` — record the loop binding as a `dyn` binding so
   // a `.field` read inside routes through a trait accessor and `.m()` dispatches
   // virtually. Set before lowering the body.
-  if (
-    stmt.right.type === "Identifier" &&
-    analysis.dynBindings.has((stmt.right as Identifier).name)
-  ) {
+  if (isDyn) {
     const base = analysis.dynBindings.get(
       (stmt.right as Identifier).name,
     ) as string;
@@ -3125,17 +3281,96 @@ function lowerForOf(
     pat: decl.id.name,
     iter,
     body: lowerBlock(stmt.body, analysis, scope),
+    label,
+    mode: mutatesElement ? "refMut" : undefined,
   };
 }
 
 /**
- * Lower `switch (disc) { … }` to a `match` with **guarded wildcard** arms —
- * `case v:` → `_ if disc == v => { … }`, `default:` → `_ => { … }` (emitted
- * last). Rust forbids `f64` literal patterns, so the discriminant is compared in
- * a guard. Rust `match` has no fall-through: each case must terminate with
- * `break` (stripped — it is the case terminator) or `return`; a non-terminating
- * non-final case, or an empty/stacked case, throws. A synthetic `_ => {}` is
- * appended when there is no `default`, so the match is exhaustive.
+ * Build a Rust struct pattern for a `for (const { … } of xs)` destructuring
+ * (series 064) — `Point { x, y }` from the element struct of `xs`. Only shorthand
+ * field bindings (`{ x }`, not `{ x: renamed }`) over a statically-known named
+ * struct element are supported; anything else is fail-loud.
+ */
+function destructureForOfPattern(
+  stmt: ForOfStatement,
+  analysis: ModuleAnalysis,
+): string {
+  const elem = elementTypeOf(stmt.right, analysis);
+  if (elem.kind !== "struct") {
+    throw new UnsupportedError({
+      type: "for-of object destructuring over a non-named-struct element",
+    });
+  }
+  const pattern = stmt.left.declarations[0]?.id as unknown as ObjectPattern;
+  const fields = pattern.properties.map((p) => {
+    const key = p.key as unknown as { type: string; name?: string };
+    const value = p.value as unknown as { type: string; name?: string };
+    if (
+      p.computed ||
+      key.type !== "Identifier" ||
+      value.type !== "Identifier" ||
+      key.name !== value.name
+    ) {
+      throw new UnsupportedError({
+        type: "for-of object destructuring supports only shorthand field bindings (`{ x, y }`)",
+      });
+    }
+    return key.name as string;
+  });
+  return `${elem.name} { ${fields.join(", ")} }`;
+}
+
+/**
+ * Does the for-of body mutate its element binding `name` *in place* — an
+ * assignment whose target is `name` or a member access rooted at `name`
+ * (`name.f = …`, `name.a.b = …`)? Such a loop iterates `&mut xs` (series 064).
+ * Purely syntactic over the AST body; a nested closure/loop is still scanned
+ * (a mutation anywhere needs the mutable borrow).
+ */
+function forOfElementMutated(body: Statement, name: string): boolean {
+  let found = false;
+  const rootedAt = (node: unknown): boolean => {
+    if (!isAstNode(node)) return false;
+    if (node.type === "Identifier") return node.name === name;
+    if (node.type === "MemberExpression") return rootedAt(node.object);
+    return false;
+  };
+  const visit = (node: unknown): void => {
+    if (found) return;
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!isAstNode(node)) return;
+    if (node.type === "AssignmentExpression" && rootedAt(node.left)) {
+      found = true;
+      return;
+    }
+    for (const key in node) {
+      if (key === "type") continue;
+      visit((node as Record<string, unknown>)[key]);
+    }
+  };
+  visit(body);
+  return found;
+}
+
+/**
+ * Lower `switch (disc) { … }` to a `match`. Consecutive **empty** `case` labels
+ * that share a body fold into one arm (series 064's or-pattern) — `case 1: case 2:
+ * body` → the tests `[1, 2]` on one arm. Two arm shapes result:
+ *
+ *  - **String scrutinee** (a `String`-typed discriminant, all case tests string
+ *    literals): idiomatic `match s.as_str() { "a" | "b" => …, _ => … }` — literal
+ *    string patterns, the scrutinee borrowed as `&str` (series 064).
+ *  - **Otherwise**: guarded wildcard `_ if disc == a || disc == b => …` (Rust
+ *    forbids `f64` literal patterns). An integer switch is later upgraded to
+ *    literal / or / range patterns by `promoteMatches` (numeric.ts).
+ *
+ * Rust `match` has no fall-through: a *bodied* case must terminate with `break`
+ * (stripped) or `return`; a non-terminating non-final case throws. A synthetic
+ * `_ => {}` is appended when there is no `default`, so the match is exhaustive.
  */
 function lowerSwitch(
   stmt: SwitchStatement,
@@ -3143,32 +3378,83 @@ function lowerSwitch(
   scope: string,
 ): HirStmt {
   const disc = lowerExpr(stmt.discriminant, analysis);
-  const arms: HirMatchArm[] = [];
+
+  // Fold consecutive empty (stacked) cases into the next bodied case's tests.
+  const folded: { tests: Expression[]; body: HirStmt[] }[] = [];
+  let pending: Expression[] = [];
   let defaultArm: HirMatchArm | null = null;
 
   stmt.cases.forEach((c, i) => {
-    const body = lowerSwitchCaseBody(
-      c.consequent,
-      i === stmt.cases.length - 1,
-      analysis,
-      scope,
-    );
+    const isLast = i === stmt.cases.length - 1;
     if (c.test === null) {
-      defaultArm = { guard: null, body };
-    } else {
-      const guard: HirExpr = {
-        kind: "binary",
-        op: "==",
-        left: disc,
-        right: lowerExpr(c.test, analysis),
+      defaultArm = {
+        guard: null,
+        body:
+          c.consequent.length === 0
+            ? []
+            : lowerSwitchCaseBody(c.consequent, isLast, analysis, scope),
       };
-      arms.push({ guard, body });
+      return;
     }
+    if (c.consequent.length === 0) {
+      pending.push(c.test); // a stacked `case v:` sharing the next body
+      return;
+    }
+    const body = lowerSwitchCaseBody(c.consequent, isLast, analysis, scope);
+    folded.push({ tests: [...pending, c.test], body });
+    pending = [];
+  });
+  if (pending.length > 0) {
+    throw new UnsupportedError({
+      type: "trailing empty switch case with no shared body",
+    });
+  }
+
+  // String scrutinee → literal `&str` patterns over `s.as_str()` (series 064).
+  const discName =
+    stmt.discriminant.type === "Identifier"
+      ? (stmt.discriminant as Identifier).name
+      : null;
+  const isStringScrutinee =
+    discName != null &&
+    analysis.bindingTypes.get(discName)?.kind === "String" &&
+    folded.every((f) => f.tests.every(isStringLiteralExpr));
+
+  const arms: HirMatchArm[] = folded.map(({ tests, body }) => {
+    if (isStringScrutinee) {
+      const pats: HirExpr[] = tests.map((t) => ({
+        kind: "string",
+        value: (t as Literal).value as string,
+      }));
+      return pats.length === 1
+        ? { guard: null, pat: pats[0], body }
+        : { guard: null, pats, body };
+    }
+    const eqs = tests.map<HirExpr>((t) => ({
+      kind: "binary",
+      op: "==",
+      left: disc,
+      right: lowerExpr(t, analysis),
+    }));
+    const guard = eqs.reduce((acc, e) => ({
+      kind: "binary",
+      op: "||",
+      left: acc,
+      right: e,
+    }));
+    return { guard, body };
   });
 
-  // `default` last; else a catch-all so the `match` is exhaustive.
   arms.push(defaultArm ?? { guard: null, body: [] });
-  return { kind: "match", disc, arms };
+  const matchDisc: HirExpr = isStringScrutinee
+    ? { kind: "method", receiver: disc, name: "as_str", args: [] }
+    : disc;
+  return { kind: "match", disc: matchDisc, arms };
+}
+
+/** Is `e` a string-literal expression (a `case "x":` test)? */
+function isStringLiteralExpr(e: Expression): boolean {
+  return e.type === "Literal" && typeof (e as Literal).value === "string";
 }
 
 /** Lower a case body, enforcing the terminator rule and stripping a trailing `break`. */
@@ -4761,6 +5047,9 @@ function lowerCall(
         methodName,
         elemType,
         1,
+        undefined,
+        // The `(el, i)` index param via `.enumerate()` is `map`-only (series 057).
+        { indexAllowed: methodName === "map" },
       );
       const receiver = lowerExpr(m.object, analysis);
       const shared = {
@@ -4768,9 +5057,10 @@ function lowerCall(
         cbName: lifted.cbName,
         elemParam: lifted.paramNames[0] as string,
         forwarded: lifted.forwarded,
+        elemMode: lifted.elemMode,
       };
       return methodName === "map"
-        ? { kind: "iterMap", ...shared }
+        ? { kind: "iterMap", ...shared, indexParam: lifted.indexParam }
         : { kind: "iterFilter", ...shared };
     }
     // `some`/`every` → `.iter().any()`/`.all()` (series 048); same single-param
@@ -4795,6 +5085,7 @@ function lowerCall(
         cbName: lifted.cbName,
         elemParam: lifted.paramNames[0] as string,
         forwarded: lifted.forwarded,
+        elemMode: lifted.elemMode,
       };
       return methodName === "some"
         ? { kind: "iterAny", ...shared }
@@ -4821,6 +5112,7 @@ function lowerCall(
         cbName: lifted.cbName,
         elemParam: lifted.paramNames[0] as string,
         forwarded: lifted.forwarded,
+        elemMode: lifted.elemMode,
       };
     }
     // `reduce((acc, x) => e, init)` → `.iter().fold(init, |acc, x| cb(acc, *x))`
@@ -4951,13 +5243,17 @@ const CB_GLOBALS = new Set([
 function arrowShape(
   arrow: ArrowFunctionExpression,
   arity: number,
+  maxArity: number = arity,
 ): { params: string[]; bodyExpr: Expression } {
   if (arrow.async) {
     throw new UnsupportedError({ type: "async arrow closure" });
   }
-  if (arrow.params.length !== arity) {
+  if (arrow.params.length < arity || arrow.params.length > maxArity) {
     throw new UnsupportedError({
-      type: `closure must take exactly ${arity} parameter(s)`,
+      type:
+        arity === maxArity
+          ? `closure must take exactly ${arity} parameter(s)`
+          : `closure must take ${arity}–${maxArity} parameter(s)`,
     });
   }
   const params = arrow.params.map((p) => p.name);
@@ -5136,21 +5432,84 @@ function liftCallback(
   elemType: RustType,
   arity: number,
   accType?: RustType,
-): { cbName: string; paramNames: string[]; forwarded: HirExpr[] } {
-  const { params, bodyExpr } = arrowShape(arrow, arity);
+  opts?: { indexAllowed?: boolean },
+): {
+  cbName: string;
+  paramNames: string[];
+  forwarded: HirExpr[];
+  elemMode: ElemMode;
+  indexParam?: string;
+} {
+  // The index param `(el, i)` (series 057) is a single extra param, on `map` only.
+  const indexAllowed = opts?.indexAllowed ?? false;
+  // A third `(el, i, arr)` param — the whole array — forces a second borrow of the
+  // receiver mid-iteration and muddies the pure-fn shape: fail-loud (057 residual).
+  if (indexAllowed && arrow.params.length >= arity + 2) {
+    throw new UnsupportedError({
+      type: `whole-array ('arr') callback parameter in '.${method}' — a second borrow of the receiver (fail-loud residual, series 057)`,
+    });
+  }
+  const { params, bodyExpr } = arrowShape(
+    arrow,
+    arity,
+    indexAllowed ? arity + 1 : arity,
+  );
+  const indexParam = params.length > arity ? (params[arity] as string) : undefined;
   const paramSet = new Set(params);
   const freeNames = freeVarsOf(bodyExpr, paramSet, analysis);
 
-  // Param types: own params first, then each free var (Copy scalars only).
+  // Element passing (series 057): a Copy element forwards by value (`copy`); a
+  // non-Copy element is classified read-only (`borrow`, `&T`) vs consumed (`clone`,
+  // owned `T`) from a local walk of the one body. `reduce`/`sort` (arity 2) don't
+  // yet borrow their element — a non-Copy element there stays fail-loud.
+  let elemMode: ElemMode = "copy";
+  if (!isCopyRustType(elemType)) {
+    if (arity !== 1) {
+      throw new UnsupportedError({
+        type: `'.${method}' over a non-Copy element type — element borrowing is only wired for map/filter/find/some/every (fail-loud residual, series 057)`,
+      });
+    }
+    const use = classifyElementUse(bodyExpr, params[0] as string);
+    if (use === "unresolved") {
+      throw new UnsupportedError({
+        type: `cannot classify the callback's element parameter '${params[0]}' as read-only or consumed — no silent clone (fail-loud, series 057)`,
+      });
+    }
+    elemMode = use === "consume" ? "clone" : "borrow";
+  }
+  // A borrowed non-Copy element becomes a `&T` param (refined to `&str` for a
+  // read-only String by `refineStrings`); copy/clone keep the owned element type.
+  const elemParamTy: RustType =
+    elemMode === "borrow"
+      ? { kind: "ref", mut: false, inner: elemType }
+      : elemType;
+
+  // Param types: own params first, then each free var (Copy scalars only). The
+  // typer `ctx` uses the element's *value* type (not the `&T` borrow). Arity 2 is
+  // `reduce` (`acc` typed by `init`, `elem` Copy) or `sort` (both Copy elements);
+  // arity 1 is the single element, which may borrow (`&T`) under `elemMode`.
   const ctx = new Map<string, RustType>();
-  const ownParams: HirParam[] =
-    arity === 2 && accType
-      ? [
-          { name: params[0] as string, ty: accType },
-          { name: params[1] as string, ty: elemType },
-        ]
-      : params.map((p) => ({ name: p, ty: elemType }));
-  for (const p of ownParams) ctx.set(p.name, p.ty);
+  let ownParams: HirParam[];
+  if (arity === 2) {
+    const firstTy = accType ?? elemType;
+    ownParams = [
+      { name: params[0] as string, ty: firstTy },
+      { name: params[1] as string, ty: elemType },
+    ];
+    ctx.set(params[0] as string, firstTy);
+    ctx.set(params[1] as string, elemType);
+  } else {
+    ownParams = [{ name: params[0] as string, ty: elemParamTy }];
+    ctx.set(params[0] as string, elemType);
+  }
+  if (indexParam) {
+    // The index joins the f64 numeric surface (decision 2026-07-09): `number` is
+    // uniformly f64, and JS's callback index *is* a number, so the shim forwards
+    // `i as f64`. This lets arithmetic bodies (`x + i`) work and bind to `number[]`
+    // — `usize` would clash with the f64 literals/result and only admit a bare `i`.
+    ownParams.push({ name: indexParam, ty: { kind: "f64" } });
+    ctx.set(indexParam, { kind: "f64" });
+  }
 
   const freeParams: HirParam[] = [];
   const forwarded: HirExpr[] = [];
@@ -5186,7 +5545,97 @@ function liftCallback(
     ret,
     body: [{ kind: "return", value: body }],
   });
-  return { cbName, paramNames: params, forwarded };
+  return { cbName, paramNames: params, forwarded, elemMode, indexParam };
+}
+
+/**
+ * Local read/consume classifier for a callback's element parameter (series 057).
+ * Walks the one body once, tagging each occurrence of `param` by its role:
+ *
+ *  - **read** — the receiver of a member access (`s.x`, `s.length`) or an operand
+ *    of an arithmetic/comparison/logical/unary expression (produces a new value).
+ *  - **consume** — the value flows out: it *is* the returned body, or an element of
+ *    a returned array/object literal, or a by-value call/`new` argument.
+ *  - **unresolved** — anything else (a use the local walk can't prove either way).
+ *
+ * A single consume → the element is owned+cloned; all-read → borrowed; any
+ * unresolved use → fail-loud (the caller rejects, honoring "no silent clone").
+ */
+function classifyElementUse(
+  body: Expression,
+  param: string,
+): "read" | "consume" | "unresolved" {
+  let sawConsume = false;
+  let sawUnresolved = false;
+
+  const visit = (node: unknown, role: "read" | "consume" | "unresolved") => {
+    if (Array.isArray(node)) {
+      for (const c of node) visit(c, role);
+      return;
+    }
+    if (!isAstNode(node)) return;
+    if (node.type === "Identifier") {
+      if ((node.name as string) === param) {
+        if (role === "consume") sawConsume = true;
+        else if (role === "unresolved") sawUnresolved = true;
+      }
+      return;
+    }
+    switch (node.type) {
+      case "MemberExpression": {
+        visit(node.object, "read"); // the receiver is only read
+        if (node.computed) visit(node.property, "read"); // an index value
+        return;
+      }
+      case "BinaryExpression":
+      case "LogicalExpression": {
+        visit(node.left, "read");
+        visit(node.right, "read");
+        return;
+      }
+      case "UnaryExpression":
+        visit(node.argument, "read");
+        return;
+      case "ConditionalExpression": {
+        visit(node.test, "read");
+        visit(node.consequent, role); // branches inherit the outer role
+        visit(node.alternate, role);
+        return;
+      }
+      case "ParenthesizedExpression":
+        visit(node.expression, role);
+        return;
+      case "ArrayExpression":
+        visit(node.elements, "consume"); // each element is moved into the array
+        return;
+      case "ObjectExpression":
+        visit(node.properties, role);
+        return;
+      case "Property":
+        visit(node.value, "consume"); // the value is moved into the object
+        return;
+      case "CallExpression":
+      case "NewExpression": {
+        visit(node.callee, "read");
+        visit(node.arguments, "consume"); // by-value arguments own their value
+        return;
+      }
+      default: {
+        // An unrecognized position: descend, but any `param` reached is unresolved.
+        for (const key in node) {
+          if (key === "type") continue;
+          visit(node[key], "unresolved");
+        }
+      }
+    }
+  };
+
+  // The body's value is the callback's return — reaching `param` here is a consume.
+  visit(body, "consume");
+
+  if (sawUnresolved) return "unresolved";
+  if (sawConsume) return "consume";
+  return "read"; // all-read, or unused (borrow is safe either way)
 }
 
 /**
