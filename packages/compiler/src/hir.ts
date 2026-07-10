@@ -121,6 +121,14 @@ export type RustType =
  */
 export type NumericType = "f64" | "usize" | "i64" | "i128";
 
+/**
+ * How a lifted array-callback element crosses the shim boundary (series 057).
+ * `"copy"` — a Copy element forwarded by value (`*p`, series 048). `"borrow"` — a
+ * read-only non-Copy element forwarded by reference (`p`/`*p`, no clone). `"clone"`
+ * — a consumed non-Copy element the lifted fn owns (`p.clone()`/`(*p).clone()`).
+ */
+export type ElemMode = "copy" | "borrow" | "clone";
+
 // ── Expressions ──────────────────────────────────────────────────────────────
 
 /** A call argument plus the borrow to apply to it (`x` / `&x` / `&mut x`). */
@@ -303,12 +311,26 @@ export type HirExpr =
       cbName: string;
       elemParam: string;
       forwarded: HirExpr[];
+      /**
+       * How the element crosses the shim boundary (series 057). `"copy"` forwards
+       * `*p` (a Copy element, series 048); `"borrow"` forwards `p` (a read-only
+       * non-Copy `&T`, no clone); `"clone"` forwards `p.clone()` (a consumed
+       * non-Copy element, owned by the lifted fn).
+       */
+      elemMode: ElemMode;
+      /**
+       * The name of the callback's index parameter `(el, i)` when present (series
+       * 057) — the shim becomes `.iter().enumerate().map(|(i, p)| …)` and `i:
+       * usize` is threaded before the forwarded free vars. Absent → single-param.
+       */
+      indexParam?: string;
     }
   /**
    * `xs.filter(p => body)` →
    * `xs.iter().filter(|p| cbName(**p, forwarded…)).copied().collect::<Vec<_>>()`
    * (series 048). The predicate is lifted to a top-level `fn cbName -> bool`; the
-   * shim forwards `**p` (the `&&T` a filter predicate receives).
+   * shim forwards `**p` (the `&&T` a filter predicate receives). For a non-Copy
+   * element the terminal is `.cloned()` and the deref follows `elemMode` (057).
    */
   | {
       kind: "iterFilter";
@@ -316,6 +338,7 @@ export type HirExpr =
       cbName: string;
       elemParam: string;
       forwarded: HirExpr[];
+      elemMode: ElemMode;
     }
   /** `Object.keys(m)` → `m.keys().cloned().collect::<Vec<_>>()` → `Vec<String>` (041). */
   | { kind: "objectKeys"; map: HirExpr }
@@ -346,6 +369,7 @@ export type HirExpr =
       cbName: string;
       elemParam: string;
       forwarded: HirExpr[];
+      elemMode: ElemMode;
     }
   /** `xs.some(p => c)` → `xs.iter().any(|p| cbName(*p, forwarded…))` → `bool` (048). */
   | {
@@ -354,6 +378,7 @@ export type HirExpr =
       cbName: string;
       elemParam: string;
       forwarded: HirExpr[];
+      elemMode: ElemMode;
     }
   /** `xs.every(p => c)` → `xs.iter().all(|p| cbName(*p, forwarded…))` → `bool` (048). */
   | {
@@ -362,6 +387,7 @@ export type HirExpr =
       cbName: string;
       elemParam: string;
       forwarded: HirExpr[];
+      elemMode: ElemMode;
     }
   /**
    * `xs.reduce((acc, x) => e, init)` →
@@ -484,23 +510,45 @@ export type HirStmt =
       someBody: HirStmt[];
       noneBody: HirStmt[] | null;
     }
-  | { kind: "while"; cond: HirExpr; body: HirStmt[] }
+  | { kind: "while"; cond: HirExpr; body: HirStmt[]; label?: string }
   /**
    * A bare, scope-containing `{ … }`. Emitted with no trailing `;`. The C-style
    * `for` desugar wraps its `init` + `while` in one so the loop variable's scope
    * is contained (see lower.ts).
    */
-  | { kind: "block"; body: HirStmt[] }
+  /**
+   * `fromForContinue` (series 064) tags a block that the C-`for` desugar wraps
+   * around a `continue` to inline the loop update (`{ i = i + 1; continue; }`), so
+   * the counter still advances in the `while` fallback. When the loop is promoted
+   * to a `forRange` (which advances natively), `promoteRanges` strips the inlined
+   * update back to a bare `continue`. The tag makes that strip unambiguous — it
+   * never touches a user-written `{ …; continue; }` block.
+   */
+  | { kind: "block"; body: HirStmt[]; fromForContinue?: boolean }
   /**
    * `for <pat> in <iter> { body }`. `iter` is the already-borrowing iterator
-   * (lowering bakes in `.iter()`), so the emitter renders it verbatim.
+   * (lowering bakes in `.iter()`), so the emitter renders it verbatim. `mode`
+   * (series 064) selects the for-of element ownership: `"ref"` iterates `&xs`
+   * (default), `"refMut"` iterates `&mut xs`, `"owned"` consumes `xs` (valid when
+   * `xs` is dead after the loop), and `"cloned"` iterates `xs.iter().cloned()`
+   * (owned elements, `xs` still live) — the same borrow/clone/consume call 057
+   * makes for callback elements. `label` (series 064) is the loop's lifetime label.
    */
-  | { kind: "forIn"; pat: string; iter: HirExpr; body: HirStmt[] }
+  | {
+      kind: "forIn";
+      pat: string;
+      iter: HirExpr;
+      body: HirStmt[];
+      mode?: "ref" | "refMut" | "owned" | "cloned";
+      label?: string;
+    }
   /**
    * `for <counter> in <start>..<end> { body }` (`..=` when `inclusive`). An
-   * idiomatic integer range, recovered from a canonical `usize` counting `for`
-   * by `promoteRanges` (numeric.ts) — the counter's `let` and `+ 1` update are
-   * folded into the range. `break`/`continue` render natively.
+   * idiomatic integer range, recovered from a canonical counting `for` by
+   * `promoteRanges` (numeric.ts) — the counter's `let` and update are folded into
+   * the range. `break`/`continue` render natively. Series 064 extends it beyond
+   * the ascending unit step: `descending` renders `(start..=end).rev()`; a `step`
+   * ≠ 1 renders `.step_by(step)`; `label` is the loop's lifetime label.
    */
   | {
       kind: "forRange";
@@ -509,6 +557,9 @@ export type HirStmt =
       end: HirExpr;
       inclusive: boolean;
       body: HirStmt[];
+      descending?: boolean;
+      step?: number;
+      label?: string;
     }
   /**
    * `match <disc> { arms }`. A `switch` lowers here with **guarded wildcard**
@@ -516,8 +567,8 @@ export type HirStmt =
    * discriminant is compared in a guard rather than matched as a literal.
    */
   | { kind: "match"; disc: HirExpr; arms: HirMatchArm[] }
-  | { kind: "break" }
-  | { kind: "continue" }
+  | { kind: "break"; label?: string }
+  | { kind: "continue"; label?: string }
   /**
    * A generator state-machine suspend point (series 052). Inside a
    * `HirGenerator`'s `next()` arms only: `self.state = <resumeState>; return
@@ -582,10 +633,18 @@ export type HirCatchArm =
  * One `match` arm. `guard` is `disc == case` (`null` is the wildcard `_`). When
  * `pat` is set — an integer-typed discriminant promoted by `promoteMatches` — the
  * arm is a **literal pattern** (`<pat> => …`) and the guard is cleared.
+ *
+ * Series 064 adds two literal-pattern shapes for folded `switch` cases (guard also
+ * cleared): `pats` is an **or-pattern** (`a | b | c => …`, consecutive cases that
+ * share a body); `rangePat` is a **range pattern** (`lo..=hi => …`, a contiguous
+ * integer run). Exactly one of `pat` / `pats` / `rangePat` is set on a
+ * literal-pattern arm.
  */
 export interface HirMatchArm {
   guard: HirExpr | null;
   pat?: HirExpr;
+  pats?: HirExpr[];
+  rangePat?: { lo: HirExpr; hi: HirExpr };
   body: HirStmt[];
 }
 
