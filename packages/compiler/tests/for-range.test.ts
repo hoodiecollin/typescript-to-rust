@@ -75,13 +75,17 @@ describe("for-range: canonical usize counting for → range", () => {
     expect(rust).not.toContain("for i in");
   });
 
-  test("RANGE6 (non-promotion) an own `continue` keeps the 018 while-desugar", () => {
+  test("RANGE6 an own `continue` now promotes to a range with a native `continue` (series 064)", () => {
+    // Series 064 graduates the 018 residual: `continue` is native in a range (it
+    // advances the counter automatically), so the counting loop still promotes and
+    // the desugar's inlined update is stripped back to a bare `continue`.
     const rust = compile(
       `function f(arr: Array<number>): void {\n` +
         `  for (let i = 0; i < arr.length; i = i + 1) { if (arr[i] > 100) { continue; } console.log(arr[i]); }\n` +
         `}`,
     );
-    expect(rust).toContain("while i <");
-    expect(rust).not.toContain("for i in");
+    expect(rust).toContain("for i in 0..arr.len()");
+    expect(rust).toContain("continue;");
+    expect(rust).not.toContain("while i <");
   });
 });
