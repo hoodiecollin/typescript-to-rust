@@ -359,7 +359,9 @@ function promoteIntegerMatches(module: HirModule): void {
 
       const guarded = stmt.arms.filter((a) => a.guard !== null);
       if (guarded.length === 0) continue;
-      const cases = guarded.map((a) => integerCaseLiteral(a.guard, name));
+      // Each guarded arm is `disc == v` or an or-chain `disc == a || disc == b`
+      // (series 064's folded stacked cases) — collect its integer value(s).
+      const cases = guarded.map((a) => integerCaseValues(a.guard, name));
       if (cases.some((c) => c === null)) continue;
 
       const paramIdx = body.params.findIndex((p) => p.name === name);
@@ -387,9 +389,9 @@ function promoteIntegerMatches(module: HirModule): void {
       }
 
       guarded.forEach((arm, i) => {
-        const value = cases[i];
-        if (value === null || value === undefined) return;
-        arm.pat = { kind: "number", value, ty: tag };
+        const values = cases[i];
+        if (!values) return;
+        setLiteralPattern(arm, values, tag);
         arm.guard = null;
       });
     }
@@ -445,6 +447,51 @@ function integerCaseLiteral(
   const r = guard.right;
   if (r.kind !== "number" || !Number.isInteger(r.value)) return null;
   return r.value;
+}
+
+/**
+ * Collect the integer value(s) an arm guard matches: a single `disc == v`, or an
+ * or-chain `disc == a || disc == b || …` (series 064's folded stacked cases).
+ * Returns `null` if any leaf is not an integer `disc == <int>` comparison.
+ */
+function integerCaseValues(
+  guard: HirExpr | null,
+  name: string,
+): number[] | null {
+  if (guard && guard.kind === "binary" && guard.op === "||") {
+    const l = integerCaseValues(guard.left, name);
+    const r = integerCaseValues(guard.right, name);
+    return l && r ? [...l, ...r] : null;
+  }
+  const v = integerCaseLiteral(guard, name);
+  return v === null ? null : [v];
+}
+
+/**
+ * Set an integer arm's literal pattern (series 064). One value → a literal `pat`;
+ * a contiguous run of ≥3 → a `rangePat` (`lo..=hi`); otherwise an or-pattern
+ * `pats` (`a | b`). Each number carries the promoted `tag` (`usize`/`i64`).
+ */
+function setLiteralPattern(
+  arm: { pat?: HirExpr; pats?: HirExpr[]; rangePat?: { lo: HirExpr; hi: HirExpr } },
+  values: number[],
+  tag: "usize" | "i64",
+): void {
+  const num = (value: number): HirExpr => ({ kind: "number", value, ty: tag });
+  if (values.length === 1) {
+    arm.pat = num(values[0] as number);
+    return;
+  }
+  const sorted = [...values].sort((a, b) => a - b);
+  const contiguous = sorted.every((v, i) => i === 0 || v === sorted[i - 1]! + 1);
+  if (contiguous && sorted.length >= 3) {
+    arm.rangePat = {
+      lo: num(sorted[0] as number),
+      hi: num(sorted[sorted.length - 1] as number),
+    };
+  } else {
+    arm.pats = values.map(num);
+  }
 }
 
 /**
@@ -692,26 +739,153 @@ function tryRange(
   if (!usize.has(counter)) return null; // index-driven counters only
 
   const cond = whileStmt.cond;
-  if (cond.kind !== "binary" || (cond.op !== "<" && cond.op !== "<="))
-    return null;
+  if (cond.kind !== "binary") return null;
   if (!isNamedIdent(cond.left, counter)) return null;
   if (!isIntegerBound(cond.right, usize)) return null;
 
   const body = whileStmt.body;
   const last = body[body.length - 1];
-  if (!last || !isUnitIncrement(last, counter)) return null;
-  const inner = body.slice(0, -1);
-  if (assignsName(inner, counter)) return null; // counter mutated elsewhere
-  if (hasOwnContinueHir(inner)) return null; // 018 while-desugar keeps its inlining
+  if (!last) return null;
+  const step = analyzeUpdate(last, counter);
+  if (!step) return null;
 
+  // `continue` is native in a range (it advances automatically), so strip the
+  // desugar's inlined `{ update; continue }` (tagged `fromForContinue`) back to a
+  // bare `continue` — series 064, graduating the 018 residual. After stripping,
+  // any *remaining* counter assignment is a real mutation and blocks promotion.
+  const inner = stripForContinue(body.slice(0, -1), counter);
+  if (assignsName(inner, counter)) return null;
+
+  const ascending = cond.op === "<" || cond.op === "<=";
+  const descending = cond.op === ">" || cond.op === ">=";
+  const label = whileStmt.label;
+
+  if (ascending && step.dir === "up") {
+    return {
+      kind: "forRange",
+      counter,
+      start: tagUsizeIfInt(letStmt.init),
+      end: tagUsizeIfInt(cond.right),
+      inclusive: cond.op === "<=",
+      step: step.by,
+      body: inner,
+      label,
+    };
+  }
+  // Descending unit step (series 064): `(lo..=hi).rev()` counts `hi…lo`. `i > E`
+  // stops at `E+1` (lo = E+1); `i >= E` includes `E` (lo = E). `hi` is the init.
+  // Non-unit descending step and non-`usize` bound-driven ranges stay `while`.
+  if (descending && step.dir === "down" && step.by === 1) {
+    const lo =
+      cond.op === ">" ? addOne(tagUsizeIfInt(cond.right)) : tagUsizeIfInt(cond.right);
+    return {
+      kind: "forRange",
+      counter,
+      start: lo,
+      end: tagUsizeIfInt(letStmt.init),
+      inclusive: true,
+      descending: true,
+      body: inner,
+      label,
+    };
+  }
+  return null;
+}
+
+/** `e + 1`, folded when `e` is an integer literal (keeps the `usize` tag). */
+function addOne(e: HirExpr): HirExpr {
+  if (e.kind === "number" && Number.isInteger(e.value)) {
+    return { ...e, value: e.value + 1 };
+  }
   return {
-    kind: "forRange",
-    counter,
-    start: tagUsizeIfInt(letStmt.init),
-    end: tagUsizeIfInt(cond.right),
-    inclusive: cond.op === "<=",
-    body: inner,
+    kind: "binary",
+    op: "+",
+    left: e,
+    right: { kind: "number", value: 1, ty: "usize" },
   };
+}
+
+/**
+ * Classify a loop's trailing counter update (series 064): an increment (`i++`,
+ * `i += k`, `i = i + k`) → `{ dir: "up", by: k }`; a decrement (`i--`, `i -= k`,
+ * `i = i - k`) → `{ dir: "down", by: k }`. `k` must be a positive integer literal.
+ * Anything else (a non-linear `i *= 2`, a fractional step) → `null` (stays `while`).
+ */
+function analyzeUpdate(
+  stmt: HirStmt,
+  counter: string,
+): { dir: "up" | "down"; by: number } | null {
+  if (stmt.kind !== "expr" || stmt.expr.kind !== "assign") return null;
+  const a = stmt.expr;
+  if (!isNamedIdent(a.target, counter)) return null;
+  const posInt = (e: HirExpr): number | null =>
+    e.kind === "number" && Number.isInteger(e.value) && e.value > 0
+      ? e.value
+      : null;
+  if (a.op === "+=") {
+    const k = posInt(a.value);
+    return k === null ? null : { dir: "up", by: k };
+  }
+  if (a.op === "-=") {
+    const k = posInt(a.value);
+    return k === null ? null : { dir: "down", by: k };
+  }
+  if (a.op === "=") {
+    const v = a.value;
+    if (v.kind !== "binary" || (v.op !== "+" && v.op !== "-")) return null;
+    // `i = i + k` (commutative for `+`) or `i = i - k`.
+    if (isNamedIdent(v.left, counter)) {
+      const k = posInt(v.right);
+      if (k === null) return null;
+      return { dir: v.op === "+" ? "up" : "down", by: k };
+    }
+    if (v.op === "+" && isNamedIdent(v.right, counter)) {
+      const k = posInt(v.left);
+      return k === null ? null : { dir: "up", by: k };
+    }
+  }
+  return null;
+}
+
+/**
+ * Strip the C-`for` desugar's inlined `{ update; continue }` blocks (tagged
+ * `fromForContinue`) back to a bare `continue` — the range advances natively, so
+ * the inlined counter update is redundant (and would need a `mut` binding). The
+ * tag makes this unambiguous: a user-written `{ …; continue; }` is never touched.
+ * Transparent through `if`/`block`/`match`; a nested loop is left alone.
+ */
+function stripForContinue(stmts: HirStmt[], counter: string): HirStmt[] {
+  return stmts.map((s) => {
+    if (
+      s.kind === "block" &&
+      s.fromForContinue &&
+      s.body.length === 2 &&
+      (s.body[1] as HirStmt).kind === "continue"
+    ) {
+      // The tag is authoritative — this block is the desugar's inlined update.
+      return s.body[1] as HirStmt;
+    }
+    switch (s.kind) {
+      case "if":
+        return {
+          ...s,
+          conseq: stripForContinue(s.conseq, counter),
+          alt: s.alt ? stripForContinue(s.alt, counter) : null,
+        };
+      case "block":
+        return { ...s, body: stripForContinue(s.body, counter) };
+      case "match":
+        return {
+          ...s,
+          arms: s.arms.map((arm) => ({
+            ...arm,
+            body: stripForContinue(arm.body, counter),
+          })),
+        };
+      default:
+        return s;
+    }
+  });
 }
 
 /** A bound is integer-compatible: a `.len()`, an integer literal, or a `usize`. */
@@ -722,28 +896,6 @@ function isIntegerBound(e: HirExpr, usize: Set<string>): boolean {
   return false;
 }
 
-/** Is `stmt` the appended counter update `i = i + 1` (or `i += 1`)? */
-function isUnitIncrement(stmt: HirStmt, counter: string): boolean {
-  if (stmt.kind !== "expr" || stmt.expr.kind !== "assign") return false;
-  const a = stmt.expr;
-  if (!isNamedIdent(a.target, counter)) return false;
-  if (a.op === "+=") return isOne(a.value);
-  if (a.op === "=") {
-    const v = a.value;
-    return (
-      v.kind === "binary" &&
-      v.op === "+" &&
-      ((isNamedIdent(v.left, counter) && isOne(v.right)) ||
-        (isNamedIdent(v.right, counter) && isOne(v.left)))
-    );
-  }
-  return false;
-}
-
-function isOne(e: HirExpr): boolean {
-  return e.kind === "number" && e.value === 1;
-}
-
 /** Does any statement (nested) assign to `name`? */
 function assignsName(stmts: HirStmt[], name: string): boolean {
   for (const stmt of flattenStmts(stmts)) {
@@ -752,23 +904,6 @@ function assignsName(stmts: HirStmt[], name: string): boolean {
       if (e.kind === "assign" && isNamedIdent(e.target, name)) found = true;
     });
     if (found) return true;
-  }
-  return false;
-}
-
-/** A `continue` targeting *this* loop (not one nested inside another loop). */
-function hasOwnContinueHir(stmts: HirStmt[]): boolean {
-  for (const s of stmts) {
-    if (s.kind === "continue") return true;
-    if (s.kind === "if") {
-      if (hasOwnContinueHir(s.conseq)) return true;
-      if (s.alt && hasOwnContinueHir(s.alt)) return true;
-    } else if (s.kind === "block") {
-      if (hasOwnContinueHir(s.body)) return true;
-    } else if (s.kind === "match") {
-      for (const arm of s.arms) if (hasOwnContinueHir(arm.body)) return true;
-    }
-    // while/forIn/forRange own their own `continue` (a barrier).
   }
   return false;
 }

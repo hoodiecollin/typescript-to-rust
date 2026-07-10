@@ -348,6 +348,13 @@ export interface ContinueStatement extends Span {
   label: Identifier | null;
 }
 
+/** `label: <loop>` — a labeled loop statement (series 064). */
+export interface LabeledStatement extends Span {
+  type: "LabeledStatement";
+  label: Identifier;
+  body: Statement;
+}
+
 /** One `Name` or `Name = <init>` member of an `enum` body. */
 export interface TSEnumMember extends Span {
   type: "TSEnumMember";
@@ -383,6 +390,7 @@ export type Statement =
   | SwitchStatement
   | BreakStatement
   | ContinueStatement
+  | LabeledStatement
   | ThrowStatement
   | TryStatement
   | TSInterfaceDeclaration

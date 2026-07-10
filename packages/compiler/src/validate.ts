@@ -55,6 +55,9 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "SwitchCase",
   "BreakStatement",
   "ContinueStatement",
+  // A labeled loop `outer: for (…)` (series 064) — `lowerLabeled` attaches the
+  // label to the loop HIR node; `break`/`continue label` render `break 'label`.
+  "LabeledStatement",
   "ThrowStatement",
   "TryStatement",
   "CatchClause",

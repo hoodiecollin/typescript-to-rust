@@ -469,6 +469,27 @@ function isBaseTypedParam(
 
 // ── Local mutability ─────────────────────────────────────────────────────────
 
+/**
+ * Does `node` contain an assignment whose target is `name` or a member access
+ * rooted at `name` (`p.x = …`, `p.a.b = …`)? Used to mark a for-of iterable `mut`
+ * when its element is mutated in place (series 064).
+ */
+function mutatesRoot(node: unknown, name: string): boolean {
+  let found = false;
+  const rootedAt = (n: unknown): boolean => {
+    if (!isNode(n)) return false;
+    if (n.type === "Identifier") return identName(n) === name;
+    if (n.type === "MemberExpression") return rootedAt((n as AnyNode).object);
+    return false;
+  };
+  walk(node, (n) => {
+    if (n.type === "AssignmentExpression" && rootedAt((n as AnyNode).left)) {
+      found = true;
+    }
+  });
+  return found;
+}
+
 function mutableBindings(
   body: unknown,
   fns: Map<string, FnInfo>,
@@ -503,6 +524,30 @@ function mutableBindings(
       ) {
         const name = identName(left.object);
         if (name && name !== "self" && !aliased.has(name)) mut.add(name);
+      }
+    }
+
+    // A `for (const p of xs) { p.f = … }` mutates `xs`'s elements in place, so
+    // `xs` iterates `&mut xs` and must be a `mut` local (series 064). Withheld
+    // when `xs` is aliased, mirroring the local-field-mutation guard above.
+    if (n.type === "ForOfStatement") {
+      const iterName = identName(n.right);
+      const left = n.left as AnyNode | undefined;
+      const decls = left?.declarations;
+      const decl = Array.isArray(decls)
+        ? (decls[0] as AnyNode | undefined)
+        : undefined;
+      const loopVar =
+        decl && isNode(decl.id) && (decl.id as AnyNode).type === "Identifier"
+          ? identName(decl.id)
+          : null;
+      if (
+        iterName &&
+        loopVar &&
+        !aliased.has(iterName) &&
+        mutatesRoot(n.body, loopVar)
+      ) {
+        mut.add(iterName);
       }
     }
 
