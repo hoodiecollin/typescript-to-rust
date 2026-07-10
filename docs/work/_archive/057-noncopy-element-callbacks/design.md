@@ -1,8 +1,18 @@
 # 057 — Non-Copy element callbacks + index param
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #11. Builds directly on `048-lambda-lifting-closures` (lifted `fn` + shim;
-> **no capture pass**). Dialect-shape decisions made with Collin 2026-07-09.
+> **Status: SHIPPED (2026-07-09).** Graduates the fail-loud deferral in issue #11.
+> Builds directly on `048-lambda-lifting-closures` (lifted `fn` + shim; **no capture
+> pass**). Dialect-shape decisions made with Collin 2026-07-09; the index-type
+> decision was revised to `f64` at impl (see below). Specs:
+> `packages/compiler/tests/noncopy-callbacks.test.ts`.
+>
+> **Impl deviations from the draft:** (1) the index forwards as `i as f64`, not
+> `usize` (rationale below). (2) The consuming classifier ships the identity/return
+> and by-value-argument shapes; a struct-literal-wrapped consume
+> (`s => ({ wrapped: s })`) needs object-literal-return typing and stays fail-loud
+> (unresolved). (3) Non-Copy element borrowing is wired for
+> `map`/`filter`/`find`/`some`/`every`; a non-Copy `reduce`/`sort` element stays
+> fail-loud (its two-param comparator/fold element isn't classified yet).
 
 ## The problem
 
@@ -33,8 +43,16 @@ conventions at the shim boundary**.
     **fail-loud** (honest; no silent clone).
   This is a bounded, single-body analysis — *not* the whole-program capture /
   `Fn`/`FnMut`/`FnOnce` inference 048 deliberately deleted.
-- **Extra params: index only, via `.enumerate()`.** `(el, i)` supported with
-  `i: usize`; the whole-array third param → **fail-loud**.
+- **Extra params: index only, via `.enumerate()`.** `(el, i)` supported; the
+  whole-array third param → **fail-loud**.
+  - **Index type — decided `f64` at impl (2026-07-09), revising the drafted
+    `usize`.** `number` is uniformly `f64` across the dialect and JS's callback
+    index *is* a number, so the shim forwards `i as f64`. This keeps the index on
+    the f64 numeric surface: arithmetic bodies (`x + i`) work and the result binds
+    to `Array<number>`. `usize` was tried first and rejected — it clashes with the
+    f64 literals in the body and the `f64` map result (`Vec<usize>` ≠ `Vec<f64>`),
+    admitting only a bare `(x, i) => i`. The `.enumerate()` yields `usize`; the
+    `as f64` cast lives in the shim.
 
 ### Why Option C over borrow-only
 

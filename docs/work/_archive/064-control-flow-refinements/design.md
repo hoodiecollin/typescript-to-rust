@@ -1,10 +1,21 @@
 # 064 — Control-flow refinements (or-patterns, literal/range arms, ranges, for-of, labels)
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the deferral in issue #24.
-> Refines lowerings already shipped and **correct** in 006–009, 018–020 — these are
-> idiomatic-emit / legibility improvements, **not** blockers. Decision made with
-> Collin 2026-07-09. Sequenced **after 057** (shares its borrow/clone/consume
-> classifier for for-of ownership).
+> **Status: SHIPPED (2026-07-09).** Graduates the deferral in issue #24. Refines
+> lowerings already shipped and **correct** in 006–009, 018–020 — idiomatic-emit /
+> legibility improvements, **not** blockers. Decision made with Collin 2026-07-09.
+> Sequenced **after 057**. Specs:
+> `packages/compiler/tests/control-flow-refinements.test.ts`.
+>
+> **Impl notes / deviations:** (1) The dialect writes loop updates `i = i + 1` (no
+> `++`/`--`, which stay unmodeled), so the range refinements key off that form. (2)
+> for-of **mutate-in-place** (`&mut xs`) and **destructuring** shipped; the
+> **consume→owned/cloned** case was *not* — it needs liveness of `xs` after the loop
+> to choose `for x in xs` (dead) vs `xs.iter().cloned()` (live), and is deferred as a
+> follow-up (a consuming body keeps the current by-reference lowering). (3) String
+> scrutinee matches the `&str` param **directly** (`match s { … }`), not via
+> `.as_str()` — `.as_str()` is unstable on `&str`; a late pass unwraps it for the
+> read-only-param (`&str`) case and keeps it only for an owned `String` scrutinee.
+> (4) Non-unit *descending* step and non-`usize` bound-driven ranges stay `while`.
 
 ## No dialect fork
 
