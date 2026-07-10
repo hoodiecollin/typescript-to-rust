@@ -148,6 +148,12 @@ export interface ModuleAnalysis {
    */
   accessors: Map<string, { getters: Set<string>; setters: Set<string> }>;
   /**
+   * A monotonically increasing counter for unique `tryBlock` labels (series 063),
+   * so nested labeled-block `try`s get distinct labels (`'try_0`, `'try_1`, …).
+   * Mutated during lowering.
+   */
+  tryCounter: number;
+  /**
    * Names of top-level functions that are *fallible* — they `throw` directly or
    * (transitively) call a fallible function, so their return type wraps in
    * `Result` and calls to them propagate with `?`. Includes the `SCRIPT_SCOPE`
@@ -1290,6 +1296,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     methodParams,
     // Filled during lowering as getters/setters are seen (like `structFields`).
     accessors: new Map(),
+    tryCounter: 0,
     asyncMethods,
     methodNames,
     fallible,

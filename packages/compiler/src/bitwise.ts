@@ -319,6 +319,9 @@ function mapChildren(e: HirExpr, f: (c: HirExpr) => HirExpr): void {
     case "collectVec":
       e.iter = f(e.iter);
       break;
+    case "tryBreak":
+      e.expr = f(e.expr);
+      break;
     // Leaves / exotic async & rc nodes carry no bitwise-eligible operands.
     default:
       break;
@@ -350,6 +353,12 @@ function childBodies(s: HirStmt): HirStmt[][] {
       return s.arms.map((a) => a.body);
     case "tryCatch":
       return [s.tryBody, s.catchBody, ...(s.finallyBody ? [s.finallyBody] : [])];
+    case "tryBlock":
+      return [
+        s.tryBody,
+        ...(s.catchBody ? [s.catchBody] : []),
+        ...(s.finallyBody ? [s.finallyBody] : []),
+      ];
     default:
       return [];
   }
@@ -393,6 +402,9 @@ function reassignStmtExprs(s: HirStmt, f: (e: HirExpr) => HirExpr): void {
       for (const arm of s.arms) if (arm.guard) arm.guard = f(arm.guard);
       break;
     case "throw":
+      s.value = f(s.value);
+      break;
+    case "breakTry":
       s.value = f(s.value);
       break;
     case "yieldReturn":

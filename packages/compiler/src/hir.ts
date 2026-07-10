@@ -251,6 +251,12 @@ export type HirExpr =
   | { kind: "ok"; value: HirExpr | null }
   /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */
   | { kind: "try"; expr: HirExpr }
+  /**
+   * `match <expr> { Ok(__v) => __v, Err(__e) => break '<label> Err(__e) }` (series
+   * 063) — the `?` equivalent inside a `tryBlock`'s labeled block, which cannot use
+   * `?` (not a function boundary). Unwraps `Ok`, or breaks the block with the error.
+   */
+  | { kind: "tryBreak"; label: string; expr: HirExpr }
   /** `Box::new(value)` — a heterogeneous collection element upcast to `Box<dyn IA>`
    * (series 053c). */
   | { kind: "boxNew"; value: HirExpr }
@@ -652,7 +658,41 @@ export type HirStmt =
        * the opaque `catchBody` path is unchanged.
        */
       discriminant?: HirCatchArm[];
-    };
+    }
+  /**
+   * `try`/`catch`/`finally` lowered to a **labeled block** (series 063) rather than
+   * an IIFE closure — used when a `try`/`catch` arm natively `return`s / `break`s /
+   * `continue`s (value-yielding / escaping), or for `try`/`finally` with no
+   * handler. The `tryBody`'s `?`/`throw` are rewritten to `break '<label> Err(…)`
+   * (a labeled block is *not* a function boundary, so `return`/`break`/`continue`
+   * escape the enclosing fn/loop natively). Emitted as `let __<label>:
+   * Result<(), E> = '<label>: { tryBody; Ok(()) };` then a `match` (`catchBody`) or
+   * finally-then-propagate (`catchBody` null). `finally` + an escaping jump is
+   * fail-loud (its own follow-on), so `finallyBody` is only ever present without an
+   * escape.
+   */
+  | {
+      kind: "tryBlock";
+      label: string;
+      tryBody: HirStmt[];
+      catchParam: string | null;
+      catchBody: HirStmt[] | null;
+      finallyBody: HirStmt[] | null;
+      errTy: RustType;
+      discriminant?: HirCatchArm[];
+      /**
+       * The `try` body always diverges (every path `return`s / `break`s /
+       * `continue`s), so the normal-completion `Ok(_)` match arm is unreachable —
+       * emitted as `unreachable!()` so the `match` unifies to `!` (and the value-
+       * yielding fn's tail type-checks). When false, `Ok(_) => {}` falls through.
+       */
+      okUnreachable?: boolean;
+    }
+  /**
+   * `break '<label> Err(<value>);` (series 063) — a `throw` inside a `tryBlock`'s
+   * `try` body exits the labeled block with the error instead of returning.
+   */
+  | { kind: "breakTry"; label: string; value: HirExpr };
 
 /**
  * One arm of a discriminating `catch` → `match` (series 049c). A `variant` arm

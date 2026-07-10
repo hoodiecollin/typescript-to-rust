@@ -1720,44 +1720,158 @@ function lowerTry(
   analysis: ModuleAnalysis,
   scope: string,
 ): HirStmt {
-  if (!stmt.handler) {
-    throw new UnsupportedError({
-      type: "try/finally without a catch handler (deferred)",
-    });
-  }
   const rawTry = lowerStatements(stmt.block.body, analysis, scope);
-  const catchBody = lowerStatements(stmt.handler.body.body, analysis, scope);
-  if (escapesClosure(rawTry, false) || escapesClosure(catchBody, false)) {
-    throw new UnsupportedError({
-      type: "return/break/continue inside try/catch (value-yielding try/catch: deferred)",
-    });
-  }
   const finallyBody = stmt.finalizer
     ? lowerStatements(stmt.finalizer.body, analysis, scope)
     : null;
+  const errTy = programErrType(analysis);
+
+  // `try`/`finally` with no `catch` handler (series 063, graduated): a labeled
+  // block captures the `Result`, `finally` runs on both paths, then an error
+  // propagates. `finally` + an escaping jump stays fail-loud (carrier-enum
+  // follow-on). A bare `try` (no catch, no finally) is meaningless → fail-loud.
+  if (!stmt.handler) {
+    if (!finallyBody) {
+      throw new UnsupportedError({ type: "try without a catch or finally" });
+    }
+    if (escapesClosure(rawTry, false)) {
+      throw new UnsupportedError({
+        type: "finally combined with an escaping return/break/continue (deferred to the carrier-enum follow-on)",
+      });
+    }
+    if (!analysis.fallible.has(scope)) {
+      throw new UnsupportedError({
+        type: "try/finally in a non-fallible scope (nothing to recover — a later slice)",
+      });
+    }
+    const label = `try_${analysis.tryCounter++}`;
+    return {
+      kind: "tryBlock",
+      label,
+      tryBody: rewriteTryBreaks(rawTry.map(wrapReturns), label),
+      catchParam: null,
+      catchBody: null,
+      finallyBody,
+      errTy,
+    };
+  }
+
+  const catchBody = lowerStatements(stmt.handler.body.body, analysis, scope);
+  // A `try`/`catch` whose `try` or `catch` natively `return`s / `break`s /
+  // `continue`s (value-yielding / escaping, series 063) → a labeled-block lowering
+  // (native escapes work; the IIFE closure would swallow them). `finally` + escape
+  // is fail-loud (carrier-enum follow-on).
+  const catchParamName = stmt.handler.param ? stmt.handler.param.name : null;
+  if (escapesClosure(rawTry, false) || escapesClosure(catchBody, false)) {
+    if (finallyBody) {
+      throw new UnsupportedError({
+        type: "finally combined with an escaping return/break/continue in try/catch (deferred to the carrier-enum follow-on)",
+      });
+    }
+    // A `catch` that fully handles the error may leave the fn *non*-fallible (the
+    // error never propagates), so returns are `Ok`-wrapped only when the enclosing
+    // scope is fallible. The labeled block still carries `Result<(), E>` internally.
+    const wrap = analysis.fallible.has(scope)
+      ? (ss: HirStmt[]) => ss.map(wrapReturns)
+      : (ss: HirStmt[]) => ss;
+    const label = `try_${analysis.tryCounter++}`;
+    // A discriminating `instanceof` ladder catch (049c) → native `match` arms over
+    // the owned error, with each arm's returns `Ok`-wrapped iff the scope is
+    // fallible (series 063 extends the ladder to escaping/value-yielding catches).
+    const discriminant =
+      catchParamName && analysis.errorClasses.size > 0
+        ? recognizeDiscriminant(
+            stmt.handler.body.body,
+            catchParamName,
+            analysis,
+            scope,
+          )
+        : undefined;
+    const wrappedDiscriminant = discriminant?.map((arm) => ({
+      ...arm,
+      body: wrap(arm.body),
+    }));
+    return {
+      kind: "tryBlock",
+      label,
+      tryBody: rewriteTryBreaks(wrap(rawTry), label),
+      catchParam: catchParamName,
+      catchBody: wrap(catchBody),
+      finallyBody: null,
+      errTy,
+      discriminant: wrappedDiscriminant,
+      // When the try body always diverges (value-yield: it `return`s on the
+      // success path), the `Ok(_)` match arm is unreachable → `unreachable!()`.
+      okUnreachable: divergesFully(rawTry),
+    };
+  }
   if (finallyBody && hirHasThrowOrTry(catchBody)) {
     throw new UnsupportedError({
       type: "re-throw inside catch alongside a finally (deferred)",
     });
   }
-  const catchParam = stmt.handler.param ? stmt.handler.param.name : null;
   // Series 049c: recognize an `instanceof` ladder catch body → a native `match`
   // over the owned bound error (no `downcast_ref`). Non-ladder catches keep the
   // opaque bind. The `escapesClosure` gate above already rejected a per-branch
   // `return` (the #16 boundary), so a recognized ladder is statement-level only.
   const discriminant =
-    catchParam && analysis.errorClasses.size > 0
-      ? recognizeDiscriminant(stmt.handler.body.body, catchParam, analysis, scope)
+    catchParamName && analysis.errorClasses.size > 0
+      ? recognizeDiscriminant(
+          stmt.handler.body.body,
+          catchParamName,
+          analysis,
+          scope,
+        )
       : undefined;
   return {
     kind: "tryCatch",
     tryBody: makeFallible(rawTry, UNIT),
-    catchParam,
+    catchParam: catchParamName,
     catchBody,
     finallyBody,
-    errTy: programErrType(analysis),
+    errTy,
     discriminant,
   };
+}
+
+/**
+ * Rewrite a `tryBlock`'s `try` body (series 063): each `?` (`{kind:"try"}`) becomes
+ * a `tryBreak` (`match … Err => break '<label>`), and each non-panic `throw` becomes
+ * a `breakTry` (`break '<label> Err(…)`). Native `return`/`break`/`continue` are
+ * left untouched — a labeled block is not a function boundary, so they escape the
+ * enclosing fn/loop. Descent stops at a nested `tryCatch`/`tryBlock` (its `?`/throw
+ * belong to its own label) and at an inline `closure` (its own boundary).
+ */
+function rewriteTryBreaks<T>(node: T, label: string): T {
+  if (Array.isArray(node)) {
+    return node.map((n) => rewriteTryBreaks(n, label)) as unknown as T;
+  }
+  if (node && typeof node === "object") {
+    const kind = (node as { kind?: string }).kind;
+    if (kind === "tryCatch" || kind === "tryBlock" || kind === "closure") {
+      return node;
+    }
+    if (kind === "try") {
+      return {
+        kind: "tryBreak",
+        label,
+        expr: rewriteTryBreaks((node as unknown as { expr: unknown }).expr, label),
+      } as unknown as T;
+    }
+    if (kind === "throw" && !(node as { panic?: boolean }).panic) {
+      return {
+        kind: "breakTry",
+        label,
+        value: rewriteTryBreaks((node as unknown as { value: unknown }).value, label),
+      } as unknown as T;
+    }
+    const out: Record<string, unknown> = {};
+    for (const key in node) {
+      out[key] = rewriteTryBreaks((node as Record<string, unknown>)[key], label);
+    }
+    return out as unknown as T;
+  }
+  return node;
 }
 
 /**
@@ -2007,6 +2121,30 @@ function diverges(stmts: HirStmt[]): boolean {
     return diverges(last.conseq) && diverges(last.alt);
   }
   if (last.kind === "block") return diverges(last.body);
+  return false;
+}
+
+/**
+ * Does a statement list always diverge (its last statement `return`s / `throw`s /
+ * `break`s / `continue`s on every path)? A superset of `diverges` used to decide
+ * whether a `tryBlock`'s normal-completion `Ok(_)` arm is reachable (series 063).
+ */
+function divergesFully(stmts: HirStmt[]): boolean {
+  const last = stmts[stmts.length - 1];
+  if (!last) return false;
+  if (
+    last.kind === "return" ||
+    last.kind === "throw" ||
+    last.kind === "break" ||
+    last.kind === "continue" ||
+    last.kind === "breakTry"
+  ) {
+    return true;
+  }
+  if (last.kind === "if" && last.alt) {
+    return divergesFully(last.conseq) && divergesFully(last.alt);
+  }
+  if (last.kind === "block") return divergesFully(last.body);
   return false;
 }
 

@@ -77,28 +77,19 @@ describe("errors: try / catch / finally", () => {
   });
 });
 
-describe("errors: try / catch — deferred (fail-loud)", () => {
-  test("TRYX1 a `return` inside a try body is rejected", () => {
-    const src = `${RISKY}
-function f(n: number): void {
-  try {
-    return risky(n);
-  } catch (e) {
-    console.log("x");
-  }
+describe("errors: try / catch — remaining residual (fail-loud)", () => {
+  // Series 063 graduated the escaping / value-yielding `try`/`catch` (labeled
+  // block) and `try`/`finally`-with-no-catch — see value-yielding-try.test.ts.
+  // The one temporarily-deferred combination is `finally` COMBINED WITH an
+  // escaping `return`/`break`/`continue` (the carrier-enum follow-on).
+  test("TRYX1 finally combined with an escaping return is rejected", () => {
+    const src = `function risky(n: number): number {
+  if (n < 0) { throw new Error("neg"); }
+  return n;
+}
+function f(n: number): number {
+  try { return risky(n); } catch (e) { return 0; } finally { console.log("done"); }
 }`;
-    expect(() => compile(src)).toThrow();
-  });
-
-  test("TRYX2 a try/finally with no catch handler is rejected", () => {
-    const src = `${RISKY}
-function f(n: number): void {
-  try {
-    risky(n);
-  } finally {
-    console.log("done");
-  }
-}`;
-    expect(() => compile(src)).toThrow();
+    expect(() => compile(src)).toThrow(/finally|escap/i);
   });
 });

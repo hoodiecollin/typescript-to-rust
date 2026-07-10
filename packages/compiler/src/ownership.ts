@@ -367,6 +367,22 @@ function transfer(
       // (on success) — both are possible successors.
       return liveInOfSeq(s.tryBody, union(finLive, catchIn), ctx, movable, map);
     }
+    case "tryBlock": {
+      // A labeled-block try (063): same conservative liveness shape as `tryCatch`
+      // — the try body can reach the catch/finally or fall through.
+      map.set(s, liveAfter);
+      const finLive = s.finallyBody
+        ? liveInOfSeq(s.finallyBody, liveAfter, ctx, movable, map)
+        : liveAfter;
+      const catchIn = s.catchBody
+        ? liveInOfSeq(s.catchBody, finLive, ctx, movable, map)
+        : finLive;
+      return liveInOfSeq(s.tryBody, union(finLive, catchIn), ctx, movable, map);
+    }
+    case "breakTry": {
+      map.set(s, liveAfter);
+      return union(exprUses(s.value, movable), liveAfter);
+    }
     // Generator state-machine stmts (052) never reach this pass — a `HirGenerator`
     // is its own item and the item loop above skips it (no `else` branch), and its
     // arm bodies are built post-lowering. These arms exist only for exhaustiveness.
@@ -518,6 +534,9 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
       return;
     case "collectVec":
       collectUses(e.iter, movable, out);
+      return;
+    case "tryBreak":
+      collectUses(e.expr, movable, out);
       return;
     // Task-escape nodes (series 051c increment 2): a `lockAccess` reads its
     // wrapped sub-expression's uses; an `arcClone` names an `Arc`-wrapped binding

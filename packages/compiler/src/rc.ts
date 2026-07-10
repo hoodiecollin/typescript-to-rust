@@ -149,6 +149,7 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
         return e.value ? { ...e, value: rewrite(e.value) } : e;
       case "try":
       case "await":
+      case "tryBreak":
         return { ...e, expr: rewrite(e.expr) };
       case "iterMap":
       case "iterFilter":
@@ -198,6 +199,9 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
       case "throw":
         s.value = rewrite(s.value);
         return;
+      case "breakTry":
+        s.value = rewrite(s.value);
+        return;
       case "if":
         s.cond = rewrite(s.cond);
         s.conseq.forEach(walkStmt);
@@ -229,6 +233,11 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
       case "tryCatch":
         s.tryBody.forEach(walkStmt);
         s.catchBody.forEach(walkStmt);
+        if (s.finallyBody) s.finallyBody.forEach(walkStmt);
+        return;
+      case "tryBlock":
+        s.tryBody.forEach(walkStmt);
+        if (s.catchBody) s.catchBody.forEach(walkStmt);
         if (s.finallyBody) s.finallyBody.forEach(walkStmt);
         return;
       // break / continue: no operands.

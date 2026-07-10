@@ -88,6 +88,10 @@ function flattenStmts(stmts: HirStmt[]): HirStmt[] {
       out.push(...flattenStmts(stmt.tryBody));
       out.push(...flattenStmts(stmt.catchBody));
       if (stmt.finallyBody) out.push(...flattenStmts(stmt.finallyBody));
+    } else if (stmt.kind === "tryBlock") {
+      out.push(...flattenStmts(stmt.tryBody));
+      if (stmt.catchBody) out.push(...flattenStmts(stmt.catchBody));
+      if (stmt.finallyBody) out.push(...flattenStmts(stmt.finallyBody));
     }
   }
   return out;
@@ -235,6 +239,9 @@ function eachStmtExpr(stmt: HirStmt, fn: (e: HirExpr) => void): void {
     case "throw":
       eachExpr(stmt.value, fn);
       break;
+    case "breakTry":
+      eachExpr(stmt.value, fn);
+      break;
     case "block":
     case "break":
     case "continue":
@@ -296,6 +303,9 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
       if (e.value) eachExpr(e.value, fn);
       break;
     case "try":
+      eachExpr(e.expr, fn);
+      break;
+    case "tryBreak":
       eachExpr(e.expr, fn);
       break;
     case "await":

@@ -670,6 +670,64 @@ function emitStmt(stmt: HirStmt): string {
       const fin = stmt.finallyBody.map(emitStmt).join("\n");
       return `${head}\n${fin}`;
     }
+    case "tryBlock": {
+      // Labeled-block try (063): the `try` body is a value-producing block, not a
+      // function boundary, so native `return`/`break`/`continue` in the arms
+      // escape the enclosing fn/loop. `?`/`throw` inside became `break '<label>
+      // Err(…)` in lowering, so the block yields `Ok(())` on normal completion.
+      const errTy = emitType(stmt.errTy);
+      const resVar = `__${stmt.label}`;
+      const lbl = `'${stmt.label}`;
+      const tryBodyLines = stmt.tryBody.map(emitStmt).join("\n");
+      const blockExpr = `${lbl}: {\n${indent(`${tryBodyLines}\nOk(())`)}\n}`;
+      const bind = `let ${resVar}: Result<(), ${errTy}> = ${blockExpr};`;
+      // No handler (try/finally): run `finally` on both paths, then propagate an
+      // error. (`finally` + an escaping jump is fail-loud in lowering.)
+      if (stmt.catchBody === null) {
+        const fin = (stmt.finallyBody ?? []).map(emitStmt).join("\n");
+        const propagate = `if let Err(__e) = ${resVar} { return Err(__e); }`;
+        return [bind, fin, propagate].filter((s) => s.length > 0).join("\n");
+      }
+      // A handler: `match __<label> { Ok(_) => {}, Err(<binder>) => { catch } }`,
+      // both arms `()`-yielding (the value-yield happens via native `return` in the
+      // arms). A discriminating ladder renders the inner `match` (049c).
+      // The success arm is `unreachable!()` when the try body always diverges
+      // (value-yield: it `return`s on success), so the `match` unifies to `!` and
+      // a value-yielding fn's tail type-checks; otherwise it falls through (`{}`).
+      const okArm = stmt.okUnreachable
+        ? "Ok(_) => unreachable!(),"
+        : "Ok(_) => {}";
+      let matchStmt: string;
+      if (stmt.discriminant) {
+        const binder = stmt.catchParam ? rid(stmt.catchParam) : "e";
+        const arms = stmt.discriminant
+          .map((arm) => indent(indent(emitCatchArm(arm, binder))))
+          .join("\n");
+        matchStmt = [
+          `match ${resVar} {`,
+          `${INDENT}${okArm}`,
+          `${INDENT}Err(${binder}) => {`,
+          `${INDENT}${INDENT}match ${binder} {`,
+          arms,
+          `${INDENT}${INDENT}}`,
+          `${INDENT}}`,
+          `}`,
+        ].join("\n");
+      } else {
+        const binder = stmt.catchParam ? rid(stmt.catchParam) : "_";
+        matchStmt = [
+          `match ${resVar} {`,
+          `${INDENT}${okArm}`,
+          `${INDENT}Err(${binder}) => ${block(stmt.catchBody)}`,
+          `}`,
+        ].join("\n");
+      }
+      const parts = [bind, matchStmt];
+      if (stmt.finallyBody) parts.push(stmt.finallyBody.map(emitStmt).join("\n"));
+      return parts.join("\n");
+    }
+    case "breakTry":
+      return `break '${stmt.label} Err(${emitExpr(stmt.value)});`;
   }
 }
 
@@ -913,6 +971,10 @@ function emitExpr(expr: HirExpr): string {
       return expr.value ? `Ok(${emitExpr(expr.value)})` : "Ok(())";
     case "try":
       return `${emitExpr(expr.expr)}?`;
+    case "tryBreak":
+      // The `?` equivalent inside a `tryBlock` labeled block (063): unwrap `Ok`, or
+      // `break` the block with the error.
+      return `match ${emitExpr(expr.expr)} { Ok(__v) => __v, Err(__e) => break '${expr.label} Err(__e) }`;
     case "boxNew":
       return `Box::new(${emitExpr(expr.value)})`;
     case "await":

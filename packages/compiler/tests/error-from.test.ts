@@ -11,7 +11,6 @@ import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import { emit } from "../src/emitter";
-import { UnsupportedError } from "../src/lower";
 import { checkRust, runRust } from "../src/harness";
 
 function compile(src: string): string {
@@ -81,7 +80,10 @@ run(0);`;
     await behaves(src, "zero not allowed");
   });
 
-  test("ERR20 (fail-loud, #16 boundary) a per-branch-returning discriminator is rejected", () => {
+  test("ERR20 (series 063) a per-branch-returning discriminator lowers to a labeled block", () => {
+    // The #16 boundary was graduated by series 063: an escaping/value-yielding
+    // `try`/`catch` (per-branch `return`) → a labeled block, and a discriminating
+    // `instanceof` ladder still lowers to a native `match` over the owned error.
     const src = `class NotFoundError extends Error {
   constructor(message: string) { super(message); }
 }
@@ -101,6 +103,8 @@ function pick(id: number): number {
     else { return 2; }
   }
 }`;
-    expect(() => compile(src)).toThrow(UnsupportedError);
+    const rust = compile(src);
+    expect(rust).toContain("'try_0: {");
+    expect(rust).toContain("AppError::NotFoundError");
   });
 });
