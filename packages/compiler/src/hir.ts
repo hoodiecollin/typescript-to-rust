@@ -33,6 +33,13 @@ export type RustType =
   | { kind: "usize" }
   /** A signed 64-bit integer — an integer counter/discriminant (`numeric.ts`). */
   | { kind: "i64" }
+  /**
+   * A signed 128-bit integer — the dialect's bitwise-operation type (series 056).
+   * JS bitwise operators run on 32-bit ints; we deliberately widen to `i128`
+   * (documented divergence, not JS-exact) so `<<` has headroom and `>>>`'s
+   * unsigned-32 result fits. Only produced by `refineBitwise`.
+   */
+  | { kind: "i128" }
   | { kind: "String" }
   /** The unsized string slice `str` — only ever valid behind a `ref` (`&str`). */
   | { kind: "str" }
@@ -112,7 +119,7 @@ export type RustType =
  * `i64` literals that drive an integer counter / `match` discriminant. Both
  * integer tags emit bare (no `.0` suffix); only `f64` integers need `.0`.
  */
-export type NumericType = "f64" | "usize" | "i64";
+export type NumericType = "f64" | "usize" | "i64" | "i128";
 
 // ── Expressions ──────────────────────────────────────────────────────────────
 
@@ -129,9 +136,30 @@ export type HirExpr =
   | { kind: "ident"; name: string }
   /** A Rust path like `Color::Red` (an enum variant). Segments are `::`-joined. */
   | { kind: "path"; segments: string[] }
-  | { kind: "binary"; op: string; left: HirExpr; right: HirExpr }
-  /** A prefix unary: `-x` (negation) or `!x` (logical not). */
-  | { kind: "unary"; op: string; operand: HirExpr }
+  | {
+      kind: "binary";
+      op: string;
+      left: HirExpr;
+      right: HirExpr;
+      /**
+       * A bitwise-origin binary (`& | ^ << >>`, series 056). Drives the emitter's
+       * shift-count masking + inline `// bitwise: wide-int (i128)` divergence note
+       * and marks the node as `i128`-typed. Absent for ordinary arithmetic/logical.
+       */
+      bitwise?: boolean;
+    }
+  /** A prefix unary: `-x` (negation), `!x` (logical not), or bitwise-NOT `!x`
+   * (series 056, `~` in TS → `!` in Rust; `bitwise` set). */
+  | { kind: "unary"; op: string; operand: HirExpr; bitwise?: boolean }
+  /**
+   * `((value as u128) >> shift) as i128` — JS's logical (zero-fill) right shift
+   * `>>>` (series 056). Its own node because, unlike the other bitwise operators,
+   * it needs the `u128` round-trip cast a bare `binary` node cannot carry.
+   */
+  | { kind: "ushr"; value: HirExpr; shift: HirExpr }
+  /** `(expr as ty)` — an explicit numeric cast at a type boundary (series 056):
+   * an operand into `i128`, or an `i128` bitwise result back out to `f64`/`usize`. */
+  | { kind: "cast"; expr: HirExpr; ty: RustType }
   | { kind: "assign"; op: string; target: HirExpr; value: HirExpr }
   /** Direct call to a known function; args carry their borrow. */
   | { kind: "call"; callee: string; args: HirArg[] }
@@ -567,6 +595,12 @@ export interface HirMatchArm {
 export interface HirParam {
   name: string;
   ty: RustType;
+  /**
+   * A destructuring binding pattern (series 058) — e.g. `Point { x, y }` for a
+   * `({x, y}: Point)` param. When present the emitter renders `<pat>: <ty>` instead
+   * of `<name>: <ty>`; `name` is a synthetic placeholder unused by the emitter.
+   */
+  pat?: string;
 }
 
 /** A method's `self` receiver: `&self` (`ref`) or `&mut self` (`refMut`). */
@@ -589,6 +623,14 @@ export interface HirStruct {
   kind: "struct";
   name: string;
   fields: { name: string; ty: RustType }[];
+  /**
+   * Interface inheritance (series 059): when this struct's interface participates
+   * in an `extends` relationship, it implements a getter trait `IA` for the
+   * extended base `A`. `getters` are the base's fields, each emitted as a by-value
+   * getter `fn x(&self) -> Tx { self.x.clone() }` in the `impl IA for Name` block
+   * (the base's fields are flattened into this struct, so `self.x` always exists).
+   */
+  implTraits?: { trait: string; getters: { field: string; ty: RustType }[] }[];
 }
 
 /**
@@ -641,6 +683,13 @@ export interface HirTrait {
   name: string;
   methods: HirFn[];
   accessors: { field: string; ty: RustType }[];
+  /**
+   * By-value getter signatures for an interface-inheritance trait (series 059):
+   * `fn x(&self) -> Tx;`. Distinct from `accessors` (class field accessors, which
+   * return `&Tx`) — an interface getter returns an owned clone so a base-typed
+   * `&impl IA` param can read `a.x` as a value with no deref dance.
+   */
+  byValueAccessors?: { field: string; ty: RustType }[];
 }
 
 /**
@@ -721,6 +770,12 @@ export type HirItem =
 export interface HirModule {
   items: HirItem[];
   main: HirStmt[];
+  /**
+   * Non-fatal compiler diagnostics (series 056) accumulated during lowering —
+   * the first channel between "emit" and fail-loud `UnsupportedError`. The CLI
+   * prints these to stderr. Currently only the bitwise wide-int divergence note.
+   */
+  warnings?: string[];
   /**
    * The generated `fn main`'s return type. Absent ⇒ `()` (the common case). Set
    * to `Result<(), String>` when the top-level script propagates a throwing call

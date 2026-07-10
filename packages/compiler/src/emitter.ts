@@ -303,7 +303,11 @@ function emitTrait(t: HirTrait): string {
   const accessors = t.accessors.map((a) =>
     indent(`fn ${rid(a.field)}(&self) -> &${emitType(a.ty)};`),
   );
-  const body = [...accessors, ...methods].join("\n");
+  // Interface-inheritance getters return by value (series 059).
+  const byValue = (t.byValueAccessors ?? []).map((a) =>
+    indent(`fn ${rid(a.field)}(&self) -> ${emitType(a.ty)};`),
+  );
+  const body = [...byValue, ...accessors, ...methods].join("\n");
   return `trait ${rid(t.name)} {\n${body}\n}`;
 }
 
@@ -312,7 +316,9 @@ function emitFnSig(fn: HirFn): string {
   const asyncKw = fn.isAsync ? "async " : "";
   const self =
     fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
-  const rest = fn.params.map((p) => `${rid(p.name)}: ${emitType(p.ty)}`);
+  const rest = fn.params.map(
+    (p) => `${p.pat ?? rid(p.name)}: ${emitType(p.ty)}`,
+  );
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
   return `${asyncKw}fn ${rid(fn.name)}(${params})${ret}`;
@@ -435,11 +441,25 @@ function emitStruct(
   usesJson = false,
 ): string {
   const derive = structDeriveClause(s, structs, usesJson);
-  if (s.fields.length === 0) return `${derive}struct ${rid(s.name)} {}`;
-  const fields = s.fields
-    .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
-    .join("\n");
-  return `${derive}struct ${rid(s.name)} {\n${fields}\n}`;
+  const decl =
+    s.fields.length === 0
+      ? `${derive}struct ${rid(s.name)} {}`
+      : `${derive}struct ${rid(s.name)} {\n${s.fields
+          .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
+          .join("\n")}\n}`;
+  // Interface inheritance (series 059): a getter-trait impl per extended base. Each
+  // getter clones its (flattened) field, so a base-typed `&impl IA` reads by value.
+  const impls = (s.implTraits ?? []).map((it) => {
+    const getters = it.getters
+      .map((g) =>
+        indent(
+          `fn ${rid(g.field)}(&self) -> ${emitType(g.ty)} { self.${rid(g.field)}.clone() }`,
+        ),
+      )
+      .join("\n");
+    return `impl ${rid(it.trait)} for ${rid(s.name)} {\n${getters}\n}`;
+  });
+  return [decl, ...impls].join("\n\n");
 }
 
 function emitFn(fn: HirFn): string {
@@ -447,7 +467,9 @@ function emitFn(fn: HirFn): string {
   // A method's `self` receiver leads the parameter list; free/associated fns omit it.
   const self =
     fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
-  const rest = fn.params.map((p) => `${rid(p.name)}: ${emitType(p.ty)}`);
+  const rest = fn.params.map(
+    (p) => `${p.pat ?? rid(p.name)}: ${emitType(p.ty)}`,
+  );
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
   return `${asyncKw}fn ${rid(fn.name)}(${params})${ret} ${block(fn.body)}`;
@@ -460,6 +482,26 @@ function block(stmts: HirStmt[]): string {
 }
 
 // ── Statements ───────────────────────────────────────────────────────────────
+
+/** The inline note attached to a line carrying a bitwise op (series 056). */
+const BITWISE_NOTE = " // bitwise: wide-int (i128), not JS int32";
+
+/**
+ * Does this expression tree carry a bitwise-origin node (series 056)? A `binary`/
+ * `unary` with the `bitwise` marker, or a `ushr` (`>>>`). Used to attach the inline
+ * divergence note; scans only the expression, not nested statement bodies.
+ */
+function exprHasBitwise(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(exprHasBitwise);
+  if (node !== null && typeof node === "object") {
+    const n = node as { kind?: string; bitwise?: boolean };
+    if (n.kind === "ushr") return true;
+    if ((n.kind === "binary" || n.kind === "unary") && n.bitwise === true)
+      return true;
+    return Object.values(node).some(exprHasBitwise);
+  }
+  return false;
+}
 
 function emitStmt(stmt: HirStmt): string {
   switch (stmt.kind) {
@@ -484,12 +526,14 @@ function emitStmt(stmt: HirStmt): string {
             : `std::sync::Arc::new(${inner})`;
         return `let ${mut}${rid(stmt.name)} = ${wrapped};`;
       }
-      return `let ${mut}${rid(stmt.name)}${ty} = ${emitExpr(stmt.init)};`;
+      return `let ${mut}${rid(stmt.name)}${ty} = ${emitExpr(stmt.init)};${exprHasBitwise(stmt.init) ? BITWISE_NOTE : ""}`;
     }
     case "return":
-      return stmt.value ? `return ${emitExpr(stmt.value)};` : "return;";
+      return stmt.value
+        ? `return ${emitExpr(stmt.value)};${exprHasBitwise(stmt.value) ? BITWISE_NOTE : ""}`
+        : "return;";
     case "expr":
-      return `${emitExpr(stmt.expr)};`;
+      return `${emitExpr(stmt.expr)};${exprHasBitwise(stmt.expr) ? BITWISE_NOTE : ""}`;
     case "if": {
       const head = `if ${emitExpr(stmt.cond)} ${block(stmt.conseq)}`;
       if (stmt.alt === null) return head;
@@ -625,6 +669,13 @@ const BINARY_PREC: Record<string, number> = {
   "%": 7,
   "+": 6,
   "-": 6,
+  // Bitwise (series 056), placed per Rust's binding order — shifts tighter than
+  // `&`, then `^`, then `|`; all below `+`/`-` and above comparisons.
+  "<<": 5,
+  ">>": 5,
+  "&": 4.3,
+  "^": 4.2,
+  "|": 4.1,
   "<": 3,
   ">": 3,
   "<=": 3,
@@ -666,7 +717,8 @@ function emitExpr(expr: HirExpr): string {
       // index/counter, or `i64` counter/discriminant) renders as a bare integer.
       // Otherwise `number` maps to `f64`: integer literals need an explicit `.0`
       // so the type is unambiguous.
-      if (expr.ty === "usize" || expr.ty === "i64") return `${expr.value}`;
+      if (expr.ty === "usize" || expr.ty === "i64" || expr.ty === "i128")
+        return `${expr.value}`;
       return Number.isInteger(expr.value) ? `${expr.value}.0` : `${expr.value}`;
     case "string":
       return `${JSON.stringify(expr.value)}.to_string()`;
@@ -679,7 +731,29 @@ function emitExpr(expr: HirExpr): string {
     case "binary": {
       const prec = BINARY_PREC[expr.op] ?? 0;
       const op = BINARY_OPS[expr.op] ?? expr.op;
-      return `${emitOperand(expr.left, prec, "l")} ${op} ${emitOperand(expr.right, prec, "r")}`;
+      const left = emitOperand(expr.left, prec, "l");
+      // Shift-count masking (series 056): JS masks the count (`& 31`); Rust panics
+      // (debug) when a count ≥ bit width. Mask to the `i128` width so ordinary code
+      // never panics and `1 << 130` is well-defined (matching JS's `1 << 2`).
+      if (expr.bitwise && (expr.op === "<<" || expr.op === ">>")) {
+        return `${left} ${op} (${emitExpr(expr.right)} & 127)`;
+      }
+      return `${left} ${op} ${emitOperand(expr.right, prec, "r")}`;
+    }
+    case "ushr":
+      // JS `>>>` — logical (zero-fill) shift via an unsigned round-trip, count
+      // masked to the `i128` width (series 056).
+      return `((${emitExpr(expr.value)} as u128) >> (${emitExpr(expr.shift)} & 127)) as i128`;
+    case "cast": {
+      // Rust's `as` binds tighter than any binary operator, so a non-atomic
+      // operand must be parenthesized (`((a & b) as f64)`, not `a & b as f64`).
+      const inner = emitExpr(expr.expr);
+      const wrap =
+        expr.expr.kind === "binary" ||
+        expr.expr.kind === "unary" ||
+        expr.expr.kind === "ushr" ||
+        expr.expr.kind === "assign";
+      return `(${wrap ? `(${inner})` : inner} as ${emitType(expr.ty)})`;
     }
     case "unary": {
       // A prefix unary binds tighter than any binary, so a binary/unary operand
@@ -867,6 +941,8 @@ function emitType(ty: RustType): string {
       return "usize";
     case "i64":
       return "i64";
+    case "i128":
+      return "i128";
     case "String":
       return "String";
     case "str":
