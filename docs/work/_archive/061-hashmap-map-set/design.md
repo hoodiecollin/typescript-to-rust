@@ -1,9 +1,26 @@
 # 061 — HashMap operations & `Map` / `Set` classes
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #21. Builds on 010 (`Record` literals/lookup), 031 (index-assign→`.insert`),
-> 041 (`IndexMap` backing + `Object.keys`/`values`), 042 (`Option`). Dialect-shape
-> decisions made with Collin 2026-07-09.
+> **Status: SHIPPED (2026-07-09).** Graduates the fail-loud deferral in issue #21.
+> Builds on 010 (`Record` literals/lookup), 031 (index-assign→`.insert`), 041
+> (`IndexMap` backing + `Object.keys`/`values`), 042 (`Option`). Dialect-shape
+> decisions made with Collin 2026-07-09. Specs: `specs.md` →
+> `packages/compiler/tests/map-set.test.ts`.
+>
+> **Impl deviations from the design:**
+> - **Number keys use `OrderedFloat<f64>` uniformly** (both integer and fractional).
+>   The design's "integer key → `i64`/`usize` when provably integral (cheaper, no
+>   wrapper)" is a correctness-neutral *optimization* that is **not** shipped —
+>   `OrderedFloat` is already faithful to JS SameValueZero, so this is a future
+>   size/perf refinement, not a semantics gap.
+> - **`this.field` maps/sets are not routed** — only identifier bindings resolve to
+>   a map/set type today (routing keys off `bindingTypes`). A field-held map is a
+>   later slice.
+> - **`new Map(iterable)` / `new Set(iterable)`** (constructor with an initializer
+>   argument) stays fail-loud — only empty construction is modeled.
+> - Incidental graduation: `NaN`/`Infinity` globals → `f64::NAN`/`f64::INFINITY`
+>   (needed for faithful `NaN` keys).
+> - Struct `Map` keys / `Set` elements derive gated `Hash, PartialEq, Eq`; a struct
+>   with an `f64` field is fail-loud at collection time (its own issue), as designed.
 
 ## Settled by precedent (not a fork)
 

@@ -1,9 +1,21 @@
 # 062 — Escaping mutable-aliasing → auto-`Rc<RefCell<T>>` (panic-case fail-loud)
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #5. Reuses the `refineRc` machinery from **028b** (`"use rc"` first slice)
-> and the CFG + backward-liveness from `ownership.ts` (037/038). Dialect/memory-model
-> decision made with Collin 2026-07-09.
+> **Status: SHIPPED (2026-07-09).** Graduates the fail-loud deferral in issue #5.
+> Reuses the `refineRc` machinery from **028b** (`"use rc"` first slice). Specs:
+> `specs.md` → `packages/compiler/tests/alias-escape-rc.test.ts`.
+>
+> **Impl notes / deviations (this increment ships the core):**
+> - **Intraprocedural** alias-escape analysis (`alias-escape.ts`): per scope, a
+>   union-find over bare-ident alias edges among class bindings; a closure that is
+>   aliased **and** mutated (field write or `&mut self` method) is promoted. The
+>   promoted set feeds `refineRc`, decoupled from the directive.
+> - **028b tail graduated:** method calls on a promoted binding →
+>   `.borrow()`/`.borrow_mut()` per receiver mutability.
+> - **Deferred to a follow-on** (each cargo-loud / oracle-caught, never a silent
+>   miscompile): **interprocedural** promotion across a call boundary,
+>   **field-store** aliasing, and the pre-emptive **borrow-across-re-entrant-mutation**
+>   `DialectError` (the differential oracle catches the `RefCell`-panic pattern this
+>   increment). `Rc` cycles / `Weak` stay unmodeled as designed.
 
 ## The problem
 

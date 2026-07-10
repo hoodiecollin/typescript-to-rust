@@ -1,9 +1,23 @@
 # 065 — Generators: `yield*` delegation & non-`for-of` consumption
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #20. Rides the **052** generator state machine (`fn -> impl Iterator<Item=T>`)
-> and its pre-designed `yield*` hook; composes with 035's `for-of` consumption.
-> Dialect decisions made with Collin 2026-07-09.
+> **Status: SHIPPED (2026-07-09).** Graduates the fail-loud deferral in issue #20.
+> Rides the **052** generator state machine (`fn -> impl Iterator<Item=T>`) and its
+> pre-designed `yield*` hook; composes with 035's `for-of` consumption. Specs:
+> `specs.md` → `packages/compiler/tests/generator-yield-star.test.ts`.
+>
+> **Impl notes / deviations:**
+> - `yield*` delegate fields are typed `Option<Box<dyn Iterator<Item = T>>>` (a
+>   boxed trait object) — uniform across generator / array / set delegates on
+>   **stable** Rust. `Item`-mismatch is therefore **cargo-loud** (the field type
+>   enforces it), not a pre-emptive `DialectError`.
+> - Collecting consumers (`[...g()]`, `Array.from(g())`) are gated to a **direct
+>   generator call**; a generator in a variable, an iterator chain, or a plain array
+>   spread stays fail-loud (narrower than the design's "any iterable" — a later
+>   widening).
+> - **Array-destructuring** of a generator (`const [a, b] = g()`) is **deferred**
+>   (not implemented this series).
+> - Manual `.next()`: a direct `g().next()` is a clean `UnsupportedError`; the
+>   variable-bound case is cargo-loud.
 
 ## The problem
 

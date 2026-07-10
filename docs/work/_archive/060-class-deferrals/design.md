@@ -1,9 +1,21 @@
 # 060 — Class deferrals (method-param borrows, statics, accessors, accessibility)
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #23. Dialect-shape decisions made with Collin 2026-07-09. Shares the
-> getter-trait machinery with 059 (interface extends) and reuses the free-fn
-> ownership inference (`analysis.ts` / `lower.ts:2397`).
+> **Status: SHIPPED (2026-07-09).** Graduates the fail-loud deferral in issue #23.
+> Dialect-shape decisions made with Collin 2026-07-09. Reuses the free-fn ownership
+> inference over method bodies (`analysis.methodParams`). Specs: `specs.md` →
+> `packages/compiler/tests/class-deferrals.test.ts`.
+>
+> **Impl notes / deviations:**
+> - Method-param borrows reuse the free-fn analysis (`classifyParam`), so a param
+>   mutated **only via a field write** (`p.x = …`) infers `&T` — cargo-loud, never
+>   silent, matching the identical free-fn limitation. Mutating-method use
+>   (`xs.push(...)`) correctly infers `&mut`.
+> - Call-site borrow adaptation reuses the 061 `ref` HIR node (`&arg`/`&mut arg`).
+> - Accessibility: `public`/`private` accepted but *not* emitted as `pub` — the
+>   generated single-file binary has no cross-module visibility, so it is a semantic
+>   no-op; `protected` is fail-loud.
+> - Implicit / non-field-init constructors remain fail-loud (issue-context item, not
+>   one of this series' three forks).
 
 ## Scope
 

@@ -1,9 +1,24 @@
 # 063 — Value-yielding `try`/`catch` + control-flow escape (labeled-block lowering)
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #16. Rebuilds on 013 (throw→`Err`, fallible `Result<T,String>`, `?`) and
-> **021** (statement-level recovery via an IIFE closure). Dialect decision made with
-> Collin 2026-07-09.
+> **Status: SHIPPED (2026-07-09).** Graduates the fail-loud deferral in issue #16.
+> Rebuilds on 013 (throw→`Err`, fallible `Result<T,String>`, `?`) and **021**
+> (statement-level recovery via an IIFE closure). Specs: `specs.md` →
+> `packages/compiler/tests/value-yielding-try.test.ts`.
+>
+> **Impl notes / deviations:**
+> - The **021 IIFE closure is kept** for the pure statement-level *no-escape*
+>   `try`/`catch`; the labeled block is used only for the escaping / value-yielding
+>   shape and `try`/`finally`-no-catch (Collin's "open sub-detail" — not migrated).
+> - When the `try` body always diverges (value-yield returns on success), the outer
+>   `Ok(_)` match arm is `unreachable!()` so the `match` unifies to `!` and the
+>   value-yielding fn's tail type-checks.
+> - Returns inside the labeled block are `Ok`-wrapped **only when the enclosing
+>   scope is fallible** — a `catch` that fully handles the error can leave the fn
+>   non-fallible (plain return type).
+> - A discriminating `instanceof`-ladder catch now lowers to a native `match` in the
+>   escaping path too (the #16-boundary ERR20 graduated).
+> - `finally` + an escaping jump stays fail-loud (the committed carrier-enum
+>   follow-on), as designed.
 
 ## The problem
 
