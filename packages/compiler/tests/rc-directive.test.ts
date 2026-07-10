@@ -89,20 +89,24 @@ console.log(build());`,
     );
   });
 
-  test("no `use rc` → the same alias is a move (Option A), so it fails the oracle", async () => {
-    // Without the directive, `const b = a` moves `a`; the later `a.count` use is
-    // E0382. The oracle (cargo) rejects it — loud, never a silent miscompile.
-    const rust = compile(`class Counter {
+  test("no `use rc` → the alias is auto-promoted to Rc<RefCell> (series 062)", async () => {
+    // Series 062 graduates this: the alias-escape analysis sees `const b = a`
+    // aliased with a mutation (`a.count = 5`) and auto-promotes both to
+    // `Rc<RefCell<Counter>>` — no directive, and the alias observes the mutation.
+    const src = `class Counter {
   count: number;
   constructor(start: number) { this.count = start; }
 }
 const a: Counter = new Counter(1);
 const b: Counter = a;
 a.count = 5;
-console.log(b.count);`);
-    expect(rust).not.toContain("Rc::clone");
+console.log(b.count);`;
+    const rust = compile(src);
+    expect(rust).toContain("Rc::clone(&a)");
     const rr = await runRust(rust);
-    expect(rr.ok).toBe(false);
+    expect(rr.ok).toBe(true);
+    expect(rr.stdout.trim()).toBe(runTs(src));
+    expect(rr.stdout.trim()).toBe("5");
   });
 
   test("`use rc` outside a free fn / script (a method body) fails loud", () => {

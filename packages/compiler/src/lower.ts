@@ -86,6 +86,7 @@ import { refineNumerics } from "./numeric";
 import { refineOwnership } from "./ownership";
 import { refineTaskEscape } from "./task-escape";
 import { refineRc } from "./rc";
+import { computeAutoRc } from "./alias-escape";
 import { refineStrings } from "./strings";
 import { validate } from "./validate";
 
@@ -302,7 +303,19 @@ export function lower(program: Program): HirModule {
               refineBitwise({ items, main, mainRet, mainAsync }),
             ),
           ),
-          { rcScopes: analysis.rcScopes, classes: analysis.classes },
+          {
+            rcScopes: analysis.rcScopes,
+            // Series 062: escaping shared-mutable aliasing auto-promotes to
+            // `Rc<RefCell<T>>` (surgical, per-binding) — computed on the lowered
+            // HIR, decoupled from the `"use rc"` directive.
+            autoRc: computeAutoRc(
+              { items, main, mainRet, mainAsync },
+              analysis.classes,
+              analysis.mutatingMethods,
+            ),
+            classes: analysis.classes,
+            mutatingMethods: analysis.mutatingMethods,
+          },
         ),
         analysis.arenaScopes,
       ),

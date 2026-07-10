@@ -25,17 +25,35 @@ import { UnsupportedError } from "./errors";
 import type { HirExpr, HirModule, HirStmt } from "./hir";
 
 export interface RcOpts {
+  /** Scopes opted in by a leading `"use rc"` directive (028b) — promote *all* class bindings. */
   rcScopes: ReadonlySet<string>;
+  /**
+   * Auto-`Rc` promoted binding names per scope (series 062) — the surgical,
+   * analysis-selected set (escaping shared-mutable aliasing), keyed by scope name.
+   */
+  autoRc: ReadonlyMap<string, ReadonlySet<string>>;
   classes: ReadonlySet<string>;
+  /** `&mut self` method names — a method call on a promoted binding routes through
+   * `.borrow_mut()` (else `.borrow()`), series 062. */
+  mutatingMethods: ReadonlySet<string>;
 }
 
 export function refineRc(module: HirModule, opts: RcOpts): HirModule {
-  if (opts.rcScopes.size === 0) return module;
-  if (opts.rcScopes.has(SCRIPT_SCOPE)) rcBody(module.main, opts.classes);
+  const scopes = new Set<string>([...opts.rcScopes, ...opts.autoRc.keys()]);
+  if (scopes.size === 0) return module;
+  const run = (body: HirStmt[], scope: string): void => {
+    if (!scopes.has(scope)) return;
+    rcBody(
+      body,
+      opts.classes,
+      opts.mutatingMethods,
+      opts.rcScopes.has(scope),
+      opts.autoRc.get(scope) ?? new Set(),
+    );
+  };
+  run(module.main, SCRIPT_SCOPE);
   for (const item of module.items) {
-    if (item.kind === "fn" && opts.rcScopes.has(item.name)) {
-      rcBody(item.body, opts.classes);
-    }
+    if (item.kind === "fn") run(item.body, item.name);
   }
   return module;
 }
@@ -46,7 +64,13 @@ export function refineRc(module: HirModule, opts: RcOpts): HirModule {
  * are routed through `.borrow()` / `.borrow_mut()`, and a bare-ident alias of one
  * becomes an `Rc::clone`.
  */
-function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
+function rcBody(
+  body: HirStmt[],
+  classes: ReadonlySet<string>,
+  mutatingMethods: ReadonlySet<string>,
+  directive: boolean,
+  promoted: ReadonlySet<string>,
+): void {
   const rc = new Set<string>();
 
   /** Route a possibly-`rc` object through `.borrow()` (read) / `.borrow_mut()` (write). */
@@ -120,14 +144,25 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
         };
       case "println":
         return { ...e, args: e.args.map((a) => rewrite(a)) };
-      case "method":
-        // The receiver of a *method* call is left bare: an `rc` method call is a
-        // deferred case (cargo-loud), not silently borrow-wrapped.
-        return {
-          ...e,
-          receiver: rewrite(e.receiver),
-          args: e.args.map((a) => rewrite(a)),
-        };
+      case "method": {
+        const recv = rewrite(e.receiver);
+        const args = e.args.map((a) => rewrite(a));
+        // A method call on a promoted binding (series 062, graduating the 028b
+        // deferral) routes through `.borrow()` / `.borrow_mut()` per the method's
+        // receiver mutability — `Rc<RefCell<C>>` has no `C` methods directly.
+        if (recv.kind === "ident" && rc.has(recv.name)) {
+          const borrowName = mutatingMethods.has(e.name)
+            ? "borrow_mut"
+            : "borrow";
+          return {
+            kind: "method",
+            receiver: { kind: "method", receiver: recv, name: borrowName, args: [] },
+            name: e.name,
+            args,
+          };
+        }
+        return { ...e, receiver: recv, args };
+      }
       case "len":
         return { ...e, object: rewrite(e.object) };
       case "array":
@@ -180,7 +215,10 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
         const classTy =
           s.ty?.kind === "struct" && classes.has(s.ty.name) ? s.ty : null;
         const alias = s.init.kind === "ident" && rc.has(s.init.name);
-        if (classTy || alias) {
+        // Promote when a `"use rc"` directive covers *any* class binding (028b),
+        // or when the alias-escape analysis selected this binding (series 062).
+        const promote = (directive && classTy) || promoted.has(s.name);
+        if (promote) {
           s.init = alias
             ? { kind: "rcClone", expr: s.init }
             : { kind: "rcNew", inner: s.init };
