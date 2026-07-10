@@ -20,6 +20,7 @@ import {
   structDeriveClause,
 } from "./derives";
 import type {
+  ElemMode,
   HirArg,
   HirCatchArm,
   HirClass,
@@ -552,25 +553,41 @@ function emitStmt(stmt: HirStmt): string {
         : `${head} else ${block(stmt.noneBody)}`;
     }
     case "while":
-      return `while ${emitExpr(stmt.cond)} ${block(stmt.body)}`;
+      return `${loopLabel(stmt.label)}while ${emitExpr(stmt.cond)} ${block(stmt.body)}`;
     case "block":
       // A bare scope-containing block; no trailing `;` as a statement.
       return block(stmt.body);
-    case "forIn":
-      return `for ${rid(stmt.pat)} in ${emitExpr(stmt.iter)} ${block(stmt.body)}`;
+    case "forIn": {
+      // The default (ref / unset) `iter` already bakes in `.iter()` — emit it
+      // verbatim. The 064 element-ownership modes carry a *bare* collection: `&mut
+      // xs` (refMut), `xs` (owned — dead after the loop), `xs.iter().cloned()`
+      // (cloned — owned elements, `xs` still live).
+      let iter = emitExpr(stmt.iter);
+      if (stmt.mode === "refMut") iter = `&mut ${iter}`;
+      else if (stmt.mode === "cloned") iter = `${iter}.iter().cloned()`;
+      return `${loopLabel(stmt.label)}for ${rid(stmt.pat)} in ${iter} ${block(stmt.body)}`;
+    }
     case "forRange": {
       const dots = stmt.inclusive ? "..=" : "..";
-      const range = `${emitExpr(stmt.start)}${dots}${emitExpr(stmt.end)}`;
-      return `for ${rid(stmt.counter)} in ${range} ${block(stmt.body)}`;
+      let range = `${emitExpr(stmt.start)}${dots}${emitExpr(stmt.end)}`;
+      // A non-ascending / non-unit-step range (series 064). `.rev()` needs the
+      // parenthesized range; `.step_by(k)` takes the positive stride.
+      if (stmt.descending) range = `(${range}).rev()`;
+      if (stmt.step && stmt.step !== 1) {
+        range = stmt.descending
+          ? `${range}.step_by(${stmt.step})`
+          : `(${range}).step_by(${stmt.step})`;
+      }
+      return `${loopLabel(stmt.label)}for ${rid(stmt.counter)} in ${range} ${block(stmt.body)}`;
     }
     case "match": {
       const arms = stmt.arms.map((arm) => indent(emitArm(arm))).join("\n");
       return `match ${emitExpr(stmt.disc)} {\n${arms}\n}`;
     }
     case "break":
-      return "break;";
+      return stmt.label ? `break '${stmt.label};` : "break;";
     case "continue":
-      return "continue;";
+      return stmt.label ? `continue '${stmt.label};` : "continue;";
     case "yieldReturn":
       // A generator suspend point (052): record the resume arm, then hand the
       // yielded value back to the caller.
@@ -621,12 +638,31 @@ function emitStmt(stmt: HirStmt): string {
  * otherwise a guarded wildcard `_ if <guard> => …`, or the bare wildcard `_`.
  */
 function emitArm(arm: HirMatchArm): string {
-  const head = arm.pat
-    ? emitExpr(arm.pat)
-    : arm.guard
-      ? `_ if ${emitExpr(arm.guard)}`
-      : "_";
+  const head = arm.rangePat
+    ? `${emitPat(arm.rangePat.lo)}..=${emitPat(arm.rangePat.hi)}`
+    : arm.pats
+      ? arm.pats.map(emitPat).join(" | ")
+      : arm.pat
+        ? emitPat(arm.pat)
+        : arm.guard
+          ? `_ if ${emitExpr(arm.guard)}`
+          : "_";
   return `${head} => ${block(arm.body)}`;
+}
+
+/**
+ * A `match`-arm literal pattern. A string is a raw `&str` literal (`"a"`), not the
+ * owned `"a".to_string()` an expression emits (series 064's `s.as_str()` match);
+ * numbers/others render as their expression form (an integer literal pattern).
+ */
+function emitPat(pat: HirExpr): string {
+  if (pat.kind === "string") return JSON.stringify(pat.value);
+  return emitExpr(pat);
+}
+
+/** A loop's lifetime-label prefix (`'outer: `) — series 064; empty when unlabeled. */
+function loopLabel(label: string | undefined): string {
+  return label ? `'${label}: ` : "";
 }
 
 /**
@@ -856,10 +892,25 @@ function emitExpr(expr: HirExpr): string {
       const body = expr.stmts.map((s) => indent(emitStmt(s))).join("\n");
       return `async move {\n${body}\n    }`;
     }
-    case "iterMap":
-      return `${emitExpr(expr.receiver)}.iter().map(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
-    case "iterFilter":
-      return `${emitExpr(expr.receiver)}.iter().filter(|${rid(expr.elemParam)}| ${expr.cbName}(**${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).copied().collect::<Vec<_>>()`;
+    case "iterMap": {
+      const recv = emitExpr(expr.receiver);
+      const p = rid(expr.elemParam);
+      const elem = elemSingle(expr.elemMode, expr.elemParam);
+      if (expr.indexParam) {
+        // `(el, i)` → `.iter().enumerate().map(|(i, p)| cb(<elem>, i as f64, free…))`.
+        // The `enumerate` index is `usize`; it forwards as `f64` (series 057).
+        const i = rid(expr.indexParam);
+        return `${recv}.iter().enumerate().map(|(${i}, ${p})| ${expr.cbName}(${elem}, ${i} as f64${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+      }
+      return `${recv}.iter().map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+    }
+    case "iterFilter": {
+      // A filter predicate receives `&&T`; a Copy element derefs `**p` and the
+      // terminal is `.copied()`, a non-Copy element derefs one level and clones.
+      const elem = elemDouble(expr.elemMode, expr.elemParam);
+      const term = expr.elemMode === "copy" ? "copied" : "cloned";
+      return `${emitExpr(expr.receiver)}.iter().filter(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).${term}().collect::<Vec<_>>()`;
+    }
     case "objectKeys":
       return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
     case "objectValues":
@@ -877,12 +928,15 @@ function emitExpr(expr: HirExpr): string {
       );
       return `{ let mut __o = ${seed}; ${steps.join(" ")} __o }`;
     }
-    case "iterFind":
-      return `${emitExpr(expr.receiver)}.iter().find(|${rid(expr.elemParam)}| ${expr.cbName}(**${rid(expr.elemParam)}${emitForwarded(expr.forwarded)})).copied()`;
+    case "iterFind": {
+      const elem = elemDouble(expr.elemMode, expr.elemParam);
+      const term = expr.elemMode === "copy" ? "copied" : "cloned";
+      return `${emitExpr(expr.receiver)}.iter().find(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).${term}()`;
+    }
     case "iterAny":
-      return `${emitExpr(expr.receiver)}.iter().any(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
+      return `${emitExpr(expr.receiver)}.iter().any(|${rid(expr.elemParam)}| ${expr.cbName}(${elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterAll":
-      return `${emitExpr(expr.receiver)}.iter().all(|${rid(expr.elemParam)}| ${expr.cbName}(*${rid(expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
+      return `${emitExpr(expr.receiver)}.iter().all(|${rid(expr.elemParam)}| ${expr.cbName}(${elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterReduce":
       return `${emitExpr(expr.receiver)}.iter().fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, *${rid(expr.elem)}${emitForwarded(expr.forwarded)}))`;
     case "iterSortDefault":
@@ -907,6 +961,30 @@ function emitExpr(expr: HirExpr): string {
  */
 function emitForwarded(forwarded: HirExpr[]): string {
   return forwarded.map((e) => `, ${emitExpr(e)}`).join("");
+}
+
+/**
+ * The element argument for a `map`/`some`/`every` shim (series 057), whose closure
+ * param `p` is `&T`: a Copy element derefs (`*p`, series 048), a read-only non-Copy
+ * forwards the borrow (`p`), a consumed non-Copy clones (`p.clone()`).
+ */
+function elemSingle(mode: ElemMode, name: string): string {
+  const p = rid(name);
+  return mode === "copy" ? `*${p}` : mode === "clone" ? `${p}.clone()` : p;
+}
+
+/**
+ * The element argument for a `filter`/`find` shim (series 057), whose closure param
+ * `p` is `&&T`: Copy derefs both levels (`**p`), a read-only non-Copy derefs one
+ * (`*p` → `&T`), a consumed non-Copy clones through the deref (`(*p).clone()`).
+ */
+function elemDouble(mode: ElemMode, name: string): string {
+  const p = rid(name);
+  return mode === "copy"
+    ? `**${p}`
+    : mode === "clone"
+      ? `(*${p}).clone()`
+      : `*${p}`;
 }
 
 function emitArg(arg: HirArg): string {
