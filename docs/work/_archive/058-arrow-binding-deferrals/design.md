@@ -1,9 +1,14 @@
 # 058 — Arrow binding deferrals (`let`/`var`, multi-declarator, destructuring)
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #12. Builds on `015-arrow-functions` (`normalizeArrows`) and
-> `048-lambda-lifting-closures` (Mechanism 3, fn-pointers). Dialect-shape decisions
-> made with Collin 2026-07-09.
+> **Status: SHIPPED.** Graduates the fail-loud deferral in issue #12. Builds on
+> `015-arrow-functions` (`normalizeArrows`) and `048-lambda-lifting-closures`
+> (Mechanism 3, fn-pointers). Dialect-shape decisions made with Collin 2026-07-09.
+>
+> **Impl deviation from the design below:** the lifted `fn` is hoisted to **module
+> scope** (`fn __arrow_n`), not placed in the nearest enclosing block. A nested `fn`
+> cannot capture, so placement is observationally irrelevant, and module-scope
+> hoisting reuses 048's existing refine pipeline (numeric/ownership/string) for the
+> lifted fn's body. The binding still holds a `fn`-pointer, exactly as designed.
 
 ## The problem
 

@@ -1,7 +1,16 @@
 # 059 — Struct / interface deferrals (extends, readonly, arg-literals, mutation)
 
-> **Status: DESIGN (decided, awaiting impl).** Graduates the fail-loud deferral in
-> issue #22. Dialect-shape decisions made with Collin 2026-07-09.
+> **Status: SHIPPED.** Graduates the fail-loud deferral in issue #22. Dialect-shape
+> decisions made with Collin 2026-07-09.
+>
+> **Impl note (getter shape).** The interface getter trait returns fields **by
+> value via `.clone()`** (`fn x(&self) -> Tx { self.x.clone() }`), not `&Tx` like
+> the 053 class accessors. A base-typed `&impl IA` param then reads `a.x` as a plain
+> value with no deref dance (`return a.x()` type-checks directly against a value
+> return). Every field type in the dialect is `Clone`, so this is uniform.
+> Interface `extends` uses a dedicated, self-contained synthesis
+> (`synthesizeInterfaceTraits`) rather than the class `synthesizeTraits` (which
+> builds its trait from *methods*, absent on a data-only interface).
 
 ## Already shipped (not this series)
 
