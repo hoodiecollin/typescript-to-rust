@@ -406,8 +406,15 @@ function emitClass(
   // `impl` — else a duplicate definition. The inherent impl keeps `new` + any
   // non-trait method.
   const inherent = c.methods.filter((m) => !c.overrides?.has(m.name));
-  const fns = [c.ctor, ...inherent].filter((f): f is HirFn => f !== null);
-  const body = fns.map((f) => indent(emitFn(f))).join("\n");
+  // `static` fields → associated `const`s; `static` methods → associated `fn`s
+  // with no `self` receiver (series 060). Consts lead the impl body.
+  const consts = (c.staticConsts ?? []).map((k) =>
+    indent(`const ${rid(k.name)}: ${emitType(k.ty)} = ${emitExpr(k.value)};`),
+  );
+  const fns = [c.ctor, ...(c.statics ?? []), ...inherent].filter(
+    (f): f is HirFn => f !== null,
+  );
+  const body = [...consts, ...fns.map((f) => indent(emitFn(f)))].join("\n");
   const parts = [`${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`];
   // The `impl IA for Name` block carries the trait methods this class *provides*
   // (its overrides + forwarders for non-overridden methods) plus any on-demand

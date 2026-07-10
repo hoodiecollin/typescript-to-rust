@@ -2138,12 +2138,24 @@ function lowerClass(
     ? { field: "base" as const, ty: { kind: "struct" as const, name: baseName } }
     : undefined;
 
-  const fields = decl.body.body
-    .filter((m): m is PropertyDefinition => m.type === "PropertyDefinition")
-    .map((f) => {
-      if (f.static || f.computed) {
-        throw new UnsupportedError({ type: "static/computed class field" });
+  // `static` fields → associated `const`s (series 060), collected separately.
+  const staticConsts: { name: string; ty: RustType; value: HirExpr }[] = [];
+  const propDefs = decl.body.body.filter(
+    (m): m is PropertyDefinition => m.type === "PropertyDefinition",
+  );
+  const fields = propDefs
+    .filter((f) => {
+      rejectProtected(f as { accessibility?: string }, `class field '${f.key.name}'`);
+      if (f.computed) {
+        throw new UnsupportedError({ type: "computed class field" });
       }
+      if (f.static) {
+        staticConsts.push(lowerStaticConst(f, structs, analysis));
+        return false;
+      }
+      return true;
+    })
+    .map((f) => {
       if (!f.typeAnnotation) {
         throw new UnsupportedError({
           type: `class field '${f.key.name}' without a type`,
@@ -2186,6 +2198,10 @@ function lowerClass(
   let ctor: HirFn | null = null;
   let dispose: HirStmt[] | null = null;
   const methods: HirFn[] = [];
+  const statics: HirFn[] = [];
+  // Getters/setters (series 060) → methods, with a rewrite at member sites: a
+  // read `obj.g` → `obj.g()`, a write `obj.s = v` → `obj.set_s(v)`.
+  const accessorFns: HirFn[] = [];
   // Class inheritance (series 053a): mark the class under lowering so a
   // `this.<field>` read can be classified own-vs-inherited (`.base` hop).
   const prevClass = analysis.currentClass;
@@ -2204,18 +2220,33 @@ function lowerClass(
       );
       continue;
     }
-    if (member.static || member.computed) {
-      throw new UnsupportedError({ type: "static/computed class method" });
+    if (member.computed) {
+      throw new UnsupportedError({ type: "computed class method" });
+    }
+    rejectProtected(member as { accessibility?: string }, `class method '${member.key.name}'`);
+    // `static` method (series 060) → an associated `fn` with no `self` receiver.
+    if (member.static) {
+      if (member.kind !== "method") {
+        throw new UnsupportedError({ type: `static ${member.kind} accessor` });
+      }
+      statics.push(lowerStaticMethod(member, name, analysis));
+      continue;
     }
     if (member.kind === "constructor") {
       ctor = lowerConstructor(member.value, name, fields, analysis, baseName);
     } else if (member.kind === "method") {
       methods.push(lowerMethod(member, name, analysis));
+    } else if (member.kind === "get" || member.kind === "set") {
+      // A getter/setter → a method (`g(&self)` / `set_s(&mut self, v)`); the
+      // accessor table (`analysis.accessors`) drives the member-site rewrite.
+      accessorFns.push(lowerAccessor(member, name, analysis));
     } else {
-      throw new UnsupportedError({ type: `class ${member.kind} accessor` });
+      throw new UnsupportedError({ type: `class ${member.kind} member` });
     }
   }
   analysis.currentClass = prevClass;
+  // Accessor methods live in the inherent impl alongside ordinary methods.
+  methods.push(...accessorFns);
   if (!ctor) {
     throw new UnsupportedError({
       type: "class without an explicit constructor",
@@ -2233,9 +2264,20 @@ function lowerClass(
   // forwarder synthesized in the emitter for a subclass, or the default itself
   // for the base). Accessors (053c) are attached later in `lower()` once the
   // module's `dynFieldReads` are known.
+  const staticsOpt = statics.length > 0 ? statics : undefined;
+  const staticConstsOpt = staticConsts.length > 0 ? staticConsts : undefined;
   const inChain = !!baseName || analysis.baseClasses.has(name);
   if (!inChain) {
-    return { kind: "class", name, fields, ctor, methods, dispose };
+    return {
+      kind: "class",
+      name,
+      fields,
+      ctor,
+      methods,
+      dispose,
+      statics: staticsOpt,
+      staticConsts: staticConstsOpt,
+    };
   }
   const root = rootBaseOf(name, analysis);
   const implTrait = traitNameOf(root);
@@ -2250,6 +2292,146 @@ function lowerClass(
     base,
     implTrait,
     overrides,
+    statics: staticsOpt,
+    staticConsts: staticConstsOpt,
+  };
+}
+
+/** Reject a `protected` member (series 060) — no Rust equivalent; rejecting is
+ * more honest than silently widening to `pub(crate)`. `public`/`private` are
+ * accepted (the emitted single-file binary has no cross-module visibility). */
+function rejectProtected(
+  member: { accessibility?: string },
+  what: string,
+): void {
+  if (member.accessibility === "protected") {
+    throw new UnsupportedError({
+      type: `${what} is 'protected' (no Rust equivalent; use public/private)`,
+    });
+  }
+}
+
+/**
+ * A `static` field → an associated `const` (series 060). Its type comes from the
+ * annotation, or is inferred from a literal initializer; the value must be a
+ * constant expression (a literal today — a non-const initializer is fail-loud).
+ */
+function lowerStaticConst(
+  f: PropertyDefinition,
+  structs: Set<string>,
+  analysis: ModuleAnalysis,
+): { name: string; ty: RustType; value: HirExpr } {
+  if (!f.value) {
+    throw new UnsupportedError({
+      type: `static field '${f.key.name}' without an initializer`,
+    });
+  }
+  const ty = f.typeAnnotation
+    ? lowerType(f.typeAnnotation.typeAnnotation, structs)
+    : inferInitType(f.value as Expression, structs);
+  if (!ty) {
+    throw new UnsupportedError({
+      type: `static field '${f.key.name}' needs a type annotation`,
+    });
+  }
+  return { name: f.key.name, ty, value: lowerExpr(f.value as Expression, analysis) };
+}
+
+/**
+ * A `static` method → an associated `fn` with **no** `self` receiver (series
+ * 060). Params infer borrows like any method; the body may reference other
+ * statics and construct the class. A call site `Type.m(args)` → `Type::m(args)`.
+ */
+function lowerStaticMethod(
+  member: MethodDefinition,
+  className: string,
+  analysis: ModuleAnalysis,
+): HirFn {
+  const fn = member.value;
+  const name = member.key.name;
+  const structs = analysis.structs;
+  const info = analysis.methodParams.get(name);
+  const params = fn.params.map((p, i) => lowerParam(p, info?.[i], structs));
+  applyBaseParamTraits(params, analysis);
+  if (!fn.returnType) {
+    throw new UnsupportedError({
+      type: `static method '${name}' without a return type annotation`,
+    });
+  }
+  const ret = lowerType(fn.returnType.typeAnnotation, structs);
+  if (!fn.body) throw new UnsupportedError({ type: "static method without a body" });
+  const body = lowerStatements(
+    takeDirectives(fn.body.body),
+    analysis,
+    `${className}.${name}`,
+  );
+  if (analysis.fallibleMethods.has(name)) {
+    return {
+      kind: "fn",
+      name,
+      isAsync: fn.async,
+      params,
+      ret: resultType(ret, programErrType(analysis)),
+      body: makeFallible(body, ret),
+    };
+  }
+  return { kind: "fn", name, isAsync: fn.async, params, ret, body };
+}
+
+/**
+ * A getter/setter → a method (series 060). `get g()` → `fn g(&self) -> T`; a read
+ * `obj.g` rewrites to `obj.g()`. `set s(v)` → `fn set_s(&mut self, v: T)`; a write
+ * `obj.s = v` rewrites to `obj.set_s(v)`. The accessor names are recorded in
+ * `analysis.accessors` (per class) to drive the member-site rewrite.
+ */
+function lowerAccessor(
+  member: MethodDefinition,
+  className: string,
+  analysis: ModuleAnalysis,
+): HirFn {
+  const fn = member.value;
+  const prop = member.key.name;
+  const structs = analysis.structs;
+  const acc = analysis.accessors.get(className) ?? {
+    getters: new Set<string>(),
+    setters: new Set<string>(),
+  };
+  if (member.kind === "get") {
+    acc.getters.add(prop);
+    analysis.accessors.set(className, acc);
+    if (!fn.returnType) {
+      throw new UnsupportedError({
+        type: `getter '${prop}' without a return type annotation`,
+      });
+    }
+    const ret = lowerType(fn.returnType.typeAnnotation, structs);
+    if (!fn.body) throw new UnsupportedError({ type: "getter without a body" });
+    const body = lowerStatements(
+      takeDirectives(fn.body.body),
+      analysis,
+      `${className}.${prop}`,
+    );
+    return { kind: "fn", name: prop, isAsync: false, params: [], ret, body, recv: "ref" };
+  }
+  // setter
+  acc.setters.add(prop);
+  analysis.accessors.set(className, acc);
+  const info = analysis.methodParams.get(prop);
+  const params = fn.params.map((p, i) => lowerParam(p, info?.[i], structs));
+  if (!fn.body) throw new UnsupportedError({ type: "setter without a body" });
+  const body = lowerStatements(
+    takeDirectives(fn.body.body),
+    analysis,
+    `${className}.${prop}`,
+  );
+  return {
+    kind: "fn",
+    name: `set_${prop}`,
+    isAsync: false,
+    params,
+    ret: UNIT,
+    body,
+    recv: "refMut",
   };
 }
 
@@ -2818,7 +3000,10 @@ function lowerMethod(
   // exactly like a free async fn. A bare un-awaited async method call stays
   // fail-loud in `lowerCall` (un-polled future → spawn is 051c).
   const structs = analysis.structs;
-  const params = fn.params.map((p) => lowerParam(p, undefined, structs));
+  // Method-parameter borrow inference (series 060): each param resolves to
+  // `&T`/`&mut T`/owned via the same analysis free fns use (`analysis.methodParams`).
+  const info = analysis.methodParams.get(name);
+  const params = fn.params.map((p, i) => lowerParam(p, info?.[i], structs));
   // Class inheritance (series 053b, INH10): a base-typed method param → `impl IA`.
   applyBaseParamTraits(params, analysis);
   // A missing return type fails loud (series 046c); an explicit `: void` still
@@ -4312,6 +4497,29 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         left: Expression;
         right: Expression;
       };
+      // A write to a setter accessor `obj.s = v` (series 060) → `obj.set_s(v)`,
+      // routed by the receiver's class carrying a setter named `s`.
+      if (
+        a.operator === "=" &&
+        a.left.type === "MemberExpression" &&
+        !(a.left as MemberExpression).computed &&
+        (a.left as MemberExpression).property.type === "Identifier"
+      ) {
+        const ml = a.left as MemberExpression;
+        const setterName = (ml.property as Identifier).name;
+        const setterClass = receiverClass(ml.object, analysis);
+        if (
+          setterClass &&
+          analysis.accessors.get(setterClass)?.setters.has(setterName)
+        ) {
+          return {
+            kind: "method",
+            receiver: lowerExpr(ml.object, analysis),
+            name: `set_${setterName}`,
+            args: [lowerExpr(a.right, analysis)],
+          };
+        }
+      }
       // Assignment to a `readonly` field is rejected (series 059); construction
       // (a struct literal) is unaffected — this fires only on `s.f = …`.
       checkReadonlyAssign(a.left, analysis);
@@ -5108,6 +5316,27 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // A static method call `Type.m(args)` off a class name (series 060) → the
+    // associated-fn call `Type::m(args)`. Static-fallible `new`/method propagation
+    // rides the same `fallibleMethods` path as instance methods below.
+    if (
+      m.object.type === "Identifier" &&
+      analysis.classes.has((m.object as Identifier).name) &&
+      !analysis.enums.has((m.object as Identifier).name)
+    ) {
+      const className = (m.object as Identifier).name;
+      const callExpr: HirExpr = {
+        kind: "call",
+        callee: `${className}::${methodName}`,
+        args: call.arguments.map((a) => ({
+          borrow: "owned",
+          expr: lowerExpr(a as Expression, analysis),
+        })),
+      };
+      return analysis.fallibleMethods.has(methodName)
+        ? { kind: "try", expr: callExpr }
+        : callExpr;
+    }
     // Class inheritance (series 053a): `super.m(args)` in a subclass method →
     // `self.base.m(args)` (dispatch the base's method on the embedded base). The
     // base's method is a trait default carrying its real body, so this composes
@@ -5353,11 +5582,25 @@ function lowerCall(
       ? null
       : tryTslibMethod(methodName, m, call, analysis);
     if (routed) return routed;
+    // Method-parameter borrow inference (series 060): a user method whose param
+    // `i` is `&T`/`&mut T` gets its arg borrow-adapted (`&arg`/`&mut arg`) — the
+    // same call-site adaptation the free-fn path emits, reusing the 061 `ref` node.
+    const methodInfo = isUserMethod ? analysis.methodParams.get(methodName) : undefined;
     const methodExpr: HirExpr = {
       kind: "method",
       receiver: lowerExpr(m.object, analysis),
       name: methodName,
-      args: call.arguments.map((a) => lowerExpr(a, analysis)),
+      args: call.arguments.map((a, i) => {
+        const expr = lowerExpr(a, analysis);
+        const own = methodInfo?.[i];
+        if (own && !own.isCopy && own.ownership === "ref") {
+          return refExpr(expr);
+        }
+        if (own && !own.isCopy && own.ownership === "refMut") {
+          return { kind: "ref", mut: true, expr };
+        }
+        return expr;
+      }),
     };
     // A call to a fallible method propagates its error with `?`; the fallibility
     // fixpoint guarantees the enclosing scope is itself `Result`.
@@ -6310,6 +6553,29 @@ function lowerMember(
       return {
         kind: "path",
         segments: [(member.object as Identifier).name, prop],
+      };
+    }
+    // `Type.CONST` — a static field read off a class name (series 060) → the Rust
+    // associated-const path `Type::CONST`. Accessing a member off the class name
+    // is unambiguously static (instance members need a value receiver).
+    if (
+      member.object.type === "Identifier" &&
+      analysis.classes.has((member.object as Identifier).name)
+    ) {
+      return {
+        kind: "path",
+        segments: [(member.object as Identifier).name, prop],
+      };
+    }
+    // A getter read `obj.g` (series 060) → the method call `obj.g()`, routed by the
+    // receiver's class carrying a getter named `prop`.
+    const getterClass = receiverClass(member.object, analysis);
+    if (getterClass && analysis.accessors.get(getterClass)?.getters.has(prop)) {
+      return {
+        kind: "method",
+        receiver: lowerExpr(member.object, analysis),
+        name: prop,
+        args: [],
       };
     }
     // Interface inheritance (series 059): a field read through a base-interface

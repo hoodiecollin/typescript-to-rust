@@ -753,6 +753,16 @@ export interface HirClass {
    * `impl IA for Name` block. Empty/absent when no field is read polymorphically.
    */
   accessors?: { field: string; ty: RustType; proj: HirExpr }[];
+  /**
+   * `static` methods (series 060) → associated `fn`s with no `self` receiver,
+   * emitted in the inherent `impl`. A call site `Type.m(args)` → `Type::m(args)`.
+   */
+  statics?: HirFn[];
+  /**
+   * `static` fields (series 060) → associated `const`s (`const NAME: Ty = value;`)
+   * in the inherent `impl`. A read site `Type.NAME` → `Type::NAME`.
+   */
+  staticConsts?: { name: string; ty: RustType; value: HirExpr }[];
 }
 
 /**

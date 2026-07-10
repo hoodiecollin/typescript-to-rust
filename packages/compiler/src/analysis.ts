@@ -134,6 +134,20 @@ export interface ModuleAnalysis {
    */
   methodNames: Set<string>;
   /**
+   * Class **method name** → its params' inferred ownership (series 060). Method
+   * params infer `&T`/`&mut T`/owned via the same analysis free fns use, so a
+   * method reading a struct param borrows it (and the call site passes `&p`).
+   * Name-based (like `mutatingMethods`); the cross-class same-name edge is the
+   * documented limit.
+   */
+  methodParams: Map<string, ParamInfo[]>;
+  /**
+   * Per-class getter/setter names (series 060), populated during lowering. A read
+   * `obj.g` of a getter → `obj.g()`; a write `obj.s = v` of a setter →
+   * `obj.set_s(v)`. Drives the member-site rewrite in `lowerMember`/assignment.
+   */
+  accessors: Map<string, { getters: Set<string>; setters: Set<string> }>;
+  /**
    * Names of top-level functions that are *fallible* — they `throw` directly or
    * (transitively) call a fallible function, so their return type wraps in
    * `Result` and calls to them propagate with `?`. Includes the `SCRIPT_SCOPE`
@@ -505,6 +519,7 @@ function mutableBindings(
   body: unknown,
   fns: Map<string, FnInfo>,
   mutatingMethods: Set<string>,
+  methodParams: Map<string, ParamInfo[]> = new Map(),
 ): Set<string> {
   const mut = new Set<string>();
   // Bindings aliased by a bare-identifier initializer (`const b = a`) — for these,
@@ -601,6 +616,25 @@ function mutableBindings(
         args.forEach((arg, i) => {
           const name = identName(arg);
           if (name && sig.params[i]?.ownership === "refMut") mut.add(name);
+        });
+      }
+    }
+
+    // A method arg at a `&mut` position must be a `mut` local too (series 060) —
+    // name-based via `methodParams` (the documented cross-class same-name limit).
+    if (
+      n.type === "CallExpression" &&
+      isNode(n.callee) &&
+      n.callee.type === "MemberExpression" &&
+      isNode((n.callee as AnyNode).property)
+    ) {
+      const method = identName((n.callee as AnyNode).property);
+      const info = method ? methodParams.get(method) : undefined;
+      const args = n.arguments;
+      if (info && Array.isArray(args)) {
+        args.forEach((arg, i) => {
+          const name = identName(arg);
+          if (name && info[i]?.ownership === "refMut") mut.add(name);
         });
       }
     }
@@ -1023,6 +1057,16 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   // this set (the same-name-across-classes edge is the documented method limit).
   const asyncMethods = new Set<string>();
   for (const m of methods) if (m.async) asyncMethods.add(m.name);
+  // Method-parameter ownership (series 060): reuse the free-fn analysis over each
+  // method's body so a param resolves to `ref`/`refMut`/`move`. Name-keyed (a
+  // same-name method across classes: last wins — the documented method limit).
+  const methodParams = new Map<string, ParamInfo[]>();
+  for (const m of methods) {
+    methodParams.set(
+      m.name,
+      analyzeFunction(m.body as FunctionDeclaration, enums, extendedBases).params,
+    );
+  }
   const mutatingMethods = new Set<string>();
   for (const m of methods) if (mutatesThis(m.body)) mutatingMethods.add(m.name);
   for (;;) {
@@ -1041,14 +1085,20 @@ export function analyzeModule(program: Program): ModuleAnalysis {
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
     if (named)
-      mut.set(named.name, mutableBindings(named.fn.body, fns, mutatingMethods));
+      mut.set(
+        named.name,
+        mutableBindings(named.fn.body, fns, mutatingMethods, methodParams),
+      );
   }
-  mut.set(SCRIPT_SCOPE, mutableBindings(script, fns, mutatingMethods));
+  mut.set(
+    SCRIPT_SCOPE,
+    mutableBindings(script, fns, mutatingMethods, methodParams),
+  );
   // Each class method is its own mutability scope (`ClassName.method`).
   for (const m of methods) {
     mut.set(
       `${m.className}.${m.name}`,
-      mutableBindings(m.body, fns, mutatingMethods),
+      mutableBindings(m.body, fns, mutatingMethods, methodParams),
     );
   }
 
@@ -1237,6 +1287,9 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // Populated during lowering when a binding's init is a `spawn` node (051c).
     joinHandleBindings: new Set(),
     mutatingMethods,
+    methodParams,
+    // Filled during lowering as getters/setters are seen (like `structFields`).
+    accessors: new Map(),
     asyncMethods,
     methodNames,
     fallible,
