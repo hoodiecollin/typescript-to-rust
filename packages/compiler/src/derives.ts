@@ -68,6 +68,10 @@ export function isTypeCloneable(
         isTypeCloneable(ty.key, table, seen) &&
         isTypeCloneable(ty.value, table, seen)
       );
+    case "set":
+      return isTypeCloneable(ty.elem, table, seen);
+    case "orderedFloat":
+      return true;
     case "struct":
       return isStructCloneable(ty.name, table, seen);
     default:
@@ -110,6 +114,10 @@ function isTypeDebug(
       return (
         isTypeDebug(ty.key, table, seen) && isTypeDebug(ty.value, table, seen)
       );
+    case "set":
+      return isTypeDebug(ty.elem, table, seen);
+    case "orderedFloat":
+      return true;
     case "struct": {
       if (seen.has(ty.name)) return true;
       const fields = table.get(ty.name);
@@ -154,6 +162,10 @@ export function isTypePartialEq(
         isTypePartialEq(ty.key, table, seen) &&
         isTypePartialEq(ty.value, table, seen)
       );
+    case "set":
+      return isTypePartialEq(ty.elem, table, seen);
+    case "orderedFloat":
+      return true;
     case "struct": {
       if (seen.has(ty.name)) return true;
       const fields = table.get(ty.name);
@@ -173,7 +185,11 @@ export function isTypePartialEq(
  * `Clone, Debug, PartialEq` (matches the enum convention of `Clone` first).
  */
 export function structDeriveClause(
-  s: { name: string; fields: { name: string; ty: RustType }[] },
+  s: {
+    name: string;
+    fields: { name: string; ty: RustType }[];
+    hashEq?: boolean;
+  },
   table: StructTable,
   usesJson = false,
 ): string {
@@ -188,11 +204,20 @@ export function structDeriveClause(
   // Structural equality (series 047): a struct is comparable with `===`/`!==` iff
   // every field is `PartialEq`. This is the documented divergence from JS
   // identity equality (see dialect.md). A non-`PartialEq` field (an `fnPtr`) is
-  // caught at the comparison site with a clean `UnsupportedError` (047c).
+  // caught at the comparison site with a clean `UnsupportedError` (047c). A struct
+  // used as a `Map` key / `Set` element (series 061, `hashEq`) also needs
+  // `PartialEq` (for `Eq`), so the two triggers union.
   if (
+    s.hashEq ||
     s.fields.every((f) => isTypePartialEq(f.ty, table, new Set([s.name])))
   ) {
     traits.push("PartialEq");
+  }
+  // `Hash, Eq` for a struct used as a `Map` key / `Set` element (series 061). Its
+  // field eligibility (no `f64`) was enforced fail-loud at collection time, so the
+  // derive is sound here.
+  if (s.hashEq) {
+    traits.push("Eq", "Hash");
   }
   // serde `Serialize`/`Deserialize` are derived only when the module uses JSON
   // (series 045) and every field is (de)serializable — the same in-dialect data

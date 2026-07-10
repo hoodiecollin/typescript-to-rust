@@ -162,6 +162,10 @@ export function lower(program: Program): HirModule {
   // and a receiver's element type. Needs `lowerType`, so it runs here, not in
   // `analyzeModule`.
   analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
+  // Struct `Map` keys / `Set` elements (series 061) derive `Hash, PartialEq, Eq`;
+  // a struct key with an `f64` field is fail-loud (its own issue). Needs the
+  // resolved map/set types (`bindingTypes`), so it runs here.
+  analysis.hashEqStructs = collectHashEqStructs(analysis);
   // `readonly` field names per struct (series 059) — assignment to one is a
   // `DialectError` (construction stays allowed).
   analysis.readonlyFields = collectReadonlyFields(normalized);
@@ -2046,7 +2050,10 @@ function lowerInterface(
   // field keeps the derived declaration.
   const seen = new Set(own.map((f) => f.name));
   const fields = [...inherited.filter((f) => !seen.has(f.name)), ...own];
-  return { kind: "struct", name: decl.id.name, fields };
+  // A struct used as a `Map` key / `Set` element derives `Hash, PartialEq, Eq`
+  // (series 061); `collectHashEqStructs` verified every field is eligible.
+  const hashEq = analysis.hashEqStructs.has(decl.id.name);
+  return { kind: "struct", name: decl.id.name, fields, hashEq };
 }
 
 /**
@@ -2666,6 +2673,89 @@ function constructorFieldInit(
 }
 
 /**
+ * The resolved `Map`/`Set` (or `Record`) `RustType` of a member receiver, or
+ * null. Series 061 routes `Map`/`Set` methods and record query ops by the
+ * receiver's binding type; only a plain identifier binding is resolved today
+ * (a `this.field` map is a later slice).
+ */
+function collectionOf(
+  obj: Expression,
+  analysis: ModuleAnalysis,
+): RustType | null {
+  if (obj.type !== "Identifier") return null;
+  return analysis.bindingTypes.get((obj as Identifier).name) ?? null;
+}
+
+/** `&expr` — an explicit shared borrow at a call site (series 061). */
+function refExpr(expr: HirExpr): HirExpr {
+  return { kind: "ref", mut: false, expr };
+}
+
+/**
+ * Wrap a `Map` key / `Set` element for its Rust key type (series 061): a scalar
+ * `number` key becomes `OrderedFloat(k)`; every other key is passed through.
+ */
+function wrapKey(expr: HirExpr, keyTy: RustType): HirExpr {
+  if (keyTy.kind === "orderedFloat") {
+    return { kind: "call", callee: "OrderedFloat", args: [{ borrow: "owned", expr }] };
+  }
+  return expr;
+}
+
+/**
+ * Route a `Map`/`Set` class method to its `IndexMap`/`IndexSet` equivalent
+ * (series 061), or null when the receiver is not a map/set binding. `Map`:
+ * `set`→`insert`, `get`→`get(&k).cloned()` (`Option`), `has`→`contains_key`,
+ * `delete`→`shift_remove` (order-preserving). `Set`: `add`→`insert`,
+ * `has`→`contains`, `delete`→`shift_remove`. A scalar-number key is
+ * `OrderedFloat`-wrapped; lookups borrow the key (`&k`).
+ */
+function tryMapSetMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const ty = collectionOf(m.object, analysis);
+  if (!ty || (ty.kind !== "hashmap" && ty.kind !== "set")) return null;
+  const receiver = lowerExpr(m.object, analysis);
+  const args = call.arguments.map((a) => lowerExpr(a as Expression, analysis));
+  if (ty.kind === "hashmap") {
+    const key = args[0] !== undefined ? wrapKey(args[0], ty.key) : undefined;
+    if (methodName === "set" && args.length === 2 && key && args[1]) {
+      return { kind: "method", receiver, name: "insert", args: [key, args[1]] };
+    }
+    if (methodName === "get" && key) {
+      return {
+        kind: "method",
+        receiver: { kind: "method", receiver, name: "get", args: [refExpr(key)] },
+        name: "cloned",
+        args: [],
+      };
+    }
+    if (methodName === "has" && key) {
+      return { kind: "method", receiver, name: "contains_key", args: [refExpr(key)] };
+    }
+    if (methodName === "delete" && key) {
+      return { kind: "method", receiver, name: "shift_remove", args: [refExpr(key)] };
+    }
+    return null;
+  }
+  // Set<T>
+  const elem = args[0] !== undefined ? wrapKey(args[0], ty.elem) : undefined;
+  if (methodName === "add" && elem) {
+    return { kind: "method", receiver, name: "insert", args: [elem] };
+  }
+  if (methodName === "has" && elem) {
+    return { kind: "method", receiver, name: "contains", args: [refExpr(elem)] };
+  }
+  if (methodName === "delete" && elem) {
+    return { kind: "method", receiver, name: "shift_remove", args: [refExpr(elem)] };
+  }
+  return null;
+}
+
+/**
  * `m["k"] = v` — a `=` write to a *string-keyed* computed member — lowers to a
  * HashMap insert `m.insert("k".to_string(), v)` (series 031, gap E): Rust's
  * `Index` on `HashMap` is read-only, so an index-assign there is rejected. A
@@ -2681,7 +2771,23 @@ function tryHashMapInsert(
 ): HirExpr | null {
   if (a.operator !== "=" || a.left.type !== "MemberExpression") return null;
   const m = a.left as MemberExpression;
-  if (!m.computed || m.property.type !== "Literal") return null;
+  if (!m.computed) return null;
+  // A binding known to be a `Map`/`Record` (series 061): any computed write —
+  // literal or variable key, `String` or `OrderedFloat` — is an `insert`, with
+  // the key wrapped for its Rust key type. Maps are never `Vec`-indexed.
+  const recvTy = collectionOf(m.object, analysis);
+  if (recvTy?.kind === "hashmap") {
+    return {
+      kind: "method",
+      receiver: lowerExpr(m.object, analysis),
+      name: "insert",
+      args: [
+        wrapKey(lowerExpr(m.property as Expression, analysis), recvTy.key),
+        lowerExpr(a.right, analysis),
+      ],
+    };
+  }
+  if (m.property.type !== "Literal") return null;
   const key = (m.property as { value: unknown }).value;
   if (typeof key !== "string") return null; // numeric index → Vec, not HashMap
   return {
@@ -4057,6 +4163,11 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       // `undefined` is an identifier in ESTree (not a literal); it is the absent
       // optional (series 042).
       if (name === "undefined") return { kind: "none" };
+      // `NaN` / `Infinity` are ESTree globals, not literals — map to the `f64`
+      // associated constants (series 061; a `NaN` `Map`/`Set` key is faithful).
+      if (name === "NaN") return { kind: "path", segments: ["f64", "NAN"] };
+      if (name === "Infinity")
+        return { kind: "path", segments: ["f64", "INFINITY"] };
       return { kind: "ident", name };
     }
     case "ChainExpression":
@@ -4074,6 +4185,30 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       // `x === null` → `x.is_none()`; `!==` → `x.is_some()`. The non-nullish side
       // is the `Option` receiver. (Valid TS only writes this when the operand is
       // optional.)
+      // `k in obj` (series 061) → `obj.contains_key(&k)` for a `Map`/`Record`,
+      // `obj.contains(&k)` for a `Set` — routed by the right operand's type.
+      if (b.operator === "in") {
+        const ty = collectionOf(b.right, analysis);
+        if (ty?.kind === "hashmap") {
+          return {
+            kind: "method",
+            receiver: lowerExpr(b.right, analysis),
+            name: "contains_key",
+            args: [refExpr(wrapKey(lowerExpr(b.left, analysis), ty.key))],
+          };
+        }
+        if (ty?.kind === "set") {
+          return {
+            kind: "method",
+            receiver: lowerExpr(b.right, analysis),
+            name: "contains",
+            args: [refExpr(wrapKey(lowerExpr(b.left, analysis), ty.elem))],
+          };
+        }
+        throw new UnsupportedError({
+          type: "`in` on a receiver that is not a Map/Record/Set binding",
+        });
+      }
       if (b.operator === "===" || b.operator === "!==") {
         const leftNullish = isNullishExpr(b.left);
         const rightNullish = isNullishExpr(b.right);
@@ -4139,9 +4274,29 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
     }
     case "UnaryExpression": {
       const u = expr as unknown as { operator: string; argument: Expression };
+      // `delete obj[k]` (series 061) → `obj.shift_remove(&k)` (order-preserving)
+      // for a `Map`/`Record` binding; anything else `delete`s fail loud.
+      if (u.operator === "delete") {
+        const arg = u.argument;
+        if (arg.type === "MemberExpression" && (arg as MemberExpression).computed) {
+          const mm = arg as MemberExpression;
+          const ty = collectionOf(mm.object, analysis);
+          if (ty?.kind === "hashmap") {
+            return {
+              kind: "method",
+              receiver: lowerExpr(mm.object, analysis),
+              name: "shift_remove",
+              args: [refExpr(wrapKey(lowerExpr(mm.property, analysis), ty.key))],
+            };
+          }
+        }
+        throw new UnsupportedError({
+          type: "delete of a member that is not a Map/Record element",
+        });
+      }
       // `-x` (negation) and `!x` (logical not) map directly; `~x` (bitwise NOT,
       // series 056) passes through as a `unary "~"` that `refineBitwise` rewrites
-      // to `!` over an `i128`. `+x`, `typeof`/`void`/`delete` fail loud.
+      // to `!` over an `i128`. `+x`, `typeof`/`void` fail loud.
       if (u.operator !== "-" && u.operator !== "!" && u.operator !== "~") {
         throw new UnsupportedError({ type: `unary operator '${u.operator}'` });
       }
@@ -5185,6 +5340,13 @@ function lowerCall(
         type: "sort with a non-arrow comparator (pass `(a, b) => …` or no argument)",
       });
     }
+    // `Map`/`Set` class methods (series 061) route by the receiver's binding type
+    // to their `IndexMap`/`IndexSet` equivalents. Guarded by `!isUserMethod` so a
+    // user method named `get`/`set`/`has`/`add`/`delete` stays a native call.
+    if (!isUserMethod) {
+      const mapSet = tryMapSetMethod(methodName, m, call, analysis);
+      if (mapSet) return mapSet;
+    }
     // Quirk-heavy library methods route to the `tslib` fidelity crate (027);
     // clean-mapping methods fall through to the native `method` call below.
     const routed = isUserMethod
@@ -5714,7 +5876,7 @@ function collectBindingTypes(
         }
       }
     }
-    return init ? inferInitType(init) : null;
+    return init ? inferInitType(init, structs) : null;
   };
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) {
@@ -5757,7 +5919,10 @@ function collectBindingTypes(
 }
 
 /** Infer a `RustType` from a scalar/array-literal initializer (best-effort, series 048). */
-function inferInitType(init: Expression): RustType | null {
+function inferInitType(
+  init: Expression,
+  structs: Set<string>,
+): RustType | null {
   if (init.type === "Literal") {
     const v = (init as Literal).value;
     if (typeof v === "number") return { kind: "f64" };
@@ -5768,8 +5933,32 @@ function inferInitType(init: Expression): RustType | null {
   if (init.type === "ArrayExpression") {
     const first = (init as ArrayExpression).elements[0];
     if (!first) return null;
-    const elem = inferInitType(first as Expression);
+    const elem = inferInitType(first as Expression, structs);
     return elem ? { kind: "vec", elem } : null;
+  }
+  // `new Map<K, V>()` / `new Set<T>()` — read the constructor's type arguments so
+  // an un-annotated `const m = new Map<string, number>()` still records the
+  // map/set type (series 061). Without type args it stays fail-loud.
+  if (init.type === "NewExpression") {
+    const nw = init as NewExpression;
+    if (nw.callee.type !== "Identifier") return null;
+    const name = (nw.callee as Identifier).name;
+    const targs = (nw as { typeArguments?: { params?: TSType[] } }).typeArguments
+      ?.params;
+    try {
+      if (name === "Map" && targs?.[0] && targs?.[1]) {
+        return {
+          kind: "hashmap",
+          key: lowerMapKeyType(targs[0], structs),
+          value: lowerType(targs[1], structs),
+        };
+      }
+      if (name === "Set" && targs?.[0]) {
+        return { kind: "set", elem: lowerMapKeyType(targs[0], structs) };
+      }
+    } catch {
+      return null;
+    }
   }
   return null;
 }
@@ -6007,6 +6196,38 @@ function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
     throw new UnsupportedError({ type: "new with a non-identifier callee" });
   }
   const className = (expr.callee as Identifier).name;
+  // `new Map<K, V>()` / `new Set<T>()` (series 061) → an empty `IndexMap`/`IndexSet`
+  // with a turbofish so an un-annotated binding still infers. An initializer
+  // argument (`new Map([...])`) is out of scope (fail-loud, a later slice).
+  if (className === "Map" || className === "Set") {
+    if (expr.arguments.length > 0) {
+      throw new UnsupportedError({
+        type: `new ${className}(...) with an initializer argument (only empty construction is modeled)`,
+      });
+    }
+    const targs = (expr as { typeArguments?: { params?: TSType[] } })
+      .typeArguments?.params;
+    if (className === "Map") {
+      const [k, v] = targs ?? [];
+      if (!k || !v) {
+        throw new UnsupportedError({
+          type: "new Map() without explicit type arguments (write `new Map<K, V>()`)",
+        });
+      }
+      return {
+        kind: "mapNew",
+        key: lowerMapKeyType(k, analysis.structs),
+        value: lowerType(v, analysis.structs),
+      };
+    }
+    const [e] = targs ?? [];
+    if (!e) {
+      throw new UnsupportedError({
+        type: "new Set() without an explicit type argument (write `new Set<T>()`)",
+      });
+    }
+    return { kind: "setNew", elem: lowerMapKeyType(e, analysis.structs) };
+  }
   const args: HirArg[] = expr.arguments.map((a) => ({
     borrow: "owned",
     expr: lowerExpr(a, analysis),
@@ -6044,6 +6265,24 @@ function lowerMember(
         index: (prop as Literal).value as 0 | 1,
       };
     }
+    // A *variable*-key read of a `Map`/`Record` (series 061) → `m.get(&k).cloned()`
+    // → `Option` (JS `V | undefined`). A literal-key read keeps the index form
+    // (proven-present record access, series 010). Maps are never `Vec`-indexed.
+    const collTy = collectionOf(member.object, analysis);
+    if (collTy?.kind === "hashmap" && member.property.type !== "Literal") {
+      const key = wrapKey(lowerExpr(member.property, analysis), collTy.key);
+      return {
+        kind: "method",
+        receiver: {
+          kind: "method",
+          receiver: lowerExpr(member.object, analysis),
+          name: "get",
+          args: [refExpr(key)],
+        },
+        name: "cloned",
+        args: [],
+      };
+    }
     return {
       kind: "index",
       object: lowerExpr(member.object, analysis),
@@ -6055,6 +6294,14 @@ function lowerMember(
     // `.length` is a property in TS but a method in Rust.
     if (prop === "length")
       return { kind: "len", object: lowerExpr(member.object, analysis) };
+    // `Map`/`Set` `.size` → `.len()` (series 061), routed by receiver type so a
+    // user struct field named `size` stays an ordinary field read.
+    if (prop === "size") {
+      const ty = collectionOf(member.object, analysis);
+      if (ty && (ty.kind === "hashmap" || ty.kind === "set")) {
+        return { kind: "len", object: lowerExpr(member.object, analysis) };
+      }
+    }
     // `E.Variant` (member of a declared enum) → the Rust path `E::Variant`.
     if (
       member.object.type === "Identifier" &&
@@ -6206,6 +6453,91 @@ function recordDynFieldRead(
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/**
+ * Lower a `Map` key / `Set` element type per the 061 key policy. `string` →
+ * `String`; a scalar `number` → `OrderedFloat<f64>` (faithful to JS
+ * SameValueZero); a named struct → its `struct` type (its `Hash+Eq` eligibility
+ * — no `f64` field — is enforced later in `collectHashEqStructs`); `boolean` →
+ * `bool`. Anything else is fail-loud (unhashable key).
+ */
+function lowerMapKeyType(ty: TSType, structs: Set<string>): RustType {
+  switch (ty.type) {
+    case "TSStringKeyword":
+      return { kind: "String" };
+    case "TSNumberKeyword":
+      return { kind: "orderedFloat" };
+    case "TSBooleanKeyword":
+      return { kind: "bool" };
+    default: {
+      const lowered = lowerType(ty, structs);
+      if (lowered.kind === "struct") return lowered;
+      throw new UnsupportedError({
+        type: "Map/Set key type that is not string, number, boolean, or a struct",
+      });
+    }
+  }
+}
+
+/**
+ * Is a type `Hash + Eq` eligible (a valid `Map` key / `Set` element)? Scalars
+ * except `f64` are; `OrderedFloat` is; a struct is iff every field is (recursed).
+ * An `f64` (a raw number field) is **not** — a struct with one is fail-loud.
+ */
+function isTypeHashEq(
+  ty: RustType,
+  structFields: Map<string, { name: string; ty: RustType }[]>,
+  seen: Set<string> = new Set(),
+): boolean {
+  switch (ty.kind) {
+    case "String":
+    case "str":
+    case "bool":
+    case "i64":
+    case "usize":
+    case "orderedFloat":
+      return true;
+    case "vec":
+      return isTypeHashEq(ty.elem, structFields, seen);
+    case "option":
+      return isTypeHashEq(ty.inner, structFields, seen);
+    case "struct": {
+      if (seen.has(ty.name)) return true;
+      const fields = structFields.get(ty.name);
+      if (!fields) return false;
+      const next = new Set(seen).add(ty.name);
+      return fields.every((f) => isTypeHashEq(f.ty, structFields, next));
+    }
+    default:
+      return false; // f64, fnPtr, … are not Hash+Eq
+  }
+}
+
+/**
+ * Scan the resolved `bindingTypes` for struct `Map` keys / `Set` elements and
+ * return their names — the structs that must derive `Hash, PartialEq, Eq`
+ * (series 061). A struct key/element with an `f64` field is **fail-loud** (its
+ * own standalone issue: the dual-representation conflict), raised here.
+ */
+function collectHashEqStructs(
+  analysis: ModuleAnalysis,
+): Set<string> {
+  const out = new Set<string>();
+  const consider = (ty: RustType): void => {
+    if (ty.kind !== "struct") return;
+    if (!isTypeHashEq(ty, analysis.structFields)) {
+      throw new UnsupportedError({
+        type: `struct '${ty.name}' used as a Map key / Set element has a non-Hash+Eq (f64) field — its own issue`,
+      });
+    }
+    out.add(ty.name);
+  };
+  for (const ty of analysis.bindingTypes.values()) {
+    if (ty.kind === "hashmap") consider(ty.key);
+    if (ty.kind === "set") consider(ty.elem);
+  }
+  return out;
+}
+
 function lowerType(ty: TSType, structs: Set<string>): RustType {
   switch (ty.type) {
     case "TSNumberKeyword":
@@ -6246,6 +6578,24 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
           key: { kind: "String" },
           value: lowerType(value, structs),
         };
+      }
+      if (ref.typeName.name === "Map") {
+        // `Map<K, V>` → `IndexMap<K, V>` (series 061). The key type follows the
+        // `Hash + Eq` key policy (`lowerMapKeyType`): `String`, gated struct, or
+        // `OrderedFloat<f64>` for a scalar number.
+        const [key, value] = ref.typeArguments?.params ?? [];
+        if (!key || !value) throw new UnsupportedError(ty);
+        return {
+          kind: "hashmap",
+          key: lowerMapKeyType(key, structs),
+          value: lowerType(value, structs),
+        };
+      }
+      if (ref.typeName.name === "Set") {
+        // `Set<T>` → `IndexSet<T>` (series 061); element follows the key policy.
+        const elem = ref.typeArguments?.params?.[0];
+        if (!elem) throw new UnsupportedError(ty);
+        return { kind: "set", elem: lowerMapKeyType(elem, structs) };
       }
       // A reference to a declared `interface` → its nominal `struct` type. An
       // unknown type name stays fail-loud (`Promise`, `Map`, … are unsupported).

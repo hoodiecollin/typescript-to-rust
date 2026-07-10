@@ -40,6 +40,10 @@ const MUTATING_METHODS = new Set([
   "set",
   "insert",
   "clear",
+  // `Map`/`Set` class mutators (series 061): `m.set`/`s.add`/`.delete` all need a
+  // `mut` receiver (they lower to `.insert`/`.shift_remove`).
+  "add",
+  "delete",
 ]);
 
 export type Ownership = "move" | "ref" | "refMut";
@@ -93,6 +97,13 @@ export interface ModuleAnalysis {
    * Populated by `lower()` after analysis (needs `lowerType`); empty here.
    */
   structFields: Map<string, { name: string; ty: RustType }[]>;
+  /**
+   * Struct names used as a `Map` key / `Set` element (series 061) — they derive
+   * `Hash, PartialEq, Eq` (gated on every field being `Hash+Eq` eligible; an
+   * `f64` field is fail-loud, its own issue). Populated by `lower()` after
+   * `bindingTypes` (needs the resolved map/set types); empty here.
+   */
+  hashEqStructs: Set<string>;
   /**
    * Names of bindings whose initializer is `Object.entries(...)` — a
    * `Vec<(K, V)>` of pairs (series 043). A pair index `es[i][0]`/`es[i][1]` on
@@ -553,6 +564,19 @@ function mutableBindings(
 
     const mutating = isMutatingMethodCall(n);
     if (mutating) mut.add(mutating.object);
+
+    // `delete obj[k]` (series 061) → `obj.shift_remove(&k)`, which needs `mut obj`.
+    if (
+      n.type === "UnaryExpression" &&
+      (n as AnyNode).operator === "delete" &&
+      isNode((n as AnyNode).argument)
+    ) {
+      const arg = (n as AnyNode).argument as AnyNode;
+      if (arg.type === "MemberExpression" && arg.computed) {
+        const name = identName(arg.object);
+        if (name && !aliased.has(name)) mut.add(name);
+      }
+    }
 
     // A call to a self-mutating class method (`c.increment()`) needs `mut c`.
     if (
@@ -1206,6 +1230,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     structs,
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
     structFields: new Map(),
+    // Filled by `lower()` after `bindingTypes` (needs the resolved map/set types).
+    hashEqStructs: new Set(),
     // Populated during lowering as `Object.entries` bindings are seen.
     entriesBindings: new Set(),
     // Populated during lowering when a binding's init is a `spawn` node (051c).

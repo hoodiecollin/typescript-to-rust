@@ -57,6 +57,11 @@ bumpalo = { version = "3", features = ["collections"] }
 # fetches it online on a cold cache. Unused by error-enum-free output (a
 # present-but-unused dependency costs nothing at check time).
 thiserror = "2"
+# ordered-float backs scalar-`f64` `Map`/`Set` keys/elements (series 061):
+# `OrderedFloat<f64>` supplies `Hash + Eq + Ord` and matches JS SameValueZero
+# exactly (`NaN == NaN`, `-0.0`/`+0.0` collapse), so a number-keyed `Map`/`Set`
+# translates faithfully. Unused by float-key-free output (costs nothing at check).
+ordered-float = "4"
 
 [lib]
 name = "ttr_scratch"

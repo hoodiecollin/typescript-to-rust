@@ -161,6 +161,8 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
         return { ...e, inner: rewrite(e.inner) };
       case "rcClone":
         return { ...e, expr: rewrite(e.expr) };
+      case "ref":
+        return { ...e, expr: rewrite(e.expr) };
       // Leaves: number, string, bool, ident, path.
       default:
         return e;

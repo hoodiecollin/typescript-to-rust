@@ -94,6 +94,10 @@ function isCloneableMovable(
       return (
         isTypeCloneable(ty.key, structs) && isTypeCloneable(ty.value, structs)
       );
+    case "set":
+      return isTypeCloneable(ty.elem, structs);
+    case "orderedFloat":
+      return true;
     case "struct":
       return isStructCloneable(ty.name, structs);
     default:
@@ -503,6 +507,9 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
       collectUses(e.expr, movable, out);
       return;
     case "rcClone":
+      collectUses(e.expr, movable, out);
+      return;
+    case "ref":
       collectUses(e.expr, movable, out);
       return;
     // Task-escape nodes (series 051c increment 2): a `lockAccess` reads its

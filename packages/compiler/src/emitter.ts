@@ -168,8 +168,18 @@ export function emitModule(mod: HirModule): string {
   const imports: string[] = [];
   // `Record`/object types are backed by `IndexMap` (series 041) so key/value
   // iteration matches JS's insertion order (`HashMap` does not preserve it).
-  if (usesKind(mod, "hashmap") || usesKind(mod, "mapBuild"))
+  if (
+    usesKind(mod, "hashmap") ||
+    usesKind(mod, "mapBuild") ||
+    usesKind(mod, "mapNew")
+  )
     imports.push("use indexmap::IndexMap;");
+  // `Set<T>` → `IndexSet` (series 061), same insertion-order fidelity as `IndexMap`.
+  if (usesKind(mod, "set") || usesKind(mod, "setNew"))
+    imports.push("use indexmap::IndexSet;");
+  // Scalar-`f64` map keys / set elements wrap in `OrderedFloat` (series 061).
+  if (usesKind(mod, "orderedFloat"))
+    imports.push("use ordered_float::OrderedFloat;");
   if (
     usesKind(mod, "rc") ||
     usesKind(mod, "rcNew") ||
@@ -810,6 +820,19 @@ function emitExpr(expr: HirExpr): string {
         .join(", ");
       return `IndexMap::from([${entries}])`;
     }
+    case "mapNew":
+      return `IndexMap::<${emitType(expr.key)}, ${emitType(expr.value)}>::new()`;
+    case "setNew":
+      return `IndexSet::<${emitType(expr.elem)}>::new()`;
+    case "ref": {
+      // A ref of an atomic expr needs no parens; a binary/unary/cast operand does.
+      const inner = emitExpr(expr.expr);
+      const wrap =
+        expr.expr.kind === "binary" ||
+        expr.expr.kind === "unary" ||
+        expr.expr.kind === "cast";
+      return `&${expr.mut ? "mut " : ""}${wrap ? `(${inner})` : inner}`;
+    }
     case "structLit": {
       if (expr.fields.length === 0) return `${rid(expr.name)} {}`;
       const fields = expr.fields
@@ -1035,6 +1058,10 @@ function emitType(ty: RustType): string {
       return `Option<${emitType(ty.inner)}>`;
     case "hashmap":
       return `IndexMap<${emitType(ty.key)}, ${emitType(ty.value)}>`;
+    case "set":
+      return `IndexSet<${emitType(ty.elem)}>`;
+    case "orderedFloat":
+      return "OrderedFloat<f64>";
     case "struct":
       return rid(ty.name);
     case "result":

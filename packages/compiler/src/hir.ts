@@ -59,6 +59,18 @@ export type RustType =
    * `hashmap` (the map node); only the emitted backing type is `IndexMap`.
    */
   | { kind: "hashmap"; key: RustType; value: RustType }
+  /**
+   * `IndexSet<elem>` — the `Set<T>` class (series 061), insertion-order preserving
+   * like `IndexMap`. `elem` is `Hash + Eq` eligible (`String`, integer, gated
+   * struct, or `OrderedFloat<f64>` for a scalar `f64`).
+   */
+  | { kind: "set"; elem: RustType }
+  /**
+   * `ordered_float::OrderedFloat<f64>` — a hashable/`Eq` `f64` for `Map`/`Set`
+   * scalar-number keys/elements (series 061). Faithful to JS SameValueZero
+   * (`NaN == NaN`, `-0.0`/`+0.0` collapse). Only ever a map key / set element.
+   */
+  | { kind: "orderedFloat" }
   /** A named `struct` (from an `interface`); rendered as the bare name. */
   | { kind: "struct"; name: string }
   /** A fallible function's return type: `Result<ok, err>` (`err` is `String` today). */
@@ -185,6 +197,14 @@ export type HirExpr =
   | { kind: "array"; elements: HirExpr[] }
   /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */
   | { kind: "hashmap"; entries: { key: HirExpr; value: HirExpr }[] }
+  /** `new Map<K, V>()` → `IndexMap::<K, V>::new()` (series 061, turbofish so an
+   * un-annotated `let` still infers). */
+  | { kind: "mapNew"; key: RustType; value: RustType }
+  /** `new Set<T>()` → `IndexSet::<T>::new()` (series 061). */
+  | { kind: "setNew"; elem: RustType }
+  /** `&expr` / `&mut expr` — an explicit borrow at a call site (`m.get(&k)`,
+   * series 061). */
+  | { kind: "ref"; mut: boolean; expr: HirExpr }
   /** struct object literal → `Name { field: value, … }`. */
   | {
       kind: "structLit";
@@ -690,6 +710,11 @@ export interface HirStruct {
    * (the base's fields are flattened into this struct, so `self.x` always exists).
    */
   implTraits?: { trait: string; getters: { field: string; ty: RustType }[] }[];
+  /**
+   * This struct is used as a `Map` key / `Set` element (series 061), so it derives
+   * `Hash, PartialEq, Eq` (its field eligibility was enforced at collection time).
+   */
+  hashEq?: boolean;
 }
 
 /**
