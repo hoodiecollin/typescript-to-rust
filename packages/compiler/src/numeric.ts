@@ -304,6 +304,9 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
     case "ref":
       eachExpr(e.expr, fn);
       break;
+    case "collectVec":
+      eachExpr(e.iter, fn);
+      break;
     // Leaves carry no nested expressions:
     case "number":
     case "string":

@@ -886,6 +886,7 @@ type GenTerm =
   | { kind: "goto"; target: number }
   | { kind: "branch"; cond: Expression; then: number; else: number }
   | { kind: "yield"; value: Expression; resume: number }
+  | { kind: "yieldStar"; iter: Expression; resume: number }
   | { kind: "done" };
 
 /** A basic block: straight-line leaf statements then a terminator. */
@@ -934,14 +935,15 @@ function buildGeneratorStateMachine(
           argument?: Expression;
         };
         if (e.type === "YieldExpression") {
-          if (e.delegate) {
-            throw new UnsupportedError({ type: "`yield*` delegation" });
-          }
           if (!e.argument) {
             throw new UnsupportedError({ type: "bare `yield` (no value)" });
           }
           const resume = newBlock();
-          bat(cur).term = { kind: "yield", value: e.argument, resume };
+          // `yield* <iter>` (series 065) → a delegating state; a plain `yield v` →
+          // a suspend state (052).
+          bat(cur).term = e.delegate
+            ? { kind: "yieldStar", iter: e.argument, resume }
+            : { kind: "yield", value: e.argument, resume };
           return resume;
         }
         bat(cur).stmts.push(s);
@@ -1129,6 +1131,7 @@ function buildGeneratorStateMachine(
     // The terminator's reads run after every statement in the block.
     if (b.term.kind === "branch") addUpwardReads(b.term.cond);
     if (b.term.kind === "yield") addUpwardReads(b.term.value);
+    if (b.term.kind === "yieldStar") addUpwardReads(b.term.iter);
     useSet.push(uses);
     defSet.push(defs);
   }
@@ -1139,6 +1142,8 @@ function buildGeneratorStateMachine(
       case "branch":
         return [b.term.then, b.term.else];
       case "yield":
+        return [b.term.resume];
+      case "yieldStar":
         return [b.term.resume];
       case "done":
         return [];
@@ -1172,7 +1177,9 @@ function buildGeneratorStateMachine(
   // Params are always fields (captured at construction).
   const fieldNames = new Set<string>(paramNames);
   for (const b of blocks) {
-    if (b.term.kind === "yield") {
+    // A `yield*` state can also suspend mid-delegation, so its live-out locals
+    // must survive too (series 065).
+    if (b.term.kind === "yield" || b.term.kind === "yieldStar") {
       for (const v of liveOut[b.id] as Set<string>) {
         if (declaredLocals.includes(v)) fieldNames.add(v);
       }
@@ -1210,6 +1217,7 @@ function buildGeneratorStateMachine(
   });
 
   // ── Assemble the `match` arms (append each block's terminator) ──────────────
+  const delegateFields: string[] = [];
   const states = blocks.map((b) => {
     const arm: HirStmt[] = [...(loweredBlocks[b.id] as HirStmt[])];
     switch (b.term.kind) {
@@ -1231,6 +1239,24 @@ function buildGeneratorStateMachine(
           resumeState: b.term.resume,
         });
         break;
+      case "yieldStar": {
+        // `yield* <iter>` (065): a delegating state with its own boxed iterator
+        // field, seeded from `<iter>.into_iter()` and pumped to exhaustion.
+        const field = `__delegate_${b.id}`;
+        delegateFields.push(field);
+        arm.push({
+          kind: "yieldStarStep",
+          field,
+          iter: {
+            kind: "method",
+            receiver: lowerExpr(b.term.iter, analysis),
+            name: "into_iter",
+            args: [],
+          },
+          resumeState: b.term.resume,
+        });
+        break;
+      }
       case "done":
         arm.push({ kind: "genDone", terminal });
         break;
@@ -1254,6 +1280,7 @@ function buildGeneratorStateMachine(
     localFields,
     states,
     terminal,
+    delegateFields,
   };
 }
 
@@ -4142,6 +4169,20 @@ function lowerTyped(
     return lowerHashMapLiteral(obj, analysis);
   }
   if (ty?.kind === "vec" && expr.type === "ArrayExpression") {
+    // A single-spread array over a generator `[...g()]` into a `Vec` target
+    // (series 065) → `g().collect::<Vec<_>>()`; handled by `lowerExpr` (its
+    // ArrayExpression case), not the element-mapping path below.
+    const arrEls = (expr as ArrayExpression).elements;
+    if (
+      arrEls.length === 1 &&
+      (arrEls[0] as { type?: string })?.type === "SpreadElement" &&
+      isGeneratorCall(
+        (arrEls[0] as unknown as { argument: Expression }).argument,
+        analysis,
+      )
+    ) {
+      return lowerExpr(expr, analysis);
+    }
     // Class inheritance (series 053c): a base-typed array holding *different*
     // subtypes is heterogeneous → `Vec<Box<dyn IA>>`; each element is upcast
     // with `Box::new(...)`. Detected when the elem type is an extended base and
@@ -4535,13 +4576,31 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         value: lowerExpr(a.right, analysis),
       };
     }
-    case "ArrayExpression":
+    case "ArrayExpression": {
+      const els = (expr as { elements: Expression[] }).elements;
+      // A single-spread array over a *generator* `[...g()]` (series 065) →
+      // `g().collect::<Vec<_>>()`. Array spread `[...a]` and other iterables stay
+      // fail-loud (series 044's residual — not 065's generator-consumption scope).
+      if (
+        els.length === 1 &&
+        els[0] &&
+        (els[0] as { type?: string }).type === "SpreadElement"
+      ) {
+        const arg = (els[0] as unknown as { argument: Expression }).argument;
+        if (isGeneratorCall(arg, analysis)) {
+          return { kind: "collectVec", iter: lowerExpr(arg, analysis) };
+        }
+      }
+      if (els.some((e) => (e as { type?: string })?.type === "SpreadElement")) {
+        throw new UnsupportedError({
+          type: "array spread of a non-generator (only `[...g()]` over a generator is modeled)",
+        });
+      }
       return {
         kind: "array",
-        elements: (expr as { elements: Expression[] }).elements.map((e) =>
-          lowerExpr(e, analysis),
-        ),
+        elements: els.map((e) => lowerExpr(e, analysis)),
       };
+    }
     case "CallExpression":
       return lowerCall(expr as CallExpression, analysis);
     case "MemberExpression":
@@ -5357,6 +5416,42 @@ function lowerCall(
       (m.object as Identifier).name === "Object"
     ) {
       return lowerObjectStatic(methodName, call, analysis);
+    }
+    // `Array.from(iter)` (series 065) → `iter.collect::<Vec<_>>()` — the eager
+    // consumer of a generator's `impl Iterator` (or any iterable). The mapping
+    // overload `Array.from(iter, fn)` stays fail-loud (a later slice).
+    if (
+      m.object.type === "Identifier" &&
+      (m.object as Identifier).name === "Array" &&
+      methodName === "from"
+    ) {
+      const arg = call.arguments[0];
+      if (call.arguments.length !== 1 || !arg) {
+        throw new UnsupportedError({
+          type: "Array.from with a mapping function (only `Array.from(iter)` is modeled)",
+        });
+      }
+      if (!isGeneratorCall(arg, analysis)) {
+        throw new UnsupportedError({
+          type: "Array.from over a non-generator (only `Array.from(g())` over a generator is modeled)",
+        });
+      }
+      return { kind: "collectVec", iter: lowerExpr(arg, analysis) };
+    }
+    // Manual `.next()` on a generator (series 065) → fail-loud: Rust's
+    // `Iterator::next()` is pull-only (`Option<T>`, no `{value, done}`, no
+    // resumed-in value). Use `for-of`, `[...g()]`, or `Array.from(g())`.
+    if (
+      methodName === "next" &&
+      m.object.type === "CallExpression" &&
+      (m.object as CallExpression).callee.type === "Identifier" &&
+      analysis.generators.has(
+        ((m.object as CallExpression).callee as Identifier).name,
+      )
+    ) {
+      throw new UnsupportedError({
+        type: "manual generator `.next()` (impl Iterator is pull-only — use for-of / spread / Array.from)",
+      });
     }
     // `JSON.stringify(v)` / `JSON.parse(s)` — static calls on the global `JSON`
     // (series 045). `parse` here has no type context → the untyped `Value`
@@ -6345,6 +6440,18 @@ function isJsonParseCall(e: Expression): boolean {
     (m.object as Identifier).name === "JSON" &&
     m.property.type === "Identifier" &&
     (m.property as Identifier).name === "parse"
+  );
+}
+
+/** Is `e` a direct call to a declared generator (`g()`) — an `impl Iterator`
+ * source for the 065 collecting consumers? */
+function isGeneratorCall(e: Expression, analysis: ModuleAnalysis): boolean {
+  return (
+    e.type === "CallExpression" &&
+    (e as CallExpression).callee.type === "Identifier" &&
+    analysis.generators.has(
+      ((e as CallExpression).callee as Identifier).name,
+    )
   );
 }
 

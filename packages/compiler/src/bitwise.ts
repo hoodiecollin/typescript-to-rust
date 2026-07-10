@@ -316,6 +316,9 @@ function mapChildren(e: HirExpr, f: (c: HirExpr) => HirExpr): void {
     case "ref":
       e.expr = f(e.expr);
       break;
+    case "collectVec":
+      e.iter = f(e.iter);
+      break;
     // Leaves / exotic async & rc nodes carry no bitwise-eligible operands.
     default:
       break;

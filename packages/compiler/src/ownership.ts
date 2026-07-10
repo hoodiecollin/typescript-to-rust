@@ -382,6 +382,10 @@ function transfer(
       map.set(s, new Set());
       return new Set();
     }
+    case "yieldStarStep": {
+      map.set(s, liveAfter);
+      return union(exprUses(s.iter, movable), liveAfter);
+    }
   }
 }
 
@@ -511,6 +515,9 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
       return;
     case "ref":
       collectUses(e.expr, movable, out);
+      return;
+    case "collectVec":
+      collectUses(e.iter, movable, out);
       return;
     // Task-escape nodes (series 051c increment 2): a `lockAccess` reads its
     // wrapped sub-expression's uses; an `arcClone` names an `Arc`-wrapped binding

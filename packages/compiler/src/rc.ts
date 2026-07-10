@@ -163,6 +163,8 @@ function rcBody(body: HirStmt[], classes: ReadonlySet<string>): void {
         return { ...e, expr: rewrite(e.expr) };
       case "ref":
         return { ...e, expr: rewrite(e.expr) };
+      case "collectVec":
+        return { ...e, iter: rewrite(e.iter) };
       // Leaves: number, string, bool, ident, path.
       default:
         return e;

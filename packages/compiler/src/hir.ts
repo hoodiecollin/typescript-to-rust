@@ -205,6 +205,13 @@ export type HirExpr =
   /** `&expr` / `&mut expr` — an explicit borrow at a call site (`m.get(&k)`,
    * series 061). */
   | { kind: "ref"; mut: boolean; expr: HirExpr }
+  /**
+   * `(<iter>).collect::<Vec<_>>()` — materialize an iterator into a `Vec` (series
+   * 065). The collecting consumers `[...g()]` (array spread) and `Array.from(g())`
+   * over a generator's `impl Iterator`. The `Vec<_>` turbofish lets it stand
+   * without a target-type annotation.
+   */
+  | { kind: "collectVec"; iter: HirExpr }
   /** struct object literal → `Name { field: value, … }`. */
   | {
       kind: "structLit";
@@ -610,6 +617,14 @@ export type HirStmt =
    */
   | { kind: "genDone"; terminal: number }
   /**
+   * `yield* <iter>` delegation (series 065). A delegating state in the 052 machine:
+   * lazily seeds a boxed delegate iterator field (`self.<field> =
+   * Some(Box::new(<iter>))` on first entry), then pumps `self.<field>.next()` —
+   * `Some(v)` re-yields `v` (stays in this state), `None` clears the field and
+   * transitions to `resumeState`. `<iter>` is `<expr>.into_iter()` boxed.
+   */
+  | { kind: "yieldStarStep"; field: string; iter: HirExpr; resumeState: number }
+  /**
    * `throw new Error(msg)` → `return Err(value);` (`value` is the message). Under
    * a `"use panic"` scope (series 028a) `panic` is set and it emits
    * `panic!("{}", value);` instead — no `Result`, no propagation.
@@ -843,6 +858,11 @@ export interface HirGenerator {
   states: { id: number; body: HirStmt[] }[];
   /** The reserved terminal state number (the `_ => return None` arm). */
   terminal: number;
+  /**
+   * `yield*` delegate fields (series 065) — one per delegating state, each an
+   * `Option<Box<dyn Iterator<Item = T>>>` seeded lazily and pumped to exhaustion.
+   */
+  delegateFields: string[];
 }
 
 /** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */

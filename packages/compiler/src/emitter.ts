@@ -248,10 +248,14 @@ function emitGenerator(g: HirGenerator): string {
   const itemTy = emitType(g.item);
 
   // 1. struct — `state: u32` first, then owned params, then across-yield locals.
+  // `yield*` delegate fields (065): a boxed trait-object iterator, `None` until the
+  // delegating state is first entered.
+  const delegateTy = `Option<Box<dyn Iterator<Item = ${itemTy}>>>`;
   const fieldLines = [
     `${INDENT}state: u32,`,
     ...g.params.map((p) => `${INDENT}${rid(p.name)}: ${emitType(p.ty)},`),
     ...g.localFields.map((f) => `${INDENT}${rid(f.name)}: ${emitType(f.ty)},`),
+    ...g.delegateFields.map((f) => `${INDENT}${rid(f)}: ${delegateTy},`),
   ].join("\n");
   const struct = `struct ${sname} {\n${fieldLines}\n}`;
 
@@ -263,6 +267,7 @@ function emitGenerator(g: HirGenerator): string {
     "state: 0",
     ...g.params.map((p) => rid(p.name)),
     ...g.localFields.map((f) => `${rid(f.name)}: Default::default()`),
+    ...g.delegateFields.map((f) => `${rid(f)}: None`),
   ].join(", ");
   const newFn = [
     `impl ${sname} {`,
@@ -617,6 +622,24 @@ function emitStmt(stmt: HirStmt): string {
       // The generator's terminal transition (052): park in the exhausted state
       // and return `None` (every later `next()` also returns `None`).
       return `self.state = ${stmt.terminal};\nreturn None;`;
+    case "yieldStarStep": {
+      // `yield* <iter>` delegation (065): seed the boxed delegate on first entry,
+      // then pump it — re-yield each `Some(v)`, and on `None` clear the field and
+      // advance to the resume state (the enclosing `loop` re-enters that arm).
+      const f = rid(stmt.field);
+      return [
+        `if self.${f}.is_none() {`,
+        `${INDENT}self.${f} = Some(Box::new(${emitExpr(stmt.iter)}));`,
+        `}`,
+        `match self.${f}.as_mut().unwrap().next() {`,
+        `${INDENT}Some(__v) => return Some(__v),`,
+        `${INDENT}None => {`,
+        `${INDENT}${INDENT}self.${f} = None;`,
+        `${INDENT}${INDENT}self.state = ${stmt.resumeState};`,
+        `${INDENT}}`,
+        `}`,
+      ].join("\n");
+    }
     case "throw":
       // Default: a propagated error `return Err(msg);`. Under `"use panic"`
       // (028a) it aborts with the message instead — no `Result`.
@@ -831,6 +854,8 @@ function emitExpr(expr: HirExpr): string {
       return `IndexMap::<${emitType(expr.key)}, ${emitType(expr.value)}>::new()`;
     case "setNew":
       return `IndexSet::<${emitType(expr.elem)}>::new()`;
+    case "collectVec":
+      return `${emitExpr(expr.iter)}.collect::<Vec<_>>()`;
     case "ref": {
       // A ref of an atomic expr needs no parens; a binary/unary/cast operand does.
       const inner = emitExpr(expr.expr);
