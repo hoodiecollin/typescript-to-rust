@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const mod = lower(parsed.program as unknown as Program);
+  const mod = lower(parsed.program as unknown as Program, source);
   const emitted = emitModule(mod);
   const rust = fmt ? await formatRust(emitted) : emitted;
 

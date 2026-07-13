@@ -25,6 +25,7 @@
 
 import type { FunctionDeclaration, Program, Statement, TSType } from "./ast";
 import type { HirFn, RustType } from "./hir";
+import type { TypeOracle } from "./type-oracle";
 
 /** JS array/collection methods that mutate the receiver in place. */
 const MUTATING_METHODS = new Set([
@@ -235,6 +236,16 @@ export interface ModuleAnalysis {
    * limit, matching the rest of this intra-procedural analysis).
    */
   bindingTypes: Map<string, RustType>;
+  /**
+   * A TypeScript-checker-backed type resolver coupled to oxc (series 082,
+   * spike #44), or null when `lower()` was called without source text. Consulted
+   * by `collectionOf` as a fallback: when the hand-rolled `bindingTypes` lookup
+   * can't resolve a Map/Set receiver (any non-identifier shape — `this.field`,
+   * `local.field`, `getX()`), the oracle answers via `getTypeAtLocation`. Only
+   * ever turns a previously-null result into a resolution — never overrides a
+   * positive `bindingTypes` answer — so identifier receivers are unchanged.
+   */
+  typeOracle: TypeOracle | null;
   /**
    * Struct name → the set of its `readonly` field names (series 059). An
    * assignment to such a field (`s.f = …`) is a `DialectError`; construction (a
@@ -1322,6 +1333,9 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     generators,
     // Filled in by `lower()` (needs `lowerType`); empty/zero here.
     bindingTypes: new Map(),
+    // Built by `lower()` only when source text is threaded in (series 082); null
+    // otherwise, in which case `collectionOf` uses the `bindingTypes` path alone.
+    typeOracle: null,
     readonlyFields: new Map(),
     baseInterfaces: new Set(),
     interfaceExtends: new Map(),

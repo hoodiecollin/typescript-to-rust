@@ -88,6 +88,7 @@ import { refineTaskEscape } from "./task-escape";
 import { refineRc } from "./rc";
 import { computeAutoRc } from "./alias-escape";
 import { refineStrings } from "./strings";
+import { createTypeOracle } from "./type-oracle";
 import { validate } from "./validate";
 
 // Re-exported so existing importers (`from "./lower"`) and the emitter's own
@@ -142,7 +143,7 @@ function synthesizeErrorEnum(analysis: ModuleAnalysis): HirErrorEnum | null {
  * Lower a whole program to HIR.
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
  */
-export function lower(program: Program): HirModule {
+export function lower(program: Program, source?: string): HirModule {
   // Step 2: reject input forbidden by the dialect (`any`/`unknown`, …) — fail
   // loud with `DialectError`, distinct from the "not yet implemented" gate below.
   validate(program);
@@ -155,6 +156,14 @@ export function lower(program: Program): HirModule {
   // (the emitter renders both as the bare name). They stay in `analysis.enums`
   // as well, so a member access `E.Variant` still lowers to a path, not a field.
   for (const e of analysis.enums) analysis.structs.add(e);
+  // TypeScript-checker-backed type oracle (series 082, spike #44). Built only
+  // when the caller threads the original source text; the struct set is complete
+  // here (enums merged), so a struct-typed Map key/elem resolves nominally. When
+  // absent, `collectionOf` falls back to the `bindingTypes` path alone (exactly
+  // pre-082 behavior), so every existing `lower(program)` call site is unchanged.
+  if (source !== undefined) {
+    analysis.typeOracle = createTypeOracle(source, analysis.structs);
+  }
   // Struct field types (series 032) — a pre-pass so a struct object literal can
   // recurse into a struct-typed field / array element wherever it appears.
   analysis.structFields = collectStructFields(normalized, analysis.structs);
@@ -3145,8 +3154,23 @@ function collectionOf(
   obj: Expression,
   analysis: ModuleAnalysis,
 ): RustType | null {
-  if (obj.type !== "Identifier") return null;
-  return analysis.bindingTypes.get((obj as Identifier).name) ?? null;
+  // Fast path (pre-082): a bare-identifier receiver resolved via the hand-rolled
+  // `bindingTypes` table. Kept primary so every receiver it already handles is
+  // byte-for-byte unchanged — the oracle never overrides a positive answer here.
+  if (obj.type === "Identifier") {
+    const bound = analysis.bindingTypes.get((obj as Identifier).name);
+    if (bound) return bound;
+  }
+  // Fallback (series 082, spike #44): any other receiver shape — `this.field`,
+  // `local.field`, a `getX()` call — that `bindingTypes` can't key on. The tsc
+  // oracle answers `getTypeAtLocation` for it and maps a `Map`/`Set` type to our
+  // `RustType`. Null (no oracle, or an unmodeled type) leaves the caller's
+  // fail-loud intact. Uses the oxc node's UTF-16 span (aligns with tsc natively).
+  const span = obj as unknown as { start?: number; end?: number };
+  if (analysis.typeOracle && span.start !== undefined && span.end !== undefined) {
+    return analysis.typeOracle.collectionAtSpan(span.start, span.end);
+  }
+  return null;
 }
 
 /** `&expr` — an explicit shared borrow at a call site (series 061). */

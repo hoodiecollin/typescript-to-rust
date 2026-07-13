@@ -141,8 +141,8 @@ function ridPath(callee: string): string {
  * Emit a complete Rust module for `program`.
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
  */
-export function emit(program: Program): string {
-  return emitModule(lower(program));
+export function emit(program: Program, source?: string): string {
+  return emitModule(lower(program, source));
 }
 
 /** Emit a complete Rust module from already-lowered HIR. */
