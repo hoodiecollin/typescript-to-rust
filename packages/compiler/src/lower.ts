@@ -182,6 +182,13 @@ export function lower(program: Program): HirModule {
         analysis.interfaceExtends.set(decl.id.name, baseName);
       }
     }
+    // Behavioral interface (series 071): ≥1 method signature → a synthesized
+    // `trait I<name>` carrying the method sigs (+ 059 getters for data fields).
+    const methodSigs = interfaceMethodSigs(decl, analysis.structs);
+    if (methodSigs.length > 0) {
+      analysis.behavioralInterfaces.add(decl.id.name);
+      analysis.interfaceMethods.set(decl.id.name, methodSigs);
+    }
   }
   // Error-class shapes (series 049b): validate each `class X extends Error` and
   // collect its ordered typed fields into `analysis.errorClasses`, *before* any
@@ -212,13 +219,13 @@ export function lower(program: Program): HirModule {
           : lowerFunction(stmt as FunctionDeclaration, analysis),
       );
     } else if (stmt.type === "TSInterfaceDeclaration") {
-      items.push(
-        lowerInterface(
-          stmt as TSInterfaceDeclaration,
-          analysis.structs,
-          analysis,
-        ),
+      const lowered = lowerInterface(
+        stmt as TSInterfaceDeclaration,
+        analysis.structs,
+        analysis,
       );
+      // A behavioral interface (series 071) lowers to no struct (trait only).
+      if (lowered) items.push(lowered);
     } else if (stmt.type === "TSEnumDeclaration") {
       items.push(lowerEnum(stmt as TSEnumDeclaration));
     } else if (stmt.type === "ClassDeclaration") {
@@ -2188,11 +2195,58 @@ function hirHasAwait(node: unknown): boolean {
  * series. Field types resolve through `structs` so a struct field may name
  * another declared interface (though no fixture exercises nesting yet).
  */
+/**
+ * Build the method signatures of a behavioral interface (series 071) as bodyless
+ * `HirFn`s (`recv: "ref"`). Reused for both the synthesized `trait I<name>` items
+ * and the per-class `impl` forwarders. Data (property) members are ignored here —
+ * they flow through `structFields` as by-value getters.
+ */
+function interfaceMethodSigs(
+  decl: TSInterfaceDeclaration,
+  structs: Set<string>,
+): HirFn[] {
+  const sigs: HirFn[] = [];
+  for (const m of decl.body.body as unknown as Array<{
+    type: string;
+    computed?: boolean;
+    key: { type?: string; name: string };
+    params?: unknown[];
+    returnType?: { typeAnnotation: TSType } | null;
+  }>) {
+    if (m.type !== "TSMethodSignature") continue;
+    if (m.computed || m.key.type !== "Identifier") {
+      throw new UnsupportedError({
+        type: "computed / non-identifier interface method signature",
+      });
+    }
+    const params = (m.params ?? []).map((p) =>
+      lowerParam(p as Identifier, undefined, structs),
+    );
+    const ret = m.returnType
+      ? lowerType(m.returnType.typeAnnotation, structs)
+      : UNIT;
+    sigs.push({
+      kind: "fn",
+      name: m.key.name,
+      isAsync: false,
+      params,
+      ret,
+      body: [],
+      recv: "ref",
+    });
+  }
+  return sigs;
+}
+
 function lowerInterface(
   decl: TSInterfaceDeclaration,
   structs: Set<string>,
   analysis: ModuleAnalysis,
-): HirStruct {
+): HirStruct | null {
+  // A behavioral/mixed interface (series 071) emits **no** struct — its values are
+  // backed by a concrete class; the `trait I<name>` is synthesized separately and
+  // its data fields (if any) become by-value getters on that trait.
+  if (analysis.behavioralInterfaces.has(decl.id.name)) return null;
   // Interface inheritance (series 059): flatten the base interface's fields into
   // this struct (so construction + Debug work), and record it so trait synthesis
   // gives it an `impl I<Base>`. Multi-level `extends` chains via `structFields`
@@ -2287,13 +2341,32 @@ function lowerClass(
   analysis: ModuleAnalysis,
 ): HirClass {
   if (!decl.id) throw new UnsupportedError({ type: "anonymous class" });
-  // `implements` / multiple inheritance stays fail-loud (INH16) — single-`extends`
-  // composition only.
-  if (decl.implements && decl.implements.length > 0) {
-    throw new UnsupportedError({
-      type: "class inheritance (implements / interface conformance)",
-    });
+  // Behavioral-interface conformance (series 071): `class C implements I`. A
+  // behavioral/mixed interface contributes an `impl I<I> for C` (method forwarders
+  // + 059 data-field getters); a data-only interface has no trait to bind → still
+  // fail-loud (a later resolution).
+  const interfaceImpls: NonNullable<HirClass["interfaceImpls"]> = [];
+  for (const h of (decl.implements ?? []) as Array<{
+    expression?: { type?: string; name?: string };
+  }>) {
+    const iname = h.expression?.name;
+    if (!iname || h.expression?.type !== "Identifier") {
+      throw new UnsupportedError({ type: "class implements a non-identifier" });
+    }
+    if (!analysis.behavioralInterfaces.has(iname)) {
+      throw new UnsupportedError({
+        type: `class implements '${iname}' (a data-only interface has no behavioral trait — deferred)`,
+      });
+    }
+    const methods = analysis.interfaceMethods.get(iname) ?? [];
+    const getters = (analysis.structFields.get(iname) ?? []).map((f) => ({
+      field: f.name,
+      ty: f.ty,
+    }));
+    interfaceImpls.push({ trait: traitNameOf(iname), methods, getters });
   }
+  const interfaceImplsOpt =
+    interfaceImpls.length > 0 ? interfaceImpls : undefined;
   const name = decl.id.name;
   const structs = analysis.structs;
   // Class inheritance (series 053). A subclass `class B extends A` gains a
@@ -2453,6 +2526,7 @@ function lowerClass(
       ctor,
       methods,
       dispose,
+      interfaceImpls: interfaceImplsOpt,
       statics: staticsOpt,
       staticConsts: staticConstsOpt,
     };
@@ -2470,6 +2544,7 @@ function lowerClass(
     base,
     implTrait,
     overrides,
+    interfaceImpls: interfaceImplsOpt,
     statics: staticsOpt,
     staticConsts: staticConstsOpt,
   };
@@ -2645,6 +2720,17 @@ function applyBaseParamTraits(
       p.ty =
         p.ty.kind === "ref" ? { ...p.ty, inner: traitTy } : traitTy;
       analysis.dynInterfaceBindings.set(p.name, base);
+    } else if (
+      inner.kind === "struct" &&
+      analysis.behavioralInterfaces.has(inner.name)
+    ) {
+      // Behavioral-interface param (series 071): `s: Shape` → `&impl IShape`; a
+      // `.method()` dispatches through the trait, a data-field read routes to the
+      // getter (like 059).
+      const base = inner.name;
+      const traitTy: RustType = { kind: "implTrait", trait: traitNameOf(base) };
+      p.ty = p.ty.kind === "ref" ? { ...p.ty, inner: traitTy } : traitTy;
+      analysis.dynInterfaceBindings.set(p.name, base);
     }
   }
 }
@@ -2770,6 +2856,23 @@ function synthesizeInterfaceTraits(
         (s.implTraits ??= []).push({ trait: traitName, getters });
       }
     }
+  }
+  // Behavioral interfaces (series 071): `trait I<name>` = method sigs + by-value
+  // getters for any data fields (mixed). The per-class `impl` blocks are attached
+  // in `lowerClass` (`interfaceImpls`), so only the trait item is emitted here.
+  for (const name of analysis.behavioralInterfaces) {
+    const methods = analysis.interfaceMethods.get(name) ?? [];
+    const getters = (analysis.structFields.get(name) ?? []).map((f) => ({
+      field: f.name,
+      ty: f.ty,
+    }));
+    traits.push({
+      kind: "trait",
+      name: traitNameOf(name),
+      methods,
+      accessors: [],
+      byValueAccessors: getters,
+    });
   }
   return traits;
 }

@@ -809,6 +809,19 @@ export interface HirClass {
    */
   accessors?: { field: string; ty: RustType; proj: HirExpr }[];
   /**
+   * Behavioral-interface conformance (series 071): `class C implements I` for a
+   * behavioral/mixed interface `I`. Each entry is emitted as a distinct
+   * `impl I<I> for C { <getters> <method forwarders> }` block — getters clone a
+   * data field (mixed interface), method forwarders call the class's inherent
+   * method (`fn m(&self) -> R { self.m(args) }`; inherent resolution wins, so no
+   * recursion). Distinct from the single 053 inheritance `implTrait`.
+   */
+  interfaceImpls?: {
+    trait: string;
+    methods: HirFn[];
+    getters: { field: string; ty: RustType }[];
+  }[];
+  /**
    * `static` methods (series 060) → associated `fn`s with no `self` receiver,
    * emitted in the inherent `impl`. A call site `Type.m(args)` → `Type::m(args)`.
    */

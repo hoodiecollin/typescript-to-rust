@@ -441,6 +441,29 @@ function emitClass(
         : `impl ${rid(c.implTrait)} for ${rid(c.name)} {\n${implBody}\n}`,
     );
   }
+  // Behavioral-interface conformance (series 071): one `impl I<I> for C` per
+  // implemented interface — data-field getters (clone) + method forwarders to the
+  // inherent method (`self.m(..)`; inherent resolution wins, so no recursion).
+  for (const it of c.interfaceImpls ?? []) {
+    const getters = it.getters.map((g) =>
+      indent(
+        `fn ${rid(g.field)}(&self) -> ${emitType(g.ty)} { self.${rid(g.field)}.clone() }`,
+      ),
+    );
+    const forwarders = it.methods.map((m) =>
+      indent(
+        `${emitFnSig(m)} { self.${rid(m.name)}(${m.params
+          .map((p) => rid(p.name))
+          .join(", ")}) }`,
+      ),
+    );
+    const implBody = [...getters, ...forwarders].join("\n");
+    parts.push(
+      implBody.length === 0
+        ? `impl ${rid(it.trait)} for ${rid(c.name)} {}`
+        : `impl ${rid(it.trait)} for ${rid(c.name)} {\n${implBody}\n}`,
+    );
+  }
   // A `[Symbol.dispose]` method → `impl Drop` (RAII for `using`, series 025).
   if (c.dispose) {
     const dropBody = c.dispose
