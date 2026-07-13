@@ -64,6 +64,9 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "TSInterfaceDeclaration",
   "TSInterfaceBody",
   "TSPropertySignature",
+  // Behavioral interface method signatures + `class C implements I` (series 071).
+  "TSMethodSignature",
+  "TSClassImplements",
   "ClassDeclaration",
   "ClassBody",
   "PropertyDefinition",

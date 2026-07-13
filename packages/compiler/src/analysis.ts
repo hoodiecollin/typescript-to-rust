@@ -252,6 +252,16 @@ export interface ModuleAnalysis {
   interfaceExtends: Map<string, string>;
   dynInterfaceBindings: Map<string, string>;
   /**
+   * Behavioral interfaces (series 071): interface names declaring ≥1 method
+   * signature → a synthesized `trait I<name>` (methods + 059 getters for any data
+   * fields). `interfaceMethods` holds each such interface's method signatures
+   * (bodyless `HirFn`s) for the trait item and the per-class `impl` forwarders.
+   * A behavioral interface emits **no** `struct` (its values are backed by a
+   * concrete class). Populated by `lower()`.
+   */
+  behavioralInterfaces: Set<string>;
+  interfaceMethods: Map<string, HirFn[]>;
+  /**
    * The top-level `fn`s synthesized by callback lifting (series 048), collected
    * during lowering and appended to the module's `items` before the refine passes.
    * Each is a `__cb_<method>_<n>` pure function whose params are the callback's own
@@ -1316,6 +1326,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     baseInterfaces: new Set(),
     interfaceExtends: new Map(),
     dynInterfaceBindings: new Map(),
+    behavioralInterfaces: new Set(),
+    interfaceMethods: new Map(),
     liftedFns: [],
     liftCounter: 0,
     superclass,
