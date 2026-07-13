@@ -156,6 +156,16 @@ Out of scope. #43 builds the trait **substrate**; runtime type discrimination (d
 Sequencing: (1) first (it is what #40 waits on), then (2), then (3). #40's `design.md` is
 written after (1) lands.
 
+> **Status — increment 1 SHIPPED (2026-07-11):** slices (1)+(2) landed together (slice 1
+> alone has no concrete satisfier → no runnable differential). Behavioral/mixed interface →
+> `trait I<Name>`; `class C implements I` → `impl I<Name> for C` (059 getters + method
+> forwarders); a param typed as the interface → `&impl I<Name>` with trait dispatch. Specs:
+> `specs.md` BINT1–BINT11 → `tests/behavioral-interface-traits.test.ts` (11 green, full
+> suite 684 pass / 0 fail). **#40 is now unblocked.** Remaining epic work: heterogeneous
+> collections → `Vec<Box<dyn I<Name>>>`; slice (3) object-literal struct synthesis +
+> capturing; `implements` of a pure-data interface. Incidental finding filed separately: a
+> pre-existing `String + String` concat gap for field/method-result operands.
+
 ## Specs sketch
 
 - `interface Shape { area(): number }` + `function f(s: Shape) { return s.area() }` with one
