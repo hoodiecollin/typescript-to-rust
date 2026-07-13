@@ -673,15 +673,37 @@ function mutableBindings(
 function mutatesThis(body: unknown): boolean {
   let mutates = false;
   walk(body, (n) => {
-    if (n.type !== "AssignmentExpression") return;
-    const left = n.left;
-    if (
-      isNode(left) &&
-      left.type === "MemberExpression" &&
-      isNode((left as AnyNode).object) &&
-      ((left as AnyNode).object as AnyNode).type === "ThisExpression"
-    ) {
-      mutates = true;
+    // A direct field write `this.x = …`.
+    if (n.type === "AssignmentExpression") {
+      const left = n.left;
+      if (
+        isNode(left) &&
+        left.type === "MemberExpression" &&
+        isNode((left as AnyNode).object) &&
+        ((left as AnyNode).object as AnyNode).type === "ThisExpression"
+      ) {
+        mutates = true;
+      }
+      return;
+    }
+    // A collection-mutating method call on a `this.field` receiver
+    // (`this.cache.set(…)`, `this.items.push(…)`, series 082): mutating a field
+    // through a method requires `&mut self`, exactly as a mutating call on a
+    // local binding marks that binding `mut` (`mutableBindings`). Syntactic and
+    // field-shape-only, matching that existing name-based treatment.
+    if (n.type === "CallExpression") {
+      const callee = (n as AnyNode).callee;
+      if (
+        isNode(callee) &&
+        callee.type === "MemberExpression" &&
+        isNode(callee.object) &&
+        callee.object.type === "MemberExpression" &&
+        isNode((callee.object as AnyNode).object) &&
+        ((callee.object as AnyNode).object as AnyNode).type === "ThisExpression"
+      ) {
+        const prop = identName(callee.property);
+        if (prop && MUTATING_METHODS.has(prop)) mutates = true;
+      }
     }
   });
   return mutates;
