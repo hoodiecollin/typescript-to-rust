@@ -897,6 +897,18 @@ function emitExpr(expr: HirExpr): string {
       }
       return `${left} ${op} ${emitOperand(expr.right, prec, "r")}`;
     }
+    case "strConcat": {
+      // String concatenation (series 080) → `format!("{}{}…", parts…)`. A string
+      // literal part renders as a bare `&str` (`"x"`, not `"x".to_string()`); every
+      // other part via `emitExpr`. `format!` borrows its args and coerces each via
+      // `Display`, so there is no `Add`/borrow/ownership reasoning and a number part
+      // coerces to its string form, matching JS.
+      const fmt = expr.parts.map(() => "{}").join("");
+      const args = expr.parts.map((p) =>
+        p.kind === "string" ? JSON.stringify(p.value) : emitExpr(p),
+      );
+      return `format!(${JSON.stringify(fmt)}, ${args.join(", ")})`;
+    }
     case "ushr":
       // JS `>>>` — logical (zero-fill) shift via an unsigned round-trip, count
       // masked to the `i128` width (series 056).

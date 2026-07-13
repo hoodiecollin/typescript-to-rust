@@ -4149,6 +4149,89 @@ function structTypeOfOperand(
   return null;
 }
 
+/**
+ * Is `e` provably a string (series 080)? Used to detect a string `+` concat. Only
+ * returns true when the type is known to be `String`; an unknown operand (e.g. a
+ * method call — no return-type table) returns false, so a numeric `+` is never
+ * misclassified. `string + anything` concatenates in JS, so one provable-string
+ * operand is sufficient to classify the whole `+`.
+ */
+function isStringExpr(e: Expression, analysis: ModuleAnalysis): boolean {
+  switch (e.type) {
+    case "Literal":
+      return typeof (e as Literal).value === "string";
+    case "TemplateLiteral":
+      return true;
+    case "Identifier":
+      return (
+        analysis.bindingTypes.get((e as Identifier).name)?.kind === "String"
+      );
+    case "MemberExpression": {
+      const m = e as MemberExpression;
+      if (m.computed) return false;
+      const field = (m.property as Identifier).name;
+      const owner = memberOwnerStruct(m.object, analysis);
+      if (!owner) return false;
+      const fty = analysis.structFields
+        .get(owner)
+        ?.find((f) => f.name === field)?.ty;
+      return fty?.kind === "String";
+    }
+    case "BinaryExpression": {
+      const b = e as { operator: string; left: Expression; right: Expression };
+      return (
+        b.operator === "+" &&
+        (isStringExpr(b.left, analysis) || isStringExpr(b.right, analysis))
+      );
+    }
+    default:
+      return false;
+  }
+}
+
+/** The struct name owning a member receiver: `this` → current class; a named binding → its struct type (series 080). */
+function memberOwnerStruct(
+  object: Expression,
+  analysis: ModuleAnalysis,
+): string | null {
+  if (object.type === "ThisExpression") return analysis.currentClass ?? null;
+  if (object.type === "Identifier") {
+    const t = analysis.bindingTypes.get((object as Identifier).name);
+    if (t?.kind === "struct" && analysis.structFields.has(t.name)) return t.name;
+  }
+  return null;
+}
+
+/** A `+` BinaryExpression that is a string concatenation (series 080). */
+function isStringConcat(
+  b: { operator: string; left: Expression; right: Expression },
+  analysis: ModuleAnalysis,
+): boolean {
+  return isStringExpr(b.left, analysis) || isStringExpr(b.right, analysis);
+}
+
+/**
+ * Flatten a string-concat `+` into ordered operand expressions (series 080).
+ * Descends only into `+` children that are *themselves* string concats, so a
+ * parenthesized numeric subtree (`"x" + (a + b)`) stays a single arithmetic part.
+ */
+function flattenConcat(e: Expression, analysis: ModuleAnalysis): Expression[] {
+  if (e.type === "BinaryExpression") {
+    const b = e as unknown as {
+      operator: string;
+      left: Expression;
+      right: Expression;
+    };
+    if (b.operator === "+" && isStringConcat(b, analysis)) {
+      return [
+        ...flattenConcat(b.left, analysis),
+        ...flattenConcat(b.right, analysis),
+      ];
+    }
+  }
+  return [e];
+}
+
 /** An `<array>.find(…)` call — the shipped 042d form the lowerer types `Option<T>` by construction. */
 function isArrayFindCall(e: Expression): boolean {
   return (
@@ -4688,6 +4771,18 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         throw new UnsupportedError({
           type: "`in` on a receiver that is not a Map/Record/Set binding",
         });
+      }
+      // String concatenation (series 080): a `+` with a provably-string operand
+      // is JS string concat (`string + anything` concatenates), lowered to
+      // `format!("{}{}…", …)`. Flattened over nested string-concat `+` so a chain
+      // is a single flat `format!`; a parenthesized numeric subtree stays one part.
+      if (b.operator === "+" && isStringConcat(b, analysis)) {
+        return {
+          kind: "strConcat",
+          parts: flattenConcat(expr, analysis).map((p) =>
+            lowerExpr(p, analysis),
+          ),
+        };
       }
       if (b.operator === "===" || b.operator === "!==") {
         const leftNullish = isNullishExpr(b.left);

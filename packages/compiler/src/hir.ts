@@ -168,6 +168,13 @@ export type HirExpr =
        */
       bitwise?: boolean;
     }
+  /**
+   * A string concatenation (series 080): a JS `+` with a provably-string operand,
+   * flattened into ordered `parts` and emitted as `format!("{}{}…", …)`. Sidesteps
+   * `String`'s `Add<&str>` borrow/ownership rules and coerces non-string parts
+   * (e.g. a number) via `Display`, matching JS's string coercion.
+   */
+  | { kind: "strConcat"; parts: HirExpr[] }
   /** A prefix unary: `-x` (negation), `!x` (logical not), or bitwise-NOT `!x`
    * (series 056, `~` in TS → `!` in Rust; `bitwise` set). */
   | { kind: "unary"; op: string; operand: HirExpr; bitwise?: boolean }
