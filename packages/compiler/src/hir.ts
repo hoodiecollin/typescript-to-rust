@@ -291,6 +291,32 @@ export type HirExpr =
   | { kind: "some"; value: HirExpr }
   /** `None` — an absent optional, from `undefined`/`null` (series 042). */
   | { kind: "none" }
+  /**
+   * `tslib::fmt_opt(&expr)` (series 066) — `console.log` render of an `Option<T>`:
+   * `Some(v)` → the `v` render, `None` → the literal `undefined`. Returns a
+   * `String`, so it drops into a `println!("{}", …)` slot.
+   */
+  | { kind: "optDisplay"; value: HirExpr }
+  /**
+   * `expr.unwrap()` (series 066) — the non-null assertion `x!` (design D). Explicit
+   * opt-in; panics on `None`, one step earlier than JS's `TypeError` at the access.
+   */
+  | { kind: "unwrapOpt"; value: HirExpr }
+  /**
+   * `tslib::is_truthy(&expr)` (series 066) — the shared JS-truthiness predicate
+   * (design E), used where a non-`bool` operand sits in a `bool` position: an
+   * `if (x)` / `while (x)` condition, or a `!x` operand. A `bool` operand is left
+   * native and never wrapped.
+   */
+  | { kind: "isTruthy"; value: HirExpr }
+  /**
+   * JS `a || b` / `a && b` returning the *operand value* (not a `bool`) under JS
+   * falsy semantics (series 066, design E): `{ let __t = a; if is_truthy(&__t)
+   * <keep> { __t } else { b } }`. `||` keeps the truthy operand; `&&` keeps the
+   * falsy operand / evaluates `b` when `a` is truthy. Only emitted when an operand
+   * is non-`bool` (bare-boolean `||`/`&&` stay native short-circuit `binary`).
+   */
+  | { kind: "truthyLogical"; op: "||" | "&&"; left: HirExpr; right: HirExpr }
   /** `Ok(value)` — the success arm of a `Result`. `null` value ⇒ `Ok(())`. */
   | { kind: "ok"; value: HirExpr | null }
   /** `expr?` — propagate a fallible call's error to the enclosing `Result`. */

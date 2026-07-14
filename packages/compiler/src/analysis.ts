@@ -301,6 +301,15 @@ export interface ModuleAnalysis {
    */
   bindingTypes: Map<string, RustType>;
   /**
+   * Names currently narrowed from `Option<T>` to their inner `T` (series 066).
+   * Inside an `if let Some(x) = x { … }` block, `x` is a plain `T`, so the
+   * arithmetic-on-optional fail-loud guard (and the print/truthiness Option paths)
+   * must not treat `x` as optional there. `lowerIf` adds the binding before
+   * lowering the some-body and removes it after (a stack discipline via the
+   * `Set`). Name-based, matching the rest of this intra-procedural analysis.
+   */
+  narrowedOptions: Set<string>;
+  /**
    * A TypeScript-checker-backed type resolver coupled to oxc (series 082,
    * spike #44), or null when `lower()` was called without source text. Consulted
    * by `collectionOf` as a fallback: when the hand-rolled `bindingTypes` lookup
@@ -542,7 +551,17 @@ function analyzeFunction(
   enums: ReadonlySet<string>,
   extendedBases: ReadonlySet<string> = new Set(),
 ): FnInfo {
-  const params = fn.params.map((p) => {
+  const params = fn.params.map((rawP) => {
+    // A default param `(x: T = d)` is an `AssignmentPattern` wrapping the real
+    // binding on `.left` (series 066). See through it for ownership/type analysis;
+    // it is `Option<T>` at the call boundary (a present arg `Some`-wrapped, an
+    // omitted one `None`), resolved by an `unwrap_or(d)` body prelude — so it is
+    // `optional` here for the call-site Some/None machinery.
+    const isDefault =
+      (rawP as { type?: string }).type === "AssignmentPattern";
+    const p = isDefault
+      ? ((rawP as unknown as { left: typeof rawP }).left)
+      : rawP;
     const isCopy = isCopyType(p.typeAnnotation, enums);
     // A base-typed param becomes `impl IA` (by value, series 053b/INH10), so it
     // must be passed owned — force `move` regardless of read-only use.
@@ -552,7 +571,7 @@ function analyzeFunction(
         name: p.name,
         ownership: "move" as const,
         isCopy: false,
-        optional: isOptionalParam(p),
+        optional: isDefault || isOptionalParam(p),
         annotation,
       };
     }
@@ -560,7 +579,7 @@ function analyzeFunction(
       name: p.name,
       ownership: classifyParam(p.name, fn.body, isCopy),
       isCopy,
-      optional: isOptionalParam(p),
+      optional: isDefault || isOptionalParam(p),
       annotation,
     };
   });
@@ -1511,6 +1530,10 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     bidirectionalGenerators: new Set(),
     // Filled in by `lower()` (needs `lowerType`); empty/zero here.
     bindingTypes: new Map(),
+    // Names currently narrowed to their inner `T` (series 066): inside an
+    // `if let Some(x)` block `x` is a plain `T`, not `Option<T>`, so the arithmetic
+    // fail-loud guard must skip it. Pushed/popped by `lowerIf` around the some-body.
+    narrowedOptions: new Set(),
     // Built by `lower()` only when source text is threaded in (series 082); null
     // otherwise, in which case `collectionOf` uses the `bindingTypes` path alone.
     typeOracle: null,

@@ -20,3 +20,4 @@ pub mod array;
 pub mod gen;
 pub mod json;
 pub mod string;
+pub mod truthy;

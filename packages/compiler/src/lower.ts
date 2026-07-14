@@ -381,6 +381,14 @@ export function lower(program: Program, source?: string): HirModule {
   // after the numeric/string/rc/arena refinements so the wrapped inner types are
   // final.
   const module: HirModule = { items, main, mainRet, mainAsync };
+  // Both-present divergence warning (series 066, design C): a union carrying *both*
+  // `null` and `undefined` collapses to one `Option::None`, but print / `===` /
+  // coercion semantics diverge from JS there. Non-fatal — recorded on the 056-style
+  // `warnings` channel, not fail-loud. A single-spelling union warns nothing.
+  {
+    const w = collectBothPresentWarnings(normalized);
+    if (w.length > 0) module.warnings = [...(module.warnings ?? []), ...w];
+  }
   // Series 062/069: escaping shared-mutable aliasing auto-promotes to `Rc<RefCell<T>>`
   // (surgical, per-binding), decoupled from the `"use rc"` directive. Series 068
   // (issue #35) folds one more edge into the same pass: a consuming (`fn m(self)`)
@@ -1319,11 +1327,17 @@ function lowerFunction(
   // The function name is its own scope key for mutability lookups. Leading
   // directives (`"use panic"`, 028a) are consumed here — panic semantics already
   // live in `analysis.panicScopes`; stripping keeps the string out of the body.
-  const body = lowerStatements(
-    takeDirectives(func.body.body, { panicAllowed: true }),
-    analysis,
-    name,
-  );
+  const body = [
+    ...defaultParamPreludes(
+      func.params as unknown as { type?: string }[],
+      analysis,
+    ),
+    ...lowerStatements(
+      takeDirectives(func.body.body, { panicAllowed: true }),
+      analysis,
+      name,
+    ),
+  ];
 
   // A fallible function (it throws, or calls something that throws) returns
   // `Result<ret, String>`: wrap its returns in `Ok`, keep its `throw`s as `Err`.
@@ -4493,6 +4507,25 @@ function lowerParam(
   info: { ownership: "move" | "ref" | "refMut" } | undefined,
   structs: Set<string>,
 ): HirParam {
+  // A default param `(x: T = d)` is an `AssignmentPattern` (series 066): type the
+  // param as `Option<T>` (a present arg is `Some`-wrapped at the call, an omitted
+  // one is `None`), and the body prepends `let x = x.unwrap_or(d);` — see
+  // `defaultParamPreludes`. Passed owned so `unwrap_or` can consume it.
+  if ((p as { type?: string }).type === "AssignmentPattern") {
+    const left = (p as unknown as { left: Identifier }).left;
+    if (!left.typeAnnotation) {
+      throw new UnsupportedError({
+        type: `default param '${left.name}' without a type annotation`,
+        start: left.start,
+      });
+    }
+    const inner = lowerType(
+      (left.typeAnnotation as TSTypeAnnotation).typeAnnotation,
+      structs,
+    );
+    const ty: RustType = inner.kind === "option" ? inner : { kind: "option", inner };
+    return { name: left.name, ty };
+  }
   // A destructuring param `({x, y}: Point)` (series 058) → a Rust struct-pattern
   // param `Point { x, y }: Point`. Requires a *named struct* type to pattern
   // against; taken owned (the borrow inference is name-based and can't see it).
@@ -4542,6 +4575,37 @@ function lowerDestructuringParam(
     ty,
     pat: `${ty.name} { ${fields.join(", ")} }`,
   };
+}
+
+/**
+ * The body prelude for default params (series 066): for each `(x: T = d)`
+ * `AssignmentPattern` param (typed `Option<T>` by `lowerParam`), a
+ * `let x = x.unwrap_or(d);` binding that resolves the `Option` to `T` at the head
+ * of the body — so the rest of the body sees a plain `T`. Non-default params emit
+ * nothing. Prepended before the lowered body statements.
+ */
+function defaultParamPreludes(
+  params: readonly { type?: string }[],
+  analysis: ModuleAnalysis,
+): HirStmt[] {
+  const out: HirStmt[] = [];
+  for (const raw of params) {
+    if (raw.type !== "AssignmentPattern") continue;
+    const ap = raw as unknown as { left: Identifier; right: Expression };
+    out.push({
+      kind: "let",
+      name: ap.left.name,
+      mut: false,
+      ty: null,
+      init: {
+        kind: "method",
+        receiver: { kind: "ident", name: ap.left.name },
+        name: "unwrap_or",
+        args: [lowerExpr(ap.right, analysis)],
+      },
+    });
+  }
+  return out;
 }
 
 function lowerScalarParam(
@@ -4648,40 +4712,59 @@ function lowerIf(
   analysis: ModuleAnalysis,
   scope: string,
 ): HirStmt {
+  // Truthiness narrowing (series 066, design E/TR7): a bare `if (opt)` over an
+  // `Option<T>` binding narrows on presence → `if let Some(opt) = opt { … }`
+  // (absence is falsy). This is the presence-narrowing analog of the explicit
+  // `!== undefined` form below; it makes the inner `T` usable in the `then` branch.
+  if (
+    stmt.test.type === "Identifier" &&
+    optionExprType(stmt.test, analysis)
+  ) {
+    const name = (stmt.test as Identifier).name;
+    return {
+      kind: "ifLet",
+      binding: name,
+      scrutinee: { kind: "ident", name },
+      someBody: lowerNarrowedBlock(name, stmt.consequent, analysis, scope),
+      noneBody: stmt.alternate
+        ? lowerBlock(stmt.alternate, analysis, scope)
+        : null,
+    };
+  }
   // Option narrowing (series 042c): `if (x !== undefined) { … }` →
   // `if let Some(x) = x { … }`, so `x` is the inner `T` inside the block. The
-  // `=== undefined` form narrows the *else* branch (branches swap).
+  // `=== undefined` form narrows the *else* branch (branches swap). Inside the
+  // some-body `x` is the narrowed `T` (series 066: skip the arithmetic guard).
   const narrow = optionNarrowTest(stmt.test);
   if (narrow) {
-    const conseq = lowerBlock(stmt.consequent, analysis, scope);
-    const alt = stmt.alternate
-      ? lowerBlock(stmt.alternate, analysis, scope)
-      : null;
     const scrutinee: HirExpr = { kind: "ident", name: narrow.name };
     if (narrow.op === "!==") {
       return {
         kind: "ifLet",
         binding: narrow.name,
         scrutinee,
-        someBody: conseq,
-        noneBody: alt,
+        someBody: lowerNarrowedBlock(narrow.name, stmt.consequent, analysis, scope),
+        noneBody: stmt.alternate
+          ? lowerBlock(stmt.alternate, analysis, scope)
+          : null,
       };
     }
     // `=== undefined`: the present-value branch is the `else`; narrow only when
     // it exists (a bare `if (x === undefined)` uses the `is_none()` condition).
-    if (alt) {
+    if (stmt.alternate) {
       return {
         kind: "ifLet",
         binding: narrow.name,
         scrutinee,
-        someBody: alt,
-        noneBody: conseq,
+        someBody: lowerNarrowedBlock(narrow.name, stmt.alternate, analysis, scope),
+        noneBody: lowerBlock(stmt.consequent, analysis, scope),
       };
     }
   }
   return {
     kind: "if",
-    cond: lowerExpr(stmt.test, analysis),
+    // A non-`bool` condition (`if (n)` / `if (s)`, series 066) uses JS truthiness.
+    cond: truthyCond(stmt.test, analysis),
     conseq: lowerBlock(stmt.consequent, analysis, scope),
     alt: lowerAlternate(stmt.alternate, analysis, scope),
   };
@@ -4697,13 +4780,22 @@ function optionNarrowTest(
 ): { name: string; op: "===" | "!==" } | null {
   if (test.type !== "BinaryExpression") return null;
   const b = test as { operator: string; left: Expression; right: Expression };
-  if (b.operator !== "===" && b.operator !== "!==") return null;
+  // `===`/`!==` (strict) and `==`/`!=` (loose — catches both `null` and `undefined`
+  // spellings, series 066/NR2) all narrow the same; loose folds to its strict twin.
+  const strict: Record<string, "===" | "!==" | undefined> = {
+    "===": "===",
+    "!==": "!==",
+    "==": "===",
+    "!=": "!==",
+  };
+  const op = strict[b.operator];
+  if (!op) return null;
   const leftNull = isNullishExpr(b.left);
   const rightNull = isNullishExpr(b.right);
   if (leftNull === rightNull) return null;
   const idExpr = leftNull ? b.right : b.left;
   if (idExpr.type !== "Identifier") return null;
-  return { name: (idExpr as Identifier).name, op: b.operator as "===" | "!==" };
+  return { name: (idExpr as Identifier).name, op };
 }
 
 /**
@@ -5365,6 +5457,126 @@ function sourceStructName(
     }
   }
   return null;
+}
+
+/**
+ * The `Option<T>` type of an expression when it is provably optional (series 066),
+ * else null. Resolves an identifier binding, an optional struct field, and the
+ * `?? ` / narrowing sites keep the inner `T`. Used to (a) render an `Option` print
+ * as `undefined`/`v`, (b) treat absence as falsy in truthiness, and (c) fail-loud
+ * on an un-narrowed optional in a value position. A non-provable operand returns
+ * null (the caller's default path), never a guess.
+ */
+function optionExprType(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): Extract<RustType, { kind: "option" }> | null {
+  if (e.type === "Identifier") {
+    const name = (e as Identifier).name;
+    // A name narrowed in an enclosing `if let Some(name)` block is a plain `T` here.
+    if (analysis.narrowedOptions.has(name)) return null;
+    const t = analysis.bindingTypes.get(name);
+    if (t?.kind === "option") return t;
+    return null;
+  }
+  if (e.type === "MemberExpression") {
+    const m = e as MemberExpression;
+    if (m.computed) return null;
+    const owner = memberOwnerStruct(m.object, analysis);
+    if (!owner) return null;
+    const field = (m.property as Identifier).name;
+    const fty = analysis.structFields
+      .get(owner)
+      ?.find((f) => f.name === field)?.ty;
+    return fty?.kind === "option" ? fty : null;
+  }
+  return null;
+}
+
+/**
+ * Lower a block with `name` marked narrowed-to-`T` (series 066): inside an
+ * `if let Some(name)` some-body, `name` is a plain `T`. Adds the name to
+ * `narrowedOptions` for the duration, restoring the prior state after (a shadowed
+ * outer optional of the same name is preserved).
+ */
+function lowerNarrowedBlock(
+  name: string,
+  block: Statement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt[] {
+  const had = analysis.narrowedOptions.has(name);
+  analysis.narrowedOptions.add(name);
+  try {
+    return lowerBlock(block, analysis, scope);
+  } finally {
+    if (!had) analysis.narrowedOptions.delete(name);
+  }
+}
+
+/**
+ * The scalar `RustType` kind of an operand when statically known (series 066):
+ * `bool` (literal / boolean binding), `f64`, `String`, or `option`. Null when the
+ * kind can't be resolved. Drives the truthiness decision — a `bool` operand stays
+ * native, a non-`bool` (or an `Option`) routes through `is_truthy`.
+ */
+function scalarKindOf(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): RustType["kind"] | null {
+  switch (e.type) {
+    case "Literal": {
+      const v = (e as Literal).value;
+      if (typeof v === "boolean") return "bool";
+      if (typeof v === "number") return "f64";
+      if (typeof v === "string") return "String";
+      return null;
+    }
+    case "TemplateLiteral":
+      return "String";
+    case "Identifier":
+      return analysis.bindingTypes.get((e as Identifier).name)?.kind ?? null;
+    case "MemberExpression": {
+      const opt = optionExprType(e, analysis);
+      if (opt) return "option";
+      if (isStringExpr(e, analysis)) return "String";
+      return null;
+    }
+    case "BinaryExpression": {
+      const op = (e as unknown as { operator: string }).operator;
+      if (["===", "!==", "==", "!=", "<", ">", "<=", ">=", "in"].includes(op))
+        return "bool";
+      if (op === "+" && isStringExpr(e, analysis)) return "String";
+      if (["-", "*", "/", "%"].includes(op)) return "f64";
+      return null;
+    }
+    case "LogicalExpression":
+      return null;
+    case "UnaryExpression":
+      return (e as unknown as { operator: string }).operator === "!"
+        ? "bool"
+        : "f64";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Does an operand need the JS-truthiness helper at a `bool` position (series 066)?
+ * A `bool`-typed operand stays native; a non-`bool` scalar / `Option` (a number,
+ * string, or optional in an `if`/`!`/`||`/`&&` position) routes through
+ * `is_truthy`. An *unknown* kind conservatively stays native (Rust will reject a
+ * genuine non-`bool` at cargo — fail-loud, never a silent miscompile).
+ */
+function needsTruthy(e: Expression, analysis: ModuleAnalysis): boolean {
+  const k = scalarKindOf(e, analysis);
+  return k !== null && k !== "bool";
+}
+
+/** Wrap a lowered condition operand in `is_truthy` when its source is non-`bool` (066). */
+function truthyCond(e: Expression, analysis: ModuleAnalysis): HirExpr {
+  const lowered = lowerExpr(e, analysis);
+  return needsTruthy(e, analysis) ? { kind: "isTruthy", value: lowered } : lowered;
 }
 
 /**
@@ -6213,6 +6425,20 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
           }
         }
       }
+      // Fail-loud (series 066, design F): an un-narrowed `Option<T>` in an
+      // arithmetic position (`optNum + 1`, `-`, `*`, `/`, `%`) has no `Add`/etc.
+      // impl — JS's `undefined + 1 == NaN` coercion is unreachable and not emitted.
+      // Point the user at `??` / narrow / `!`. (Equality/`in` against `null` was
+      // already handled above; string `+` concat took its own path.)
+      if (["+", "-", "*", "/", "%"].includes(b.operator)) {
+        for (const side of [b.left, b.right]) {
+          if (optionExprType(side, analysis)) {
+            throw new UnsupportedError({
+              type: `arithmetic on an un-narrowed optional — narrow it (\`if (x !== undefined)\`) or coerce (\`x ?? d\` / \`x!\`) first`,
+            });
+          }
+        }
+      }
       return {
         kind: "binary",
         op: b.operator,
@@ -6244,6 +6470,23 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         throw new UnsupportedError({
           type: `logical operator '${l.operator}'`,
         });
+      }
+      // JS `||`/`&&` return the operand *value* under full falsy semantics (series
+      // 066, design E): `x || d` yields `d` for a present falsy `x` (`0`/`""`/…),
+      // not just for absence. When either operand is a non-`bool` scalar / `Option`,
+      // route through the shared `is_truthy` helper (a value-returning block). Bare
+      // boolean logic (both operands `bool` / unknown) stays a native short-circuit
+      // `binary` — no helper, matching Rust's `&&`/`||`.
+      if (
+        needsTruthy(l.left, analysis) ||
+        needsTruthy(l.right, analysis)
+      ) {
+        return {
+          kind: "truthyLogical",
+          op: l.operator,
+          left: lowerExpr(l.left, analysis),
+          right: lowerExpr(l.right, analysis),
+        };
       }
       return {
         kind: "binary",
@@ -6280,11 +6523,28 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       if (u.operator !== "-" && u.operator !== "!" && u.operator !== "~") {
         throw new UnsupportedError({ type: `unary operator '${u.operator}'` });
       }
+      // `!x` on a non-`bool` operand (a number/string/`Option`, series 066) uses JS
+      // truthiness: `!x` is `!is_truthy(&x)`. A `bool` operand stays native `!`.
+      if (u.operator === "!" && needsTruthy(u.argument, analysis)) {
+        return {
+          kind: "unary",
+          op: "!",
+          operand: { kind: "isTruthy", value: lowerExpr(u.argument, analysis) },
+        };
+      }
       return {
         kind: "unary",
         op: u.operator,
         operand: lowerExpr(u.argument, analysis),
       };
+    }
+    case "TSNonNullExpression": {
+      // `x!` (series 066, design D) — explicit non-null assertion → `.unwrap()`.
+      // Panics on `None` a step earlier than JS's `TypeError` at the access; both
+      // blow up, so it is a faithful-enough mapping. Only meaningful on an optional
+      // receiver; a non-optional `x!` is a harmless no-op unwrap the type rejects.
+      const inner = (expr as unknown as { expression: Expression }).expression;
+      return { kind: "unwrapOpt", value: lowerExpr(inner, analysis) };
     }
     case "AssignmentExpression": {
       const a = expr as {
@@ -6323,6 +6583,25 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       // gap E). A numeric index is a `Vec` write and stays an index-assign.
       const insert = tryHashMapInsert(a, analysis);
       if (insert) return insert;
+      // Option coercion on reassignment (series 066): `x = v` where `x` is
+      // `Option<T>` `Some`-wraps a present value (`undefined`/`null` → `None`), so
+      // the slot stays `Option<T>`. Mirrors the let-init / field-init coercion.
+      if (
+        a.operator === "=" &&
+        a.left.type === "Identifier" &&
+        analysis.bindingTypes.get((a.left as Identifier).name)?.kind === "option" &&
+        !analysis.narrowedOptions.has((a.left as Identifier).name)
+      ) {
+        const value: HirExpr = isNullishExpr(a.right)
+          ? { kind: "none" }
+          : { kind: "some", value: lowerExpr(a.right, analysis) };
+        return {
+          kind: "assign",
+          op: "=",
+          target: lowerExpr(a.left, analysis),
+          value,
+        };
+      }
       return {
         kind: "assign",
         op: a.operator,
@@ -7048,11 +7327,18 @@ function lowerCall(
   ) {
     return lowerSetTimeout(call, analysis);
   }
-  // console.log(...) → println!
+  // console.log(...) → println!. An `Option<T>` argument (series 066) renders via
+  // `fmt_opt` — `Some(v)` → the `v` render, `None` → the literal `undefined` — since
+  // `Option` has no `Display`. Non-optional args pass through unchanged.
   if (isConsoleLog(call.callee)) {
     return {
       kind: "println",
-      args: call.arguments.map((a) => lowerExpr(a, analysis)),
+      args: call.arguments.map((a) => {
+        const lowered = lowerExpr(a, analysis);
+        return optionExprType(a, analysis)
+          ? { kind: "optDisplay", value: lowered }
+          : lowered;
+      }),
     };
   }
 
@@ -7081,6 +7367,21 @@ function lowerCall(
         continue;
       }
       if (!a) break; // a missing non-optional arg is a TS-invalid / cargo-loud arity error
+      // Fail-loud (series 066, design F): an un-narrowed `Option<T>` flowing into a
+      // `T`-expecting (non-optional) param has no coercion — narrow or default it
+      // first. Only when the callee's param is a known non-optional `T`; an unknown
+      // callee (no sig) takes the default path (cargo-loud if genuinely wrong).
+      if (
+        param &&
+        !param.optional &&
+        param.annotation &&
+        lowerType(param.annotation, analysis.structs).kind !== "option" &&
+        optionExprType(a, analysis)
+      ) {
+        throw new UnsupportedError({
+          type: `an un-narrowed optional passed where '${name}' expects a concrete value — narrow it (\`if (x !== undefined)\`) or coerce (\`x ?? d\` / \`x!\`) first`,
+        });
+      }
       let borrow: Borrow = "owned";
       if (param && !param.isCopy) {
         if (param.ownership === "ref") borrow = "ref";
@@ -8107,6 +8408,40 @@ function initType(e: Expression, analysis: ModuleAnalysis): RustType {
  * that fails to lower is skipped (best-effort) — the lift site fails loud if it
  * later needs a missing entry.
  */
+/**
+ * Scan for `T | null | undefined` unions (series 066, design C) — a type that
+ * carries *both* nullish spellings. Both collapse to one `Option::None`, so their
+ * erased JS distinction diverges at print / `===` / coercion. Returns one warning
+ * per such site (deduped by the emitter's `new Set(...)`). A single-spelling union
+ * (`T | undefined`) is unambiguous → no warning.
+ */
+function collectBothPresentWarnings(program: Program): string[] {
+  const out: string[] = [];
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(visit);
+      return;
+    }
+    if (!isAstNode(node)) return;
+    if (node.type === "TSUnionType") {
+      const types = (node as { types?: { type: string }[] }).types ?? [];
+      const hasNull = types.some((t) => t.type === "TSNullKeyword");
+      const hasUndef = types.some((t) => t.type === "TSUndefinedKeyword");
+      if (hasNull && hasUndef) {
+        out.push(
+          "a `T | null | undefined` union collapses both `null` and `undefined` to a single `Option::None`; print/`===`/coercion may diverge from JS at this site (066)",
+        );
+      }
+    }
+    for (const key in node) {
+      if (key === "type") continue;
+      visit(node[key]);
+    }
+  };
+  visit(program.body);
+  return out;
+}
+
 function collectBindingTypes(
   program: Program,
   structs: Set<string>,

@@ -95,6 +95,11 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "AwaitExpression",
   "ArrowFunctionExpression",
   "YieldExpression",
+  // Non-null assertion `x!` (series 066, design D) — lowered to `.unwrap()`.
+  "TSNonNullExpression",
+  // Default param `(x: T = d)` (series 066) — lowered to an `Option<T>` param plus
+  // an `unwrap_or(d)` body prelude.
+  "AssignmentPattern",
   // Optional chaining `a?.b` (series 042d) — lowered by `lowerChain`.
   "ChainExpression",
   // Array pattern — only `for (const [k, v] of Object.entries(m))` (series 043);

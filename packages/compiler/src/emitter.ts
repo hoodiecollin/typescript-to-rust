@@ -1580,6 +1580,25 @@ function emitExpr(expr: HirExpr): string {
       return `Some(${emitExpr(expr.value)})`;
     case "none":
       return "None";
+    case "optDisplay":
+      // `console.log` of an `Option<T>` (series 066): `Some(v)` → `v`'s render,
+      // `None` → the literal `undefined`.
+      return `tslib::truthy::fmt_opt(&${emitExpr(expr.value)})`;
+    case "unwrapOpt":
+      // `x!` (series 066) — explicit non-null assertion; panics on `None`.
+      return `${emitExpr(expr.value)}.unwrap()`;
+    case "isTruthy":
+      // JS-truthiness predicate at a `bool` position (`if (x)` / `!x`, series 066).
+      return `tslib::truthy::is_truthy(&${emitExpr(expr.value)})`;
+    case "truthyLogical": {
+      // JS `a || b` / `a && b` returning the operand *value* under falsy semantics
+      // (series 066). Bind the left once, then keep/replace by its truthiness.
+      const t = emitExpr(expr.left);
+      const r = emitExpr(expr.right);
+      return expr.op === "||"
+        ? `{ let __t = ${t}; if tslib::truthy::is_truthy(&__t) { __t } else { ${r} } }`
+        : `{ let __t = ${t}; if tslib::truthy::is_truthy(&__t) { ${r} } else { __t } }`;
+    }
     case "ok":
       return expr.value ? `Ok(${emitExpr(expr.value)})` : "Ok(())";
     case "try":
