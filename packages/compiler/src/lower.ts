@@ -1764,9 +1764,17 @@ function lowerTry(
       throw new UnsupportedError({ type: "try without a catch or finally" });
     }
     if (escapesClosure(rawTry, false)) {
-      throw new UnsupportedError({
-        type: "finally combined with an escaping return/break/continue (deferred to the carrier-enum follow-on)",
-      });
+      // series 073: a `finally` combined with an escaping jump lowers to a control
+      // carrier — the `finally` runs before the escape is replayed.
+      return buildCarrierTry(
+        rawTry,
+        null,
+        null,
+        finallyBody,
+        analysis,
+        scope,
+        errTy,
+      );
     }
     if (!analysis.fallible.has(scope)) {
       throw new UnsupportedError({
@@ -1793,9 +1801,18 @@ function lowerTry(
   const catchParamName = stmt.handler.param ? stmt.handler.param.name : null;
   if (escapesClosure(rawTry, false) || escapesClosure(catchBody, false)) {
     if (finallyBody) {
-      throw new UnsupportedError({
-        type: "finally combined with an escaping return/break/continue in try/catch (deferred to the carrier-enum follow-on)",
-      });
+      // series 073: finally + an escaping jump in try/catch → the control carrier
+      // (the `finally` runs once, before the escape is replayed).
+      return buildCarrierTry(
+        rawTry,
+        catchParamName,
+        catchBody,
+        finallyBody,
+        analysis,
+        scope,
+        errTy,
+        stmt.handler.body.body,
+      );
     }
     // A `catch` that fully handles the error may leave the fn *non*-fallible (the
     // error never propagates), so returns are `Ok`-wrapped only when the enclosing
@@ -1864,39 +1881,312 @@ function lowerTry(
 }
 
 /**
+ * Build a 073 `carrierTry` node for a `finally` combined with an escaping jump.
+ * The `try` (and `catch`) arms are rewritten so each escape records its intent and
+ * breaks to the wrapper label (`return v` → `Ctrl::Return(v)`, `break L`/`continue
+ * L` → `Ctrl::Break/Continue(target)`, `throw`/`?` → `Ctrl::Err`); the `finally`
+ * runs natively before the dispatch replays the recorded escape. `catchAst` is the
+ * raw catch handler body (for `instanceof`-ladder recognition), `null` for a
+ * `try`/`finally` with no handler.
+ */
+function buildCarrierTry(
+  rawTry: HirStmt[],
+  catchParamName: string | null,
+  catchBody: HirStmt[] | null,
+  finallyBody: HirStmt[],
+  analysis: ModuleAnalysis,
+  scope: string,
+  errTy: RustType,
+  catchAst?: Statement[],
+): HirStmt {
+  const label = `ctrl_${analysis.tryCounter++}`;
+  const fallible = analysis.fallible.has(scope);
+  const retTy = carrierReturnType(analysis, scope);
+
+  const collector: CarrierEscapes = {
+    hasReturn: false,
+    hasCarrierErr: false,
+    breakTargets: [],
+    continueTargets: [],
+  };
+  // The `try` arm's escapes always feed the carrier (`'<label>`). Its `?`/`throw`
+  // feed the carrier `Err` directly when there is *no* handler; with a handler,
+  // they route to an inner `'try_N` block (bare `Err`) so the `catch` sees them.
+  const innerTryLabel =
+    catchBody === null ? null : `try_${analysis.tryCounter++}`;
+  const tryErrLabel = innerTryLabel ?? label;
+  const tryBody = rewriteCarrierArm(rawTry, {
+    carrierLabel: label,
+    errLabel: tryErrLabel,
+    carrierErr: innerTryLabel === null,
+    insideLoop: false,
+    esc: collector,
+  });
+  // The `catch` arm's escapes *and* its `?`/`throw` (a rethrow alongside finally)
+  // both feed the carrier.
+  const catchOpts = {
+    carrierLabel: label,
+    errLabel: label,
+    carrierErr: true,
+    insideLoop: false,
+    esc: collector,
+  } as const;
+  const loweredCatch =
+    catchBody === null ? null : rewriteCarrierArm(catchBody, catchOpts);
+
+  // A discriminating `instanceof` ladder catch (049c) lowers to native `match`
+  // arms; its arm bodies carry escapes too, so rewrite them into the carrier.
+  const discriminant =
+    catchAst && catchParamName && analysis.errorClasses.size > 0
+      ? recognizeDiscriminant(catchAst, catchParamName, analysis, scope)?.map(
+          (arm) => ({
+            ...arm,
+            body: rewriteCarrierArm(arm.body, catchOpts),
+          }),
+        )
+      : undefined;
+
+  return {
+    kind: "carrierTry",
+    label,
+    innerTryLabel,
+    tryBody,
+    catchParam: catchParamName,
+    catchBody: loweredCatch,
+    finallyBody,
+    errTy,
+    retTy,
+    fallible,
+    hasReturn: collector.hasReturn,
+    // The `Ctrl::Err` variant / dispatch arm exists only when an error escapes the
+    // whole construct to the fn's `Result` — a carrier-level error in a *fallible*
+    // scope. A `catch` that fully handles the error leaves the scope non-fallible,
+    // so no `Err` propagates (and `return Err(..)` would not type-check).
+    hasErr: fallible && collector.hasCarrierErr,
+    breakTargets: collector.breakTargets,
+    continueTargets: collector.continueTargets,
+    // The wrapper falls through to `Ctrl::Normal` when a path can complete normally:
+    // the `try` completes (no handler / Ok path) or the `catch`/ladder arm does. If
+    // every path escapes, the fall-through is unreachable and `Normal` is elided.
+    tryFallsThrough:
+      !divergesFully(tryBody) ||
+      (loweredCatch !== null && !divergesFully(loweredCatch)) ||
+      (discriminant?.some((arm) => !divergesFully(arm.body)) ?? false),
+    // When the `finally` body itself unconditionally escapes, the native `finally`
+    // pre-empts the carrier and the dispatch is dead code — suppress it.
+    dispatchDead: divergesFully(finallyBody),
+    discriminant,
+  };
+}
+
+/** The enclosing fn's return **inner** type (the `Ctrl::Return(V)` payload). */
+function carrierReturnType(analysis: ModuleAnalysis, scope: string): RustType {
+  const retAnn = analysis.fns.get(scope)?.retAnn;
+  if (!retAnn) {
+    throw new UnsupportedError({
+      type: "finally + escape in a scope without a return-type annotation (carrier needs the return type)",
+    });
+  }
+  return lowerType(retAnn, analysis.structs);
+}
+
+/** Distinct escape targets accumulated while rewriting the carrier arms. */
+interface CarrierEscapes {
+  hasReturn: boolean;
+  /** A carrier-level error (`Ctrl::Err`) can escape the whole construct. */
+  hasCarrierErr: boolean;
+  breakTargets: (string | null)[];
+  continueTargets: (string | null)[];
+}
+
+/**
+ * Options for rewriting one carrier arm. `carrierLabel` is the wrapper block an
+ * escape (`return`/`break`/`continue`) records into; `errLabel` is the block a
+ * `?`/`throw` breaks (the carrier itself for the no-handler / catch arms →
+ * `Ctrl::Err`; or an inner `'try` block for a `try` arm *with* a handler →
+ * bare `Err`, so the `catch` sees it), selected by `carrierErr`.
+ */
+interface CarrierOpts {
+  carrierLabel: string;
+  errLabel: string;
+  carrierErr: boolean;
+  insideLoop: boolean;
+  esc: CarrierEscapes;
+}
+
+/**
+ * Rewrite one carrier arm (`try` or `catch`) so each escape that would leave the
+ * `try`/`catch` records its intent into the carrier and breaks to the wrapper:
+ *   - `return v` → `break '<carrier> Ctrl::Return(v)` (`return;` carries `null`);
+ *   - `break L`/`continue L` (not bound by a loop nested *inside* the arm) →
+ *     `break '<carrier> Ctrl::Break/Continue(target)`, `target` the label or `null`
+ *     for the nearest enclosing loop;
+ *   - `throw e`/`?` → `errLabel` (carrier `Err`, or the inner `'try` bare `Err`).
+ * A `break`/`continue` under a nested loop is that loop's own concern — left
+ * native (mirrors `escapesClosure`'s `insideLoop`). Descent stops at a nested
+ * `carrierTry`/`tryBlock`/`tryCatch`/`closure`/generator boundary.
+ */
+function rewriteCarrierArm(stmts: HirStmt[], opts: CarrierOpts): HirStmt[] {
+  return stmts.map((s) => rewriteCarrierStmt(s, opts));
+}
+
+function rewriteCarrierStmt(s: HirStmt, opts: CarrierOpts): HirStmt {
+  const { carrierLabel: label, errLabel, carrierErr, insideLoop, esc } = opts;
+  const inner = (loop: boolean): CarrierOpts =>
+    loop === insideLoop ? opts : { ...opts, insideLoop: loop };
+  switch (s.kind) {
+    case "return":
+      esc.hasReturn = true;
+      // A fallible call in the returned value (`return f()` where `f` throws) must
+      // record the error into the carrier (running `finally`), not `?`-propagate
+      // past it — retarget its `?`/`throw` before wrapping in `Ctrl::Return`.
+      if (carrierErr && s.value && hirHasThrowOrTry(s.value))
+        esc.hasCarrierErr = true;
+      return {
+        kind: "carrierBreak",
+        label,
+        ctrl: "Return",
+        value: s.value ? rewriteTryBreaks(s.value, errLabel, carrierErr) : null,
+      };
+    case "break":
+      if (insideLoop) return s; // bound by a loop nested in the arm — native
+      addTarget(esc.breakTargets, s.label ?? null);
+      return { kind: "carrierBreak", label, ctrl: "Break", target: s.label ?? null };
+    case "continue":
+      if (insideLoop) return s;
+      addTarget(esc.continueTargets, s.label ?? null);
+      return {
+        kind: "carrierBreak",
+        label,
+        ctrl: "Continue",
+        target: s.label ?? null,
+      };
+    case "throw":
+      // A non-panic `throw` records the error (carrier `Err`, or the inner `'try`
+      // bare `Err`); a `"use panic"` throw is a real abort (untouched).
+      if (s.panic) return s;
+      if (carrierErr) esc.hasCarrierErr = true; // an error escapes → Ctrl::Err
+      return carrierErr
+        ? { kind: "carrierErr", label: errLabel, value: s.value }
+        : { kind: "breakTry", label: errLabel, value: s.value };
+    case "if":
+      return {
+        kind: "if",
+        cond: s.cond,
+        conseq: rewriteCarrierArm(s.conseq, opts),
+        alt: s.alt ? rewriteCarrierArm(s.alt, opts) : null,
+      };
+    case "block":
+      return { ...s, body: rewriteCarrierArm(s.body, opts) };
+    case "match":
+      return {
+        kind: "match",
+        disc: s.disc,
+        arms: s.arms.map((a) => ({ ...a, body: rewriteCarrierArm(a.body, opts) })),
+      };
+    case "while":
+    case "forIn":
+    case "forRange":
+      return { ...s, body: rewriteCarrierArm(s.body, inner(true)) };
+    case "ifLet":
+      return {
+        ...s,
+        someBody: rewriteCarrierArm(s.someBody, opts),
+        noneBody: s.noneBody ? rewriteCarrierArm(s.noneBody, opts) : null,
+      };
+    case "carrierTry": {
+      // A nested carrier (series 073): its dispatch replays escapes into *this*
+      // (outer) carrier so the outer `finally` runs. Redirect its dispatch to the
+      // outer wrapper and fold its escape targets into the outer collector. Its own
+      // arms already carrier-encode against its own label — untouched. A nested
+      // break/continue under a loop nested in this arm stays that loop's concern.
+      if (s.hasReturn) esc.hasReturn = true;
+      // An inner carrier whose dispatch can re-record `Ctrl::Err` into this outer
+      // carrier needs the outer `Err` variant too.
+      if (s.hasErr) esc.hasCarrierErr = true;
+      if (!insideLoop) {
+        s.breakTargets.forEach((t) => addTarget(esc.breakTargets, t));
+        s.continueTargets.forEach((t) => addTarget(esc.continueTargets, t));
+      }
+      // The nested `finally` runs natively and may itself escape — carrier-encode it.
+      return {
+        ...s,
+        outerLabel: label,
+        finallyBody: rewriteCarrierArm(s.finallyBody, opts),
+      };
+    }
+    default:
+      // `let`/`expr`/`?`/nested try/closure/generator — the `?`/`throw` inside are
+      // retargeted (carrier `Err` or inner `'try` bare `Err`) by `rewriteTryBreaks`;
+      // a nested try/closure boundary is left to itself there. `carrierBreak`
+      // can't appear yet (rewrite runs once).
+      if (carrierErr && hirHasThrowOrTry(s)) esc.hasCarrierErr = true;
+      return rewriteTryBreaks(s, errLabel, carrierErr);
+  }
+}
+
+/** Add a distinct escape target (label string, or `null` for the nearest loop). */
+function addTarget(targets: (string | null)[], target: string | null): void {
+  if (!targets.some((t) => t === target)) targets.push(target);
+}
+
+/**
  * Rewrite a `tryBlock`'s `try` body (series 063): each `?` (`{kind:"try"}`) becomes
  * a `tryBreak` (`match … Err => break '<label>`), and each non-panic `throw` becomes
  * a `breakTry` (`break '<label> Err(…)`). Native `return`/`break`/`continue` are
  * left untouched — a labeled block is not a function boundary, so they escape the
  * enclosing fn/loop. Descent stops at a nested `tryCatch`/`tryBlock` (its `?`/throw
  * belong to its own label) and at an inline `closure` (its own boundary).
+ *
+ * `carrier` (series 073) retargets the error break to `Ctrl::Err(…)` — the `?`
+ * becomes `tryBreak{carrier}` and the `throw` becomes `carrierErr` — so a carrier
+ * arm's fallible ops feed the control carrier instead of a bare `Err`.
  */
-function rewriteTryBreaks<T>(node: T, label: string): T {
+function rewriteTryBreaks<T>(node: T, label: string, carrier = false): T {
   if (Array.isArray(node)) {
-    return node.map((n) => rewriteTryBreaks(n, label)) as unknown as T;
+    return node.map((n) => rewriteTryBreaks(n, label, carrier)) as unknown as T;
   }
   if (node && typeof node === "object") {
     const kind = (node as { kind?: string }).kind;
-    if (kind === "tryCatch" || kind === "tryBlock" || kind === "closure") {
+    if (
+      kind === "tryCatch" ||
+      kind === "tryBlock" ||
+      kind === "carrierTry" ||
+      kind === "closure"
+    ) {
       return node;
     }
     if (kind === "try") {
       return {
         kind: "tryBreak",
         label,
-        expr: rewriteTryBreaks((node as unknown as { expr: unknown }).expr, label),
+        expr: rewriteTryBreaks(
+          (node as unknown as { expr: unknown }).expr,
+          label,
+          carrier,
+        ),
+        ...(carrier ? { carrier: true } : {}),
       } as unknown as T;
     }
     if (kind === "throw" && !(node as { panic?: boolean }).panic) {
-      return {
-        kind: "breakTry",
+      const value = rewriteTryBreaks(
+        (node as unknown as { value: unknown }).value,
         label,
-        value: rewriteTryBreaks((node as unknown as { value: unknown }).value, label),
-      } as unknown as T;
+        carrier,
+      );
+      return (
+        carrier
+          ? { kind: "carrierErr", label, value }
+          : { kind: "breakTry", label, value }
+      ) as unknown as T;
     }
     const out: Record<string, unknown> = {};
     for (const key in node) {
-      out[key] = rewriteTryBreaks((node as Record<string, unknown>)[key], label);
+      out[key] = rewriteTryBreaks(
+        (node as Record<string, unknown>)[key],
+        label,
+        carrier,
+      );
     }
     return out as unknown as T;
   }
@@ -2084,6 +2374,16 @@ function escapesClosure(stmts: HirStmt[], insideLoop: boolean): boolean {
       case "forRange":
         if (escapesClosure(s.body, true)) return true;
         break;
+      case "carrierTry":
+        // A nested 073 carrier's dispatch replays its escape *in this context* — a
+        // `Return` re-escapes, and a `Break`/`Continue` re-escapes unless bound by a
+        // loop nested here. Its `finally` runs natively too, so a self-escaping
+        // `finally` escapes as well.
+        if (s.hasReturn) return true;
+        if (!insideLoop && (s.breakTargets.length > 0 || s.continueTargets.length > 0))
+          return true;
+        if (escapesClosure(s.finallyBody, insideLoop)) return true;
+        break;
     }
   }
   return false;
@@ -2146,6 +2446,9 @@ function diverges(stmts: HirStmt[]): boolean {
   const last = stmts[stmts.length - 1];
   if (!last) return false;
   if (last.kind === "return" || last.kind === "throw") return true;
+  // series 073: a `carrierTry` whose dispatch always escapes (`return`/`throw` or a
+  // self-escaping `finally`) diverges — no fall-through past it.
+  if (last.kind === "carrierTry") return last.dispatchDead || !last.tryFallsThrough;
   if (last.kind === "if" && last.alt) {
     return diverges(last.conseq) && diverges(last.alt);
   }
@@ -2166,10 +2469,17 @@ function divergesFully(stmts: HirStmt[]): boolean {
     last.kind === "throw" ||
     last.kind === "break" ||
     last.kind === "continue" ||
-    last.kind === "breakTry"
+    last.kind === "breakTry" ||
+    // series 073: a carrier escape (`break '<label> Ctrl::…`) diverges the block.
+    last.kind === "carrierBreak" ||
+    last.kind === "carrierErr"
   ) {
     return true;
   }
+  // series 073: a whole `carrierTry` diverges when its dispatch always escapes —
+  // the `try` can't fall through (no `Ctrl::Normal` arm) or a self-escaping
+  // `finally` pre-empted the dispatch entirely.
+  if (last.kind === "carrierTry") return last.dispatchDead || !last.tryFallsThrough;
   if (last.kind === "if" && last.alt) {
     return divergesFully(last.conseq) && divergesFully(last.alt);
   }

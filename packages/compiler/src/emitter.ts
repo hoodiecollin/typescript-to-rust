@@ -751,7 +751,210 @@ function emitStmt(stmt: HirStmt): string {
     }
     case "breakTry":
       return `break '${stmt.label} Err(${emitExpr(stmt.value)});`;
+    case "carrierTry":
+      return emitCarrierTry(stmt);
+    case "carrierBreak": {
+      // `break '<label> Ctrl_<label>::<Kind>(payload);`. Return carries the value
+      // (or `()` for `return;`); Break/Continue carry the `BreakTarget` variant.
+      const ctrl = ctrlName(stmt.label);
+      if (stmt.ctrl === "Return") {
+        const v = stmt.value ? emitExpr(stmt.value) : "()";
+        return `break '${stmt.label} ${ctrl}::Return(${v});`;
+      }
+      const target = breakTargetVariant(stmt.target ?? null);
+      return `break '${stmt.label} ${ctrl}::${stmt.ctrl}(${btName(stmt.label)}::${target});`;
+    }
+    case "carrierErr":
+      return `break '${stmt.label} ${ctrlName(stmt.label)}::Err(${emitExpr(stmt.value)});`;
   }
+}
+
+  }
+/** The 073 carrier `try`/`catch`/`finally` HIR node (narrowed for the emit). */
+type HirCarrierTry = Extract<HirStmt, { kind: "carrierTry" }>;
+
+/** The per-carrier control enum name (`Ctrl_<label>`) — distinct across nesting. */
+function ctrlName(label: string): string {
+  return `Ctrl_${label}`;
+}
+
+/** The per-carrier break/continue-target enum name (`BreakTarget_<label>`). */
+function btName(label: string): string {
+  return `BreakTarget_${label}`;
+}
+
+/** The `BreakTarget` enum variant for a break/continue target label. */
+function breakTargetVariant(target: string | null): string {
+  // A named loop label → its PascalCased identifier variant; the unlabeled
+  // nearest-loop target → `Nearest`.
+  return target === null ? "Nearest" : `L_${target}`;
+}
+
+/**
+ * Emit a 073 `carrierTry` — a `finally` combined with an escaping jump. Renders a
+ * local `enum Ctrl` (plus `BreakTarget` when break/continue escapes exist), a
+ * wrapper `'<label>` block that yields the recorded control carrier, the `finally`
+ * body natively, then a dispatch `match` that replays the escape. A self-escaping
+ * `finally` pre-empts the carrier (the `finally` runs first), so its dispatch is
+ * suppressed (`dispatchDead`).
+ */
+function emitCarrierTry(stmt: HirCarrierTry): string {
+  const errTy = emitType(stmt.errTy);
+  const retTy = emitType(stmt.retTy);
+  const lbl = `'${stmt.label}`;
+  const resVar = `__${stmt.label}`;
+  const ctrl = ctrlName(stmt.label);
+  const bt = btName(stmt.label);
+
+  // The `Ctrl` variants actually used: `Return`/`Err` when an escape returns or
+  // throws; `Break`/`Continue` per target set; `Normal` when the `try` can fall
+  // through. `#[allow(dead_code)]` guards the `Normal`-only / unused-payload cases.
+  const variants: string[] = [];
+  if (stmt.hasReturn) variants.push(`Return(${retTy})`);
+  if (stmt.hasErr) variants.push(`Err(${errTy})`);
+  if (stmt.breakTargets.length > 0) variants.push(`Break(${bt})`);
+  if (stmt.continueTargets.length > 0) variants.push(`Continue(${bt})`);
+  if (stmt.tryFallsThrough) variants.push("Normal");
+  const enumItem = `#[allow(dead_code)] enum ${ctrl} { ${variants.join(", ")} }`;
+
+  // `BreakTarget` — one variant per distinct break/continue target.
+  const targets = new Set<string | null>([
+    ...stmt.breakTargets,
+    ...stmt.continueTargets,
+  ]);
+  const breakTargetItem =
+    targets.size > 0
+      ? `enum ${bt} { ${[...targets]
+          .map((t) => breakTargetVariant(t))
+          .join(", ")} }`
+      : null;
+
+  // The wrapper block yields `Ctrl`. With a handler, an inner `'try` block yields
+  // `Result` (the `try` arm's `?`/`throw`), then a `match` runs the `catch`.
+  let inner: string;
+  if (stmt.catchBody === null && !stmt.discriminant) {
+    const body = stmt.tryBody.map(emitStmt).join("\n");
+    const tail = stmt.tryFallsThrough ? `\n${ctrl}::Normal` : "";
+    inner = `${lbl}: {\n${indent(`${body}${tail}`)}\n}`;
+  } else {
+    const innerLbl = `'${stmt.innerTryLabel}`;
+    const innerRes = `__${stmt.innerTryLabel}`;
+    const tryLines = stmt.tryBody.map(emitStmt).join("\n");
+    const innerBlock = `let ${innerRes}: Result<(), ${errTy}> = ${innerLbl}: {\n${indent(`${tryLines}\nOk(())`)}\n};`;
+    let matchStmt: string;
+    if (stmt.discriminant) {
+      const binder = stmt.catchParam ? rid(stmt.catchParam) : "e";
+      const arms = stmt.discriminant
+        .map((arm) => indent(indent(emitCatchArm(arm, binder))))
+        .join("\n");
+      matchStmt = [
+        `match ${innerRes} {`,
+        `${INDENT}Ok(_) => {}`,
+        `${INDENT}Err(${binder}) => {`,
+        `${INDENT}${INDENT}match ${binder} {`,
+        arms,
+        `${INDENT}${INDENT}}`,
+        `${INDENT}}`,
+        `}`,
+      ].join("\n");
+    } else {
+      const binder = stmt.catchParam ? rid(stmt.catchParam) : "_";
+      matchStmt = [
+        `match ${innerRes} {`,
+        `${INDENT}Ok(_) => {}`,
+        `${INDENT}Err(${binder}) => ${block(stmt.catchBody ?? [])}`,
+        `}`,
+      ].join("\n");
+    }
+    // Fall-through yields `Ctrl::Normal`; when neither arm can complete normally
+    // the tail is unreachable (both paths `break` the carrier) — `unreachable!()`
+    // so the block unifies to `Ctrl` rather than the match's `()`.
+    const tail = stmt.tryFallsThrough ? `\n${ctrl}::Normal` : "\nunreachable!()";
+    inner = `${lbl}: {\n${indent(`${innerBlock}\n${matchStmt}${tail}`)}\n}`;
+  }
+  const bind = `let ${resVar}: ${ctrl} = ${inner};`;
+
+  // The `finally` body runs natively, once, before the dispatch.
+  const fin = stmt.finallyBody.map(emitStmt).join("\n");
+
+  const parts: string[] = [enumItem];
+  if (breakTargetItem) parts.push(breakTargetItem);
+  parts.push(bind);
+  if (fin.length > 0) parts.push(fin);
+
+  // The dispatch replays the recorded escape (suppressed when a self-escaping
+  // `finally` already pre-empted it).
+  if (!stmt.dispatchDead) parts.push(emitCarrierDispatch(stmt, resVar));
+  return parts.join("\n");
+}
+
+/**
+ * The dispatch `match __ctrl { … }` that replays a recorded carrier escape. When
+ * `outerLabel` is set (a nested carrier), each escape is re-recorded into the outer
+ * carrier (`break '<outer> Ctrl::…`) so the outer `finally` still runs, rather than
+ * escaping natively.
+ */
+function emitCarrierDispatch(stmt: HirCarrierTry, resVar: string): string {
+  const outer = stmt.outerLabel ?? null;
+  const self = ctrlName(stmt.label);
+  const oc = outer ? ctrlName(outer) : "";
+  const obt = outer ? btName(outer) : "";
+  const arms: string[] = [];
+  if (stmt.hasReturn) {
+    // Outermost: `return` (Ok-wrapped iff fallible). Nested: re-record into the
+    // outer carrier so the outer finally runs before the eventual return.
+    const ret = outer
+      ? `break '${outer} ${oc}::Return(v)`
+      : stmt.fallible
+        ? "return Ok(v)"
+        : "return v";
+    arms.push(`${INDENT}${self}::Return(v) => ${ret},`);
+  }
+  if (stmt.hasErr) {
+    const err = outer ? `break '${outer} ${oc}::Err(e)` : "return Err(e)";
+    arms.push(`${INDENT}${self}::Err(e) => ${err},`);
+  }
+  const selfBt = btName(stmt.label);
+  if (stmt.breakTargets.length > 0) {
+    arms.push(
+      `${INDENT}${self}::Break(t) => ${replayTargets(stmt.breakTargets, "break", selfBt, outer, oc, obt)},`,
+    );
+  }
+  if (stmt.continueTargets.length > 0) {
+    arms.push(
+      `${INDENT}${self}::Continue(t) => ${replayTargets(stmt.continueTargets, "continue", selfBt, outer, oc, obt)},`,
+    );
+  }
+  if (stmt.tryFallsThrough) arms.push(`${INDENT}${self}::Normal => {}`);
+  return `match ${resVar} {\n${arms.join("\n")}\n}`;
+}
+
+/**
+ * `match t { BreakTarget::X => <jump>, … }` replaying a break/continue target.
+ * Outermost: a native `break 'x` / `break`. Nested (`outer` set): re-record into
+ * the outer carrier — `break '<outer> Ctrl::Break(BreakTarget::X)`.
+ */
+function replayTargets(
+  targets: (string | null)[],
+  kw: "break" | "continue",
+  selfBt: string,
+  outer: string | null,
+  outerCtrl: string,
+  outerBt: string,
+): string {
+  const ctrlKind = kw === "break" ? "Break" : "Continue";
+  const arms = targets
+    .map((t) => {
+      const variant = breakTargetVariant(t);
+      const jump = outer
+        ? `break '${outer} ${outerCtrl}::${ctrlKind}(${outerBt}::${variant})`
+        : t === null
+          ? `${kw}`
+          : `${kw} '${t}`;
+      return `${selfBt}::${variant} => ${jump},`;
+    })
+    .join(" ");
+  return `match t { ${arms} }`;
 }
 
 /**
@@ -1008,8 +1211,11 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.expr)}?`;
     case "tryBreak":
       // The `?` equivalent inside a `tryBlock` labeled block (063): unwrap `Ok`, or
-      // `break` the block with the error.
-      return `match ${emitExpr(expr.expr)} { Ok(__v) => __v, Err(__e) => break '${expr.label} Err(__e) }`;
+      // `break` the block with the error. Under a 073 carrier the error breaks with
+      // `Ctrl::Err(__e)` instead of a bare `Err(__e)`.
+      return expr.carrier
+        ? `match ${emitExpr(expr.expr)} { Ok(__v) => __v, Err(__e) => break '${expr.label} ${ctrlName(expr.label)}::Err(__e) }`
+        : `match ${emitExpr(expr.expr)} { Ok(__v) => __v, Err(__e) => break '${expr.label} Err(__e) }`;
     case "boxNew":
       return `Box::new(${emitExpr(expr.value)})`;
     case "await":

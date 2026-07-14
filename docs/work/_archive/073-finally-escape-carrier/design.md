@@ -1,12 +1,32 @@
 # 073 — `finally` + an escaping jump (carrier-enum, the 063 committed follow-on)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates 063's sole
-> deferred residual, issue **#31** — a **committed** follow-on (Collin uses
-> `try { return X } finally { F }` directly). Dialect call made with Collin 2026-07-10.
-> Reserved **strictly** to the `finally`+escape combination; the 063 labeled block stays
-> the path for everything else.
+> **Status: SHIPPED (2026-07-14).** Graduates 063's sole deferred residual, issue
+> **#31** — a **committed** follow-on (Collin uses `try { return X } finally { F }`
+> directly). Dialect call made with Collin 2026-07-10. Reserved **strictly** to the
+> `finally`+escape combination; the 063 labeled block stays the path for everything
+> else. Specs: `specs.md` → `packages/compiler/tests/value-yielding-try-finally.test.ts`.
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **Per-carrier enum names** (`Ctrl_<label>`, `BreakTarget_<label>`) instead of a
+>   bare `Ctrl` — nested carriers each declare their own local enum in the same fn
+>   body, so distinct names avoid the shadow/collision (a nested dispatch that
+>   re-records into the *outer* carrier references the outer's `Ctrl_<outerLabel>`).
+> - **`Return` vs `Err` variants gated separately.** `Return` is emitted when a
+>   `return` escapes; `Err` **only** when an error can escape the whole construct — a
+>   carrier-level `throw`/`?` in a *fallible* scope. A `catch` that fully handles the
+>   error leaves the fn non-fallible, so no `Err` variant / `return Err(..)` arm (that
+>   arm would not type-check against a plain return type).
+> - **No `V`-threading.** The `Return(V)` payload type comes from the enclosing fn's
+>   return annotation via `analysis.fns.get(scope).retAnn` → `lowerType` (a scope with
+>   no return annotation is fail-loud — the carrier can't name `V`).
+> - **Nesting** rewrites the inner carrier's *dispatch* (not its arms) to re-record
+>   into the outer via an `outerLabel` field — `F1` then `F2` run inner→outer, verified
+>   by CN1.
+> - `divergesFully`/`diverges` learned that a `carrierTry` diverges when its dispatch
+>   always escapes (`dispatchDead || !tryFallsThrough`), so a nested carrier that always
+>   returns elides the outer `Ctrl::Normal` arm (else the fn tail mis-types).
+>
+> Spec-first: this `design.md` → RED `specs.md` → impl → archive.
 
 ## Problem
 

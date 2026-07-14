@@ -77,12 +77,13 @@ describe("errors: try / catch / finally", () => {
   });
 });
 
-describe("errors: try / catch — remaining residual (fail-loud)", () => {
+describe("errors: try / catch — finally + escape (series 073 carrier)", () => {
   // Series 063 graduated the escaping / value-yielding `try`/`catch` (labeled
   // block) and `try`/`finally`-with-no-catch — see value-yielding-try.test.ts.
-  // The one temporarily-deferred combination is `finally` COMBINED WITH an
-  // escaping `return`/`break`/`continue` (the carrier-enum follow-on).
-  test("TRYX1 finally combined with an escaping return is rejected", () => {
+  // Series 073 then graduated the last combination — `finally` COMBINED WITH an
+  // escaping `return`/`break`/`continue` — to the control **carrier** (see
+  // value-yielding-try-finally.test.ts for the differential proof).
+  test("TRYX1 finally combined with an escaping return lowers to the carrier", () => {
     const src = `function risky(n: number): number {
   if (n < 0) { throw new Error("neg"); }
   return n;
@@ -90,6 +91,8 @@ describe("errors: try / catch — remaining residual (fail-loud)", () => {
 function f(n: number): number {
   try { return risky(n); } catch (e) { return 0; } finally { console.log("done"); }
 }`;
-    expect(() => compile(src)).toThrow(/finally|escap/i);
+    const rust = compile(src);
+    expect(rust).toContain("enum Ctrl");
+    expect(rust).toContain("'ctrl_0:");
   });
 });

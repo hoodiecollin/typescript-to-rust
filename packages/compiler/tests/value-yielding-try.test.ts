@@ -14,7 +14,6 @@ import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import { emit } from "../src/emitter";
-import { lower } from "../src/lower";
 import { runRust } from "../src/harness";
 
 function compile(src: string): string {
@@ -34,12 +33,6 @@ async function behaves(src: string, expected: string): Promise<void> {
   expect(rr.ok).toBe(true);
   expect(rr.stdout.trim()).toBe(runTs(src));
   expect(rr.stdout.trim()).toBe(expected);
-}
-
-function rejects(src: string, re: RegExp): void {
-  expect(() =>
-    lower(parseSync("t.ts", src).program as unknown as Program),
-  ).toThrow(re);
 }
 
 const RISKY = `function risky(n: number): number {
@@ -120,13 +113,14 @@ console.log(driver(4), driver(-1));`;
     await behaves(src, "8 -7");
   });
 
-  test("FL1 `finally` combined with an escaping return is fail-loud", () => {
-    rejects(
-      `${RISKY}function bad(n: number): number {
+  test("FL1 `finally` combined with an escaping return is now the 073 carrier", async () => {
+    // 063's sole deferred residual — graduated by series 073 to the control
+    // carrier (differential coverage lives in value-yielding-try-finally.test.ts).
+    const src = `${RISKY}function bad(n: number): number {
   try { return risky(n); } catch (e) { return 0; } finally { console.log("f"); }
 }
-console.log(bad(1));`,
-      /finally|escap/i,
-    );
+console.log(bad(1));`;
+    await behaves(src, "f\n2");
+    expect(compile(src)).toContain("enum Ctrl");
   });
 });

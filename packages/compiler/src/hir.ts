@@ -263,7 +263,7 @@ export type HirExpr =
    * 063) — the `?` equivalent inside a `tryBlock`'s labeled block, which cannot use
    * `?` (not a function boundary). Unwraps `Ok`, or breaks the block with the error.
    */
-  | { kind: "tryBreak"; label: string; expr: HirExpr }
+  | { kind: "tryBreak"; label: string; expr: HirExpr; carrier?: boolean }
   /** `Box::new(value)` — a heterogeneous collection element upcast to `Box<dyn IA>`
    * (series 053c). */
   | { kind: "boxNew"; value: HirExpr }
@@ -699,7 +699,95 @@ export type HirStmt =
    * `break '<label> Err(<value>);` (series 063) — a `throw` inside a `tryBlock`'s
    * `try` body exits the labeled block with the error instead of returning.
    */
-  | { kind: "breakTry"; label: string; value: HirExpr };
+  | { kind: "breakTry"; label: string; value: HirExpr }
+  /**
+   * `try`/`catch`/`finally` where an escaping jump (`return`/`break`/`continue`)
+   * co-occurs with a `finally` (series 073, the committed carrier follow-on to
+   * 063). A native escape would skip the trailing `finally`, but JS runs it — so
+   * this one construct lowers to a per-construct **control carrier**. Each escape
+   * in the arms records its intent and breaks to the wrapper label (`'<label>`);
+   * the `finally` body runs natively, once, after the wrapper block; then a
+   * dispatch `match` replays the recorded escape. A self-escaping `finally`
+   * pre-empts the pending action (it runs before the dispatch), matching JS.
+   * Emitted with a local `enum Ctrl` item (and a `BreakTarget` enum when
+   * break/continue escapes exist). Reserved strictly to finally+escape — every
+   * other try/catch shape stays on 063's `tryBlock`.
+   */
+  | {
+      kind: "carrierTry";
+      label: string;
+      /**
+       * With a `catch` handler, the `try` arm's `?`/`throw` break this inner
+       * `'try_N` block (bare `Err`) so the `catch` sees them; `null` for the
+       * no-handler shape (they break the carrier `'<label>` directly with `Err`).
+       */
+      innerTryLabel: string | null;
+      tryBody: HirStmt[];
+      catchParam: string | null;
+      /** `null` for `try`/`finally` with no handler. */
+      catchBody: HirStmt[] | null;
+      /** Always present (finally+escape is the whole point of this node). */
+      finallyBody: HirStmt[];
+      errTy: RustType;
+      /** The enclosing fn's return **inner** type — the `Return(V)` payload. */
+      retTy: RustType;
+      /** The `Return`/`Normal` dispatch arms `Ok`-wrap when the scope is fallible. */
+      fallible: boolean;
+      /** A `return` escape needs the `Return` variant / dispatch arm. */
+      hasReturn: boolean;
+      /**
+       * An error can escape the whole construct (a carrier-level `throw`/`?` in a
+       * *fallible* scope) → the `Ctrl::Err` variant / `return Err(..)` dispatch arm.
+       * A `catch` that fully handles the error leaves the scope non-fallible, so no
+       * `Err` propagates and this is false.
+       */
+      hasErr: boolean;
+      /** Distinct `break` targets (a label, or `null` for the nearest loop). */
+      breakTargets: (string | null)[];
+      /** Distinct `continue` targets (a label, or `null` for the nearest loop). */
+      continueTargets: (string | null)[];
+      /**
+       * The `try` body can complete normally (fall through to `Ctrl::Normal`); when
+       * every path escapes, the fall-through is unreachable and `Normal` is elided.
+       */
+      tryFallsThrough: boolean;
+      /**
+       * The `finally` body unconditionally escapes (a self-escaping `finally`), so
+       * the dispatch is dead code and is suppressed — the native `finally` already
+       * pre-empted the carrier.
+       */
+      dispatchDead: boolean;
+      /** A recognized `instanceof` ladder catch (049c), pre-lowered to match arms. */
+      discriminant?: HirCatchArm[];
+      /**
+       * Nesting (series 073): when this carrier sits inside an *outer* carrier arm,
+       * its dispatch replays each escape into the outer carrier's wrapper (`break
+       * '<outerLabel> Ctrl::…`) rather than natively — so the outer `finally` still
+       * runs. `null` for the outermost carrier (native dispatch).
+       */
+      outerLabel?: string | null;
+    }
+  /**
+   * An escape recorded into the 073 carrier — `break '<label> Ctrl::<Kind>(…);`.
+   * `return v` → `Ctrl::Return(v)`; `break L`/`continue L` → `Ctrl::Break(…)` /
+   * `Ctrl::Continue(…)` carrying the `BreakTarget` variant; a `throw`/`?` reuses
+   * `breakTry`'s `Ctrl::Err` shape via `carrierErr`.
+   */
+  | {
+      kind: "carrierBreak";
+      label: string;
+      ctrl: "Return" | "Break" | "Continue";
+      /** The `Return` payload (the returned value / `null` for `return;`). */
+      value?: HirExpr | null;
+      /** The `Break`/`Continue` target label (or `null` for the nearest loop). */
+      target?: string | null;
+    }
+  /**
+   * `break '<label> Ctrl::Err(<value>);` (series 073) — a `throw`/`?` inside a
+   * carrier `try`/`catch` records the error into the carrier instead of a bare
+   * `Err` (063's `breakTry`). Separate kind so `rewriteTryBreaks` targets it.
+   */
+  | { kind: "carrierErr"; label: string; value: HirExpr };
 
 /**
  * One arm of a discriminating `catch` → `match` (series 049c). A `variant` arm

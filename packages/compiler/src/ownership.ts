@@ -225,6 +225,12 @@ function collectLetTypes(body: HirStmt[], env: Map<string, RustType>): void {
         collectLetTypes(s.catchBody, env);
         if (s.finallyBody) collectLetTypes(s.finallyBody, env);
         break;
+      case "tryBlock":
+      case "carrierTry":
+        collectLetTypes(s.tryBody, env);
+        if (s.catchBody) collectLetTypes(s.catchBody, env);
+        if (s.finallyBody) collectLetTypes(s.finallyBody, env);
+        break;
     }
   }
 }
@@ -382,6 +388,26 @@ function transfer(
     case "breakTry": {
       map.set(s, liveAfter);
       return union(exprUses(s.value, movable), liveAfter);
+    }
+    case "carrierTry": {
+      // A 073 carrier try (finally+escape): same conservative shape as `tryBlock`
+      // — the try body can reach the catch, the finally, or an escaping jump.
+      map.set(s, liveAfter);
+      const finLive = liveInOfSeq(s.finallyBody, liveAfter, ctx, movable, map);
+      const catchIn = s.catchBody
+        ? liveInOfSeq(s.catchBody, finLive, ctx, movable, map)
+        : finLive;
+      return liveInOfSeq(s.tryBody, union(finLive, catchIn), ctx, movable, map);
+    }
+    case "carrierBreak": {
+      // A recorded carrier escape jumps to the wrapper block — nothing after it
+      // in the arm lives; the return payload's uses flow in.
+      map.set(s, new Set());
+      return s.value ? exprUses(s.value, movable) : new Set();
+    }
+    case "carrierErr": {
+      map.set(s, new Set());
+      return exprUses(s.value, movable);
     }
     // Generator state-machine stmts (052) never reach this pass — a `HirGenerator`
     // is its own item and the item loop above skips it (no `else` branch), and its
@@ -700,6 +726,12 @@ function placeStmt(s: HirStmt, ctx: PlaceCtx): void {
       placeSeq(s.catchBody, ctx);
       if (s.finallyBody) placeSeq(s.finallyBody, ctx);
       return;
+    case "tryBlock":
+    case "carrierTry":
+      placeSeq(s.tryBody, ctx);
+      if (s.catchBody) placeSeq(s.catchBody, ctx);
+      if (s.finallyBody) placeSeq(s.finallyBody, ctx);
+      return;
     // break / continue: no operands.
   }
 }
@@ -907,6 +939,12 @@ function collectLetBindings(
       case "tryCatch":
         collectLetBindings(s.tryBody, movable, structs);
         collectLetBindings(s.catchBody, movable, structs);
+        if (s.finallyBody) collectLetBindings(s.finallyBody, movable, structs);
+        break;
+      case "tryBlock":
+      case "carrierTry":
+        collectLetBindings(s.tryBody, movable, structs);
+        if (s.catchBody) collectLetBindings(s.catchBody, movable, structs);
         if (s.finallyBody) collectLetBindings(s.finallyBody, movable, structs);
         break;
     }
