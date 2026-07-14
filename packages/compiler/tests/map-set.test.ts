@@ -13,7 +13,6 @@ import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import { emit } from "../src/emitter";
-import { lower } from "../src/lower";
 import { runRust } from "../src/harness";
 
 function compile(src: string): string {
@@ -33,12 +32,6 @@ async function behaves(src: string, expected: string): Promise<void> {
   expect(rr.ok).toBe(true);
   expect(rr.stdout.trim()).toBe(runTs(src));
   expect(rr.stdout.trim()).toBe(expected);
-}
-
-function rejects(src: string, re: RegExp): void {
-  expect(() =>
-    lower(parseSync("t.ts", src).program as unknown as Program),
-  ).toThrow(re);
 }
 
 describe("061 Map / Set / record query ops", () => {
@@ -131,11 +124,14 @@ console.log((obj[k] ?? -1), (obj[miss] ?? -1));`;
     expect(compile(src)).toContain(".cloned()");
   });
 
-  test("FL1 a struct key with an `f64` field is fail-loud (own issue)", () => {
-    rejects(
-      `interface P { x: number; y: number; }
-const m: Map<P, string> = new Map<P, string>();`,
-      /f64|Hash|key/i,
-    );
+  test("FL1 a struct key with a direct `f64` field is now graduated (series 074)", () => {
+    // Was fail-loud in 061 (its own issue #30); series 074 synthesizes a
+    // SameValueZero key newtype instead. A struct key with an `f64` nested inside a
+    // *sub-struct* field stays fail-loud (074's interim residual, see F64K11).
+    const src = `interface P { x: number; y: number; }
+const m: Map<P, string> = new Map<P, string>();`;
+    const rust = compile(src);
+    expect(rust).toContain("struct PKey(P);");
+    expect(rust).toContain("IndexMap::<PKey, String>::new()");
   });
 });

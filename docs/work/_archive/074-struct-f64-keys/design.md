@@ -1,11 +1,42 @@
 # 074 — Struct keys with `f64` fields (newtype key + custom SameValueZero impls)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the 061 struct-key
-> `f64`-field residual, issue **#30**. Dialect calls made with Collin 2026-07-10
-> (the issue's `needs @hoodiecollin input` flag cleared). Builds on 061 (`OrderedFloat`
-> scalar keys), 047 (struct `===`), and `derives.ts`.
+> **Status: SHIPPED (2026-07-14).** Graduates the 061 struct-key `f64`-field
+> residual, issue **#30**. Dialect calls made with Collin 2026-07-10 (the issue's
+> `needs @hoodiecollin input` flag cleared). Builds on 061 (`OrderedFloat` scalar
+> keys), 047 (struct `===`), and `derives.ts`. Specs: `specs.md` →
+> `packages/compiler/tests/struct-f64-keys.test.ts` (F64K1–F64K11).
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **New `RustType` variant `{ kind: "structKey"; name }`** carries the newtype
+>   through `emitType` / `wrapKey` uniformly; a new `HirStructKey` item holds the
+>   synthesized `<Struct>Key(<Struct>)` + custom impls. Classification splits into
+>   `analysis.hashEqStructs` (061, no f64) vs `analysis.structKeyStructs` (074,
+>   direct f64) in `collectHashEqStructs`.
+> - **Retarget, don't rethread.** `lowerType`/`lowerMapKeyType` keep returning the
+>   plain `struct` (32+ callers, and the classification isn't known during
+>   `collectBindingTypes`). A `retargetStructKey` walk rewrites `struct → structKey`
+>   on `bindingTypes` (before body lowering, so `wrapKey` sees it), on the
+>   `mapNew`/`setNew` construction nodes, on each `let` binding annotation, and on
+>   item field / fn param+return types (a post-pass before the refine chain).
+> - **Lookup-key clone.** `insert`/`add` move the key (`PointKey(a)`; the ownership
+>   pass clones if live-after). `get`/`has`/`delete`/`in` build a throwaway
+>   `&PointKey(k)` — the ownership pass can't reach inside the `&`, so `wrapKey`
+>   clones an identifier key into the temporary (`&PointKey(k.clone())`; `forLookup`
+>   flag). The caller keeps ownership.
+> - **Iteration unwraps in the pattern**, no body rewrite: `for (PointKey(k), v) in
+>   m.iter()` (Map) / `for PointKey(k) in s.iter()` (Set) bind `k: &Struct` via
+>   Rust's ergonomic tuple-struct match, so `k.x` reads naturally.
+> - **Scope narrowed to *scalar* `f64` fields.** The design scoped in `f64` inside a
+>   `Vec`/`Option` directly on the key struct, but a single `OrderedFloat(<field>)`
+>   wrap is unsound for a collection field (you can't wrap a `Vec<f64>` in one
+>   `OrderedFloat` — it needs an element-wise wrap). Rather than emit miscompiling
+>   impls, this first slice restricts `isDirectF64Leaf` to a bare scalar `f64` and
+>   routes an `f64` reached through a `Vec`/`Option`/`set` (or a sub-struct) to
+>   **fail-loud** via `hasBuriedF64` (F64K12). The element-wise / nested wrap is the
+>   documented follow-up.
+> - **`derives.ts`** learns the `structKey` kind (Clone/Debug via the wrapped
+>   struct; custom PartialEq) so a struct holding a `Map<Point,V>` field still
+>   derives correctly.
 
 ## Problem
 
@@ -114,12 +145,15 @@ trigger (`emitter.ts:180`).
 
 ## Fail-loud residuals
 
-- **`f64` nested inside a *sub-struct* field of the key** — the sub-struct's own `PartialEq`
-  is `===`-faithful (NaN≠NaN), so the parent can't delegate to it; the newtype impl must
-  reach every nested `f64` leaf. First slice handles **direct** `f64` fields (and `f64` in a
-  `Vec`/`Option` directly on the key struct); a key struct with an `f64` **nested in another
-  struct field** stays fail-loud in the interim (recurse in a follow-up) — never a
-  miscompile.
+- **`f64` reached through a collection or sub-struct field of the key** — the newtype
+  impl wraps a *scalar* `f64` field in one `OrderedFloat(...)`; an `f64` inside a
+  `Vec`/`Option`/`set` needs an element-wise wrap, and one buried in a sub-struct
+  can't be reached through the sub-struct's own `===`-faithful (NaN≠NaN) `PartialEq`.
+  **As shipped**, the first slice handles **direct scalar** `f64` fields only; a key
+  struct with an `f64` inside a `Vec`/`Option`/`set` or a sub-struct field stays
+  fail-loud in the interim (`hasBuriedF64`, F64K12) — never a miscompile. (The
+  original design scoped `Vec`/`Option`-of-`f64` in; narrowed at impl — see the
+  status note.)
 - **`OrderedFloat` for a non-scalar exotic** (e.g. an `f64` map/set element that is itself a
   key) — governed by the same recursion boundary.
 - Everything 061/047 already reject downstream — unchanged.

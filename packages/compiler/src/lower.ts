@@ -76,6 +76,7 @@ import type {
   HirParam,
   HirStmt,
   HirStruct,
+  HirStructKey,
   HirTrait,
   MapBuildPart,
   RustType,
@@ -172,10 +173,25 @@ export function lower(program: Program, source?: string): HirModule {
   // and a receiver's element type. Needs `lowerType`, so it runs here, not in
   // `analyzeModule`.
   analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
-  // Struct `Map` keys / `Set` elements (series 061) derive `Hash, PartialEq, Eq`;
-  // a struct key with an `f64` field is fail-loud (its own issue). Needs the
-  // resolved map/set types (`bindingTypes`), so it runs here.
-  analysis.hashEqStructs = collectHashEqStructs(analysis);
+  // Struct `Map` keys / `Set` elements: an `f64`-free struct derives
+  // `Hash, PartialEq, Eq` (series 061); a struct with a *direct* `f64` field gets
+  // a synthesized SameValueZero key newtype (series 074); an `f64` nested in a
+  // sub-struct field is fail-loud. Needs the resolved map/set types
+  // (`bindingTypes`), so it runs here.
+  {
+    const { hashEq, structKey } = collectHashEqStructs(analysis);
+    analysis.hashEqStructs = hashEq;
+    analysis.structKeyStructs = structKey;
+    // Rewrite the resolved binding types (series 074): a `Map`/`Set` whose key /
+    // element is an f64-bearing key struct keys on the synthesized newtype, not
+    // the struct itself. Done before any body is lowered, so `collectionOf` →
+    // `wrapKey` sees `structKey` and wraps/unwraps at every boundary.
+    if (structKey.size > 0) {
+      for (const ty of analysis.bindingTypes.values()) {
+        retargetStructKey(ty, structKey);
+      }
+    }
+  }
   // `readonly` field names per struct (series 059) — assignment to one is a
   // `DialectError` (construction stays allowed).
   analysis.readonlyFields = collectReadonlyFields(normalized);
@@ -291,6 +307,18 @@ export function lower(program: Program, source?: string): HirModule {
   // `impl I<Base>`. Preserves TS subtype polymorphism (pass a `B` where an `A` is
   // expected, via `&impl IA`).
   items.push(...synthesizeInterfaceTraits(items, analysis));
+
+  // f64-bearing struct keys (series 074): synthesize a SameValueZero key newtype
+  // `<Struct>Key(<Struct>)` per distinct f64-bearing key struct, and retarget every
+  // remaining `Map`/`Set` key/element type on the items (struct fields, fn
+  // params/returns) to the newtype — the `mapNew`/`setNew` construction nodes and
+  // `bindingTypes` were already retargeted above.
+  if (analysis.structKeyStructs.size > 0) {
+    for (const name of analysis.structKeyStructs) {
+      items.push(synthesizeStructKey(name, analysis.structFields));
+    }
+    for (const item of items) retargetItemTypes(item, analysis.structKeyStructs);
+  }
 
   // Final gate steps: refine `number` → `usize` where indexing demands it, then
   // read-only `string` params (`&String`) → the idiomatic `&str`, then the
@@ -3489,14 +3517,82 @@ function refExpr(expr: HirExpr): HirExpr {
 }
 
 /**
- * Wrap a `Map` key / `Set` element for its Rust key type (series 061): a scalar
- * `number` key becomes `OrderedFloat(k)`; every other key is passed through.
+ * Wrap a `Map` key / `Set` element for its Rust key type: a scalar `number` key
+ * becomes `OrderedFloat(k)` (series 061); an f64-bearing struct key becomes
+ * `<Struct>Key(k)` (series 074, the SameValueZero newtype); every other key is
+ * passed through.
  */
-function wrapKey(expr: HirExpr, keyTy: RustType): HirExpr {
+function wrapKey(expr: HirExpr, keyTy: RustType, forLookup = false): HirExpr {
   if (keyTy.kind === "orderedFloat") {
     return { kind: "call", callee: "OrderedFloat", args: [{ borrow: "owned", expr }] };
   }
+  if (keyTy.kind === "structKey") {
+    // A *lookup* (`get`/`has`/`delete`/`in`) constructs a throwaway `&<Struct>Key`
+    // temporary (series 074). Building it moves the caller's key value, but the
+    // caller keeps ownership — so an identifier key is cloned into the temporary
+    // (the ownership pass can't reach inside the `&`). Insertion keys move (no
+    // clone), and the ownership pass clones those if live-after.
+    const inner: HirExpr =
+      forLookup && expr.kind === "ident"
+        ? { kind: "method", receiver: expr, name: "clone", args: [] }
+        : expr;
+    return {
+      kind: "call",
+      callee: structKeyName(keyTy.name),
+      args: [{ borrow: "owned", expr: inner }],
+    };
+  }
   return expr;
+}
+
+/** The synthesized SameValueZero key-newtype name for a struct (series 074). */
+function structKeyName(struct: string): string {
+  return `${struct}Key`;
+}
+
+/**
+ * Rewrite (in place) a `Map`/`Set` key/element `struct` type to its `structKey`
+ * newtype when the struct is f64-bearing (series 074). Recurses into nested
+ * collections/options so a `Map<Point, V[]>` value or an `Option<Map<Point,V>>`
+ * is retargeted too. Also handles the `mapNew`/`setNew` HIR construction nodes
+ * (same `key`/`value`/`elem` shape) so `new Map<Point,V>()` keys on the newtype.
+ */
+function retargetStructKey(node: unknown, structKeys: Set<string>): void {
+  if (node === null || typeof node !== "object") return;
+  switch ((node as { kind?: string }).kind) {
+    case "hashmap":
+    case "mapNew": {
+      const n = node as unknown as { key: RustType; value: RustType };
+      if (n.key.kind === "struct" && structKeys.has(n.key.name)) {
+        n.key = { kind: "structKey", name: n.key.name };
+      } else {
+        retargetStructKey(n.key, structKeys);
+      }
+      retargetStructKey(n.value, structKeys);
+      return;
+    }
+    case "set":
+    case "setNew": {
+      const n = node as unknown as { elem: RustType };
+      if (n.elem.kind === "struct" && structKeys.has(n.elem.name)) {
+        n.elem = { kind: "structKey", name: n.elem.name };
+      } else {
+        retargetStructKey(n.elem, structKeys);
+      }
+      return;
+    }
+    case "vec":
+      retargetStructKey((node as unknown as { elem: RustType }).elem, structKeys);
+      return;
+    case "option":
+      retargetStructKey(
+        (node as unknown as { inner: RustType }).inner,
+        structKeys,
+      );
+      return;
+    default:
+      return;
+  }
 }
 
 /**
@@ -3518,36 +3614,63 @@ function tryMapSetMethod(
   const receiver = lowerExpr(m.object, analysis);
   const args = call.arguments.map((a) => lowerExpr(a as Expression, analysis));
   if (ty.kind === "hashmap") {
+    // `insert` moves the key (the map owns it); `get`/`has`/`delete` build a
+    // throwaway `&<Struct>Key` temporary, so an f64-struct key is cloned into it
+    // (series 074; see `wrapKey`) — the caller keeps its value.
     const key = args[0] !== undefined ? wrapKey(args[0], ty.key) : undefined;
+    const lookupKey =
+      args[0] !== undefined ? wrapKey(args[0], ty.key, true) : undefined;
     if (methodName === "set" && args.length === 2 && key && args[1]) {
       return { kind: "method", receiver, name: "insert", args: [key, args[1]] };
     }
-    if (methodName === "get" && key) {
+    if (methodName === "get" && lookupKey) {
       return {
         kind: "method",
-        receiver: { kind: "method", receiver, name: "get", args: [refExpr(key)] },
+        receiver: {
+          kind: "method",
+          receiver,
+          name: "get",
+          args: [refExpr(lookupKey)],
+        },
         name: "cloned",
         args: [],
       };
     }
-    if (methodName === "has" && key) {
-      return { kind: "method", receiver, name: "contains_key", args: [refExpr(key)] };
+    if (methodName === "has" && lookupKey) {
+      return {
+        kind: "method",
+        receiver,
+        name: "contains_key",
+        args: [refExpr(lookupKey)],
+      };
     }
-    if (methodName === "delete" && key) {
-      return { kind: "method", receiver, name: "shift_remove", args: [refExpr(key)] };
+    if (methodName === "delete" && lookupKey) {
+      return {
+        kind: "method",
+        receiver,
+        name: "shift_remove",
+        args: [refExpr(lookupKey)],
+      };
     }
     return null;
   }
   // Set<T>
   const elem = args[0] !== undefined ? wrapKey(args[0], ty.elem) : undefined;
+  const lookupElem =
+    args[0] !== undefined ? wrapKey(args[0], ty.elem, true) : undefined;
   if (methodName === "add" && elem) {
     return { kind: "method", receiver, name: "insert", args: [elem] };
   }
-  if (methodName === "has" && elem) {
-    return { kind: "method", receiver, name: "contains", args: [refExpr(elem)] };
+  if (methodName === "has" && lookupElem) {
+    return { kind: "method", receiver, name: "contains", args: [refExpr(lookupElem)] };
   }
-  if (methodName === "delete" && elem) {
-    return { kind: "method", receiver, name: "shift_remove", args: [refExpr(elem)] };
+  if (methodName === "delete" && lookupElem) {
+    return {
+      kind: "method",
+      receiver,
+      name: "shift_remove",
+      args: [refExpr(lookupElem)],
+    };
   }
   return null;
 }
@@ -4105,9 +4228,17 @@ function lowerForOf(
     const target = isObjectEntriesCall(stmt.right)
       ? ((stmt.right as CallExpression).arguments[0] as Expression)
       : stmt.right;
+    // f64-bearing struct key (series 074): the map yields `(&<Struct>Key, &V)`, so
+    // destructure the newtype in the pattern — `for (<Struct>Key(k), v) in m.iter()`
+    // binds `k: &<Struct>`, unwrapping the key transparently for the body.
+    const keyTy = collectionOf(target, analysis);
+    const kPat =
+      keyTy?.kind === "hashmap" && keyTy.key.kind === "structKey"
+        ? `${structKeyName(keyTy.key.name)}(${k.name})`
+        : k.name;
     return {
       kind: "forIn",
-      pat: `(${k.name}, ${v.name})`,
+      pat: `(${kPat}, ${v.name})`,
       iter: {
         kind: "method",
         receiver: lowerExpr(target, analysis),
@@ -4182,9 +4313,16 @@ function lowerForOf(
     ) as string;
     analysis.dynBindings.set(decl.id.name, base);
   }
+  // f64-bearing struct-key `Set` (series 074): the set yields `&<Struct>Key`, so
+  // destructure the newtype — `for <Struct>Key(x) in s.iter()` binds `x: &<Struct>`.
+  const elemTy = collectionOf(stmt.right, analysis);
+  const pat =
+    elemTy?.kind === "set" && elemTy.elem.kind === "structKey"
+      ? `${structKeyName(elemTy.elem.name)}(${decl.id.name})`
+      : decl.id.name;
   return {
     kind: "forIn",
-    pat: decl.id.name,
+    pat,
     iter,
     body: lowerBlock(stmt.body, analysis, scope),
     label,
@@ -4484,6 +4622,26 @@ function structTypeOfOperand(
 }
 
 /**
+ * The named-struct type name of a destructuring source expression (series 067),
+ * or null when the source is not a known named struct. An identifier resolves
+ * through the 046/048 `bindingTypes` table (a `struct` present in `structFields`);
+ * anything else (a call, member access, anonymous shape) returns null → fail-loud
+ * at the caller. Mirrors the "named/statically-shaped only" boundary of 058/064.
+ */
+function sourceStructName(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): string | null {
+  if (e.type === "Identifier") {
+    const t = analysis.bindingTypes.get((e as Identifier).name);
+    if (t && t.kind === "struct" && analysis.structFields.has(t.name)) {
+      return t.name;
+    }
+  }
+  return null;
+}
+
+/**
  * Is `e` provably a string (series 080)? Used to detect a string `+` concat. Only
  * returns true when the type is known to be `String`; an unknown operand (e.g. a
  * method call — no return-type table) returns false, so a numeric `+` is never
@@ -4621,43 +4779,129 @@ function lowerVarDecl(
   const mutable = analysis.mut.get(scope);
   return decl.declarations.map((d) => {
     if (!d.init) throw new UnsupportedError({ type: "uninitialized binding" });
-    // Tuple-destructuring a fixed-arity `Promise.all` (series 051a): a
-    // `const [a, b] = await Promise.all([…])` binds the `join!`/`try_join!` tuple
-    // as `let (a, b) = …`. Only this combinator initializer is a valid array
-    // pattern in a plain binding — a general array destructure stays fail-loud.
+    // Array-pattern destructuring over a **fixed-arity tuple source** (series
+    // 051a `join!`, and series 067's exact-arity graduation): binds `let (a, b) =
+    // …`. Two tuple sources are accepted — a `join!`/`try_join!` tuple from
+    // `Promise.all`, and a fixed-arity array *literal* `[e0, e1]` (its element
+    // count is statically known, so it lowers to a Rust tuple `(e0, e1)`). A
+    // `Vec`/`Array`-typed source is fail-loud (out-of-bounds is `undefined` in JS
+    // but a panic in Rust — deferred to #42 / the `undefined` model).
     if ((d.id as { type: string }).type === "ArrayPattern") {
-      const init = lowerExpr(d.init, analysis);
-      if (!isJoinTuple(init)) {
-        throw new UnsupportedError({ type: "destructuring binding" });
-      }
       const pat = d.id as unknown as {
         elements?: ({ type: string; name?: string } | null)[];
       };
-      const names = (pat.elements ?? []).map((el) => {
-        if (!el || el.type !== "Identifier" || !el.name) {
+      const elements = pat.elements ?? [];
+      const names = elements.map((el) => {
+        if (!el || el.type === "RestElement") {
           throw new UnsupportedError({
-            type: "Promise.all tuple destructure must bind plain identifiers",
+            type: "array-destructuring rest element (`[a, ...rest]`)",
+          });
+        }
+        if (el.type !== "Identifier" || !el.name) {
+          throw new UnsupportedError({
+            type: "array-destructuring must bind plain identifiers",
           });
         }
         return el.name;
       });
+      const init = lowerExpr(d.init, analysis);
+      if (isJoinTuple(init)) {
+        return {
+          kind: "let",
+          name: names[0] as string,
+          mut: false,
+          ty: null,
+          init,
+          names,
+        };
+      }
+      // A fixed-arity array literal `[e0, e1]` typed as a tuple: bind
+      // `let (a, b) = (e0, e1);`, one element per pattern name (exact-arity).
+      if (d.init.type === "ArrayExpression") {
+        const lit = d.init as ArrayExpression;
+        const litElems = lit.elements;
+        if (litElems.some((e) => !e || e.type === "SpreadElement")) {
+          throw new UnsupportedError({
+            type: "array-destructuring over a spread/hole array literal",
+          });
+        }
+        if (litElems.length !== names.length) {
+          throw new UnsupportedError({
+            type: "array-destructuring arity mismatch (pattern length ≠ tuple length)",
+          });
+        }
+        return {
+          kind: "let",
+          name: names[0] as string,
+          mut: false,
+          ty: null,
+          init: {
+            kind: "tuple",
+            elems: litElems.map((e) => lowerExpr(e as Expression, analysis)),
+          },
+          names,
+        };
+      }
+      // Any other source (a `Vec`-typed identifier, a call, a member access):
+      // runtime length → an out-of-bounds slot is `undefined`, which the dialect
+      // has no model for yet. Fail-loud, pointing at #42 / series 066.
+      throw new UnsupportedError({
+        type: "array-destructuring over a Vec/Array source (out-of-bounds is `undefined`; deferred to #42)",
+      });
+    }
+    // Object-pattern destructuring over a **named-struct source** (series 067):
+    // `const { x, y } = point` → a Rust struct pattern `let Point { x, y } =
+    // point;`. Shorthand fields only (mirrors 064/058); a renamed/nested/rest
+    // field is fail-loud. The source's struct name is resolved from its known
+    // binding type; the ownership pass clones the source if it stays live.
+    if ((d.id as { type: string }).type === "ObjectPattern") {
+      const structName = sourceStructName(d.init, analysis);
+      if (!structName) {
+        throw new UnsupportedError({
+          type: "object-destructuring over a non-named-struct source",
+        });
+      }
+      const objPat = d.id as unknown as ObjectPattern;
+      const fields = objPat.properties.map((prop) => {
+        if ((prop as { type?: string }).type !== "Property") {
+          throw new UnsupportedError({
+            type: "object-destructuring rest element (`{ x, ...rest }`)",
+          });
+        }
+        const key = prop.key as unknown as { type: string; name?: string };
+        const value = prop.value as unknown as { type: string; name?: string };
+        if (
+          prop.computed ||
+          key.type !== "Identifier" ||
+          value.type !== "Identifier" ||
+          key.name !== value.name
+        ) {
+          throw new UnsupportedError({
+            type: "object-destructuring supports only shorthand field bindings (`{ x, y }`)",
+          });
+        }
+        return key.name as string;
+      });
       return {
         kind: "let",
-        name: names[0] as string,
+        name: fields[0] as string,
         mut: false,
         ty: null,
-        init,
-        names,
+        init: lowerExpr(d.init, analysis),
+        pat: `${structName} { ${fields.join(", ")} }`,
       };
     }
-    // Array/object destructuring in a plain binding is unsupported (only the
-    // `for (const [k, v] of Object.entries(…))` pattern is, via `lowerForOf`).
+    // Any other non-identifier binding target is unsupported.
     if ((d.id as { type: string }).type !== "Identifier") {
       throw new UnsupportedError({ type: "destructuring binding" });
     }
     const ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
+    // f64-bearing struct key (series 074): a `Map<Point,V>`/`Set<Point>` binding
+    // annotation keys on the `<Struct>Key` newtype, matching the retargeted
+    // `mapNew`/`setNew` init (else the annotation and turbofish disagree).
+    if (ty) retargetStructKey(ty, analysis.structKeyStructs);
     // An untyped binding is allowed only for a statically-obvious scalar or
     // homogeneous-scalar-array literal (series 046) — anything else (a user
     // call, arithmetic, `-5`, `null`/`undefined`, an identifier, a member
@@ -5091,7 +5335,7 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
             kind: "method",
             receiver: lowerExpr(b.right, analysis),
             name: "contains_key",
-            args: [refExpr(wrapKey(lowerExpr(b.left, analysis), ty.key))],
+            args: [refExpr(wrapKey(lowerExpr(b.left, analysis), ty.key, true))],
           };
         }
         if (ty?.kind === "set") {
@@ -5099,7 +5343,7 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
             kind: "method",
             receiver: lowerExpr(b.right, analysis),
             name: "contains",
-            args: [refExpr(wrapKey(lowerExpr(b.left, analysis), ty.elem))],
+            args: [refExpr(wrapKey(lowerExpr(b.left, analysis), ty.elem, true))],
           };
         }
         throw new UnsupportedError({
@@ -5195,7 +5439,7 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
               kind: "method",
               receiver: lowerExpr(mm.object, analysis),
               name: "shift_remove",
-              args: [refExpr(wrapKey(lowerExpr(mm.property, analysis), ty.key))],
+              args: [refExpr(wrapKey(lowerExpr(mm.property, analysis), ty.key, true))],
             };
           }
         }
@@ -7223,6 +7467,209 @@ function mapBuildParts(
   });
 }
 
+/**
+ * The `RustType` of a scalar literal in a key/element position (series 072). A
+ * `number` in a `Map`/`Set` *key* is `OrderedFloat`; a value `number` is `f64`
+ * (via `asKey`). Mirrors the 061 key policy so a literal-inferred type agrees with
+ * an explicit `<K,V>`. Non-scalar-literal elements (a nested struct literal, a
+ * call, …) are un-inferable here → fail-loud (write explicit type args).
+ */
+function scalarKeyElemType(e: Expression, asKey: boolean): RustType {
+  if (e.type === "Literal") {
+    const v = (e as Literal).value;
+    if (typeof v === "string") return { kind: "String" };
+    if (typeof v === "boolean") return { kind: "bool" };
+    if (typeof v === "number") return asKey ? { kind: "orderedFloat" } : { kind: "f64" };
+  }
+  throw new UnsupportedError({
+    type: "new Map/Set initializer element type is not a scalar literal (write explicit `<K, V>` / `<T>`)",
+  });
+}
+
+/**
+ * Lower `new Map()` / `new Map<K,V>()` / `new Map([...])` / `new Map(entries)`
+ * (series 061 empty + series 072 non-empty). Explicit `<K,V>` is honored; an
+ * un-annotated non-empty literal infers key/value from its first pair (Fork B).
+ * A literal array of `[k, v]` pairs emits `IndexMap::<K,V>::from([...])` with each
+ * key `wrapKey`-wrapped inline; an `Array<T>`-typed variable emits an
+ * `.into_iter()…collect()` (Fork A2). A tuple-array variable (`Array<[K,V]>`) is
+ * fail-loud — `TSTupleType` is outside the accepted dialect surface.
+ */
+function lowerMapNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
+  const targs = (expr as { typeArguments?: { params?: TSType[] } })
+    .typeArguments?.params;
+  const arg = expr.arguments[0] as Expression | undefined;
+
+  // Empty construction (series 061): explicit `<K,V>` required.
+  if (arg === undefined) {
+    const [k, v] = targs ?? [];
+    if (!k || !v) {
+      throw new UnsupportedError({
+        type: "new Map() without explicit type arguments (write `new Map<K, V>()`)",
+      });
+    }
+    const map: HirExpr = {
+      kind: "mapNew",
+      key: lowerMapKeyType(k, analysis.structs),
+      value: lowerType(v, analysis.structs),
+    };
+    // An f64-bearing struct key (series 074) keys on its `<Struct>Key` newtype.
+    retargetStructKey(map, analysis.structKeyStructs);
+    return map;
+  }
+
+  // Literal path: `new Map([[k, v], …])`. Key/value from `<K,V>` if written, else
+  // inferred from the first pair. Keys are wrapped inline (061 policy).
+  if (arg.type === "ArrayExpression") {
+    const pairs = (arg as ArrayExpression).elements;
+    let key: RustType;
+    let value: RustType;
+    if (targs?.[0] && targs?.[1]) {
+      key = lowerMapKeyType(targs[0], analysis.structs);
+      value = lowerType(targs[1], analysis.structs);
+    } else {
+      const first = pairs[0];
+      if (!first || first.type !== "ArrayExpression") {
+        throw new UnsupportedError({
+          type: "new Map([]) without explicit type arguments (element type un-inferable — write `new Map<K, V>()`)",
+        });
+      }
+      const [fk, fv] = (first as ArrayExpression).elements;
+      if (!fk || !fv) {
+        throw new UnsupportedError({
+          type: "new Map([...]) initializer pair is not a `[key, value]` literal",
+        });
+      }
+      key = scalarKeyElemType(fk as Expression, true);
+      value = scalarKeyElemType(fv as Expression, false);
+    }
+    const entries = pairs.map((p) => {
+      if (!p || p.type !== "ArrayExpression") {
+        throw new UnsupportedError({
+          type: "new Map([...]) initializer element is not a `[key, value]` pair literal",
+        });
+      }
+      const [k, v] = (p as ArrayExpression).elements;
+      if (!k || !v) {
+        throw new UnsupportedError({
+          type: "new Map([...]) initializer pair is not a `[key, value]` literal",
+        });
+      }
+      return {
+        key: wrapKey(lowerExpr(k as Expression, analysis), key),
+        value: lowerExpr(v as Expression, analysis),
+      };
+    });
+    const map: HirExpr = {
+      kind: "mapNew",
+      key,
+      value,
+      init: { kind: "literal", entries },
+    };
+    retargetStructKey(map, analysis.structKeyStructs);
+    return map;
+  }
+
+  // The Map variable path needs `Array<[K,V]>` element typing; `TSTupleType` is
+  // unmodeled dialect surface, so a variable/expression Map initializer stays
+  // fail-loud (the Set `Array<T>` variable path below succeeds). Also catches a
+  // non-array arg (another `Map`, `Object.entries()`, an iterator).
+  throw new UnsupportedError({
+    type: "new Map(<expr>) with a non-array-literal initializer (only `new Map([...])` is modeled; a tuple-array variable rides #37's open detail)",
+  });
+}
+
+/**
+ * Lower `new Set()` / `new Set<T>()` / `new Set([...])` / `new Set(items)` (series
+ * 061 empty + series 072 non-empty). Mirrors `lowerMapNew`: explicit `<T>` or
+ * first-element inference; a literal emits `IndexSet::<T>::from([...])` (elems
+ * `wrapKey`-wrapped inline); an `Array<T>`-typed variable emits
+ * `.into_iter()[.map(wrap)].collect::<IndexSet<T>>()`.
+ */
+function lowerSetNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
+  const targs = (expr as { typeArguments?: { params?: TSType[] } })
+    .typeArguments?.params;
+  const arg = expr.arguments[0] as Expression | undefined;
+
+  // Empty construction (series 061): explicit `<T>` required.
+  if (arg === undefined) {
+    const [e] = targs ?? [];
+    if (!e) {
+      throw new UnsupportedError({
+        type: "new Set() without an explicit type argument (write `new Set<T>()`)",
+      });
+    }
+    const set: HirExpr = { kind: "setNew", elem: lowerMapKeyType(e, analysis.structs) };
+    retargetStructKey(set, analysis.structKeyStructs);
+    return set;
+  }
+
+  // Literal path: `new Set([x, …])`. Element from `<T>` if written, else inferred
+  // from the first element; each element wrapped inline (061 policy).
+  if (arg.type === "ArrayExpression") {
+    const els = (arg as ArrayExpression).elements;
+    let elem: RustType;
+    if (targs?.[0]) {
+      elem = lowerMapKeyType(targs[0], analysis.structs);
+    } else {
+      const first = els[0];
+      if (!first) {
+        throw new UnsupportedError({
+          type: "new Set([]) without an explicit type argument (element type un-inferable — write `new Set<T>()`)",
+        });
+      }
+      elem = scalarKeyElemType(first as Expression, true);
+    }
+    const elems = els.map((x) => {
+      if (!x) {
+        throw new UnsupportedError({ type: "new Set([...]) with a hole element" });
+      }
+      return wrapKey(lowerExpr(x as Expression, analysis), elem);
+    });
+    const set: HirExpr = {
+      kind: "setNew",
+      elem,
+      init: { kind: "literal", elems },
+    };
+    retargetStructKey(set, analysis.structKeyStructs);
+    return set;
+  }
+
+  // Variable/array-expression path (Fork A2): `new Set(items)` where `items` is an
+  // `Array<T>` binding — `bindingTypes` types it as a `vec`, whose `elem` seeds the
+  // `IndexSet<T>`. A scalar-number elem is `OrderedFloat`-wrapped in a `.map`
+  // closure; every other elem collects directly. A non-array binding is fail-loud.
+  if (arg.type === "Identifier") {
+    const bound = analysis.bindingTypes.get((arg as Identifier).name);
+    if (bound?.kind === "vec") {
+      const elem = keyElemFromVecElem(bound.elem);
+      const set: HirExpr = {
+        kind: "setNew",
+        elem,
+        init: {
+          kind: "iter",
+          source: lowerExpr(arg, analysis),
+          wrapElem: elem.kind === "orderedFloat",
+        },
+      };
+      retargetStructKey(set, analysis.structKeyStructs);
+      return set;
+    }
+  }
+  throw new UnsupportedError({
+    type: "new Set(<expr>) with a non-array-literal / non-`Array<T>`-variable initializer",
+  });
+}
+
+/**
+ * A `Vec` element type reinterpreted as a `Set` element (series 072): a `Vec`
+ * value-position `f64` is a hashable-position `OrderedFloat` (the 061 key policy).
+ * Every other element type carries through unchanged.
+ */
+function keyElemFromVecElem(vecElem: RustType): RustType {
+  return vecElem.kind === "f64" ? { kind: "orderedFloat" } : vecElem;
+}
+
 /** `new C(args)` → `C::new(args)`. Constructor params are owned (args by value). */
 function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
   if (expr.callee.type !== "Identifier") {
@@ -7230,37 +7677,11 @@ function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
   }
   const className = (expr.callee as Identifier).name;
   // `new Map<K, V>()` / `new Set<T>()` (series 061) → an empty `IndexMap`/`IndexSet`
-  // with a turbofish so an un-annotated binding still infers. An initializer
-  // argument (`new Map([...])`) is out of scope (fail-loud, a later slice).
-  if (className === "Map" || className === "Set") {
-    if (expr.arguments.length > 0) {
-      throw new UnsupportedError({
-        type: `new ${className}(...) with an initializer argument (only empty construction is modeled)`,
-      });
-    }
-    const targs = (expr as { typeArguments?: { params?: TSType[] } })
-      .typeArguments?.params;
-    if (className === "Map") {
-      const [k, v] = targs ?? [];
-      if (!k || !v) {
-        throw new UnsupportedError({
-          type: "new Map() without explicit type arguments (write `new Map<K, V>()`)",
-        });
-      }
-      return {
-        kind: "mapNew",
-        key: lowerMapKeyType(k, analysis.structs),
-        value: lowerType(v, analysis.structs),
-      };
-    }
-    const [e] = targs ?? [];
-    if (!e) {
-      throw new UnsupportedError({
-        type: "new Set() without an explicit type argument (write `new Set<T>()`)",
-      });
-    }
-    return { kind: "setNew", elem: lowerMapKeyType(e, analysis.structs) };
-  }
+  // with a turbofish so an un-annotated binding still infers. A non-empty
+  // initializer (`new Map([...])` / `new Set(items)`, series 072) carries an
+  // `init` that emits `::from([...])` (literal) or `.into_iter()…collect()` (variable).
+  if (className === "Map") return lowerMapNew(expr, analysis);
+  if (className === "Set") return lowerSetNew(expr, analysis);
   const args: HirArg[] = expr.arguments.map((a) => ({
     borrow: "owned",
     expr: lowerExpr(a, analysis),
@@ -7303,7 +7724,7 @@ function lowerMember(
     // (proven-present record access, series 010). Maps are never `Vec`-indexed.
     const collTy = collectionOf(member.object, analysis);
     if (collTy?.kind === "hashmap" && member.property.type !== "Literal") {
-      const key = wrapKey(lowerExpr(member.property, analysis), collTy.key);
+      const key = wrapKey(lowerExpr(member.property, analysis), collTy.key, true);
       return {
         kind: "method",
         receiver: {
@@ -7535,6 +7956,104 @@ function lowerMapKeyType(ty: TSType, structs: Set<string>): RustType {
 }
 
 /**
+ * Is a field type a **direct scalar `f64`** on the key struct (series 074)? Only a
+ * bare `f64` — the newtype's custom impls wrap it in a single `OrderedFloat(...)`
+ * at hash/eq time. An `f64` inside a `Vec`/`Option`/`set`/sub-struct is NOT a plain
+ * scalar leaf: it needs an element-wise wrap this first slice does not emit, so
+ * `hasBuriedF64` catches it and the key struct stays **fail-loud** (follow-up).
+ */
+function isDirectF64Leaf(ty: RustType): boolean {
+  return ty.kind === "f64";
+}
+
+/**
+ * Does a field type hide an `f64` anywhere *except* as a direct scalar field
+ * (series 074)? An `f64` inside a `Vec`/`Option`/`set` (needs an element-wise
+ * OrderedFloat wrap) or buried in a *sub-struct* (the parent newtype can't reach it
+ * through the sub-struct's own `===`-faithful `PartialEq`). A key struct with one
+ * stays **fail-loud** in this first slice (recurse in a follow-up).
+ */
+function hasBuriedF64(
+  ty: RustType,
+  structFields: Map<string, { name: string; ty: RustType }[]>,
+  seen: Set<string> = new Set(),
+): boolean {
+  switch (ty.kind) {
+    case "f64":
+      // An `f64` reached *through* a collection/sub-struct — not a direct scalar.
+      return seen.size > 0;
+    case "vec":
+      return hasBuriedF64(ty.elem, structFields, addSeen(seen, "vec"));
+    case "option":
+      return hasBuriedF64(ty.inner, structFields, addSeen(seen, "option"));
+    case "set":
+      return hasBuriedF64(ty.elem, structFields, addSeen(seen, "set"));
+    case "struct": {
+      if (seen.has(ty.name)) return false;
+      const fields = structFields.get(ty.name);
+      if (!fields) return false;
+      const next = new Set(seen).add(ty.name);
+      return fields.some((f) => hasBuriedF64(f.ty, structFields, next));
+    }
+    default:
+      return false;
+  }
+}
+
+/** A `seen` set marked non-empty (so a reached `f64` counts as "buried"). */
+function addSeen(seen: Set<string>, tag: string): Set<string> {
+  return new Set(seen).add(`${tag}#${seen.size}`);
+}
+
+/**
+ * Synthesize the SameValueZero key newtype item `<Struct>Key(<Struct>)` for an
+ * f64-bearing key struct (series 074). Records each wrapped field's `f64`-leaf
+ * flag so the emitter wraps `f64` leaves in `OrderedFloat` at hash/eq time and
+ * compares/hashes the rest with plain `==`/`.hash()`.
+ */
+function synthesizeStructKey(
+  struct: string,
+  structFields: Map<string, { name: string; ty: RustType }[]>,
+): HirStructKey {
+  const fields = (structFields.get(struct) ?? []).map((f) => ({
+    name: f.name,
+    f64: isDirectF64Leaf(f.ty),
+  }));
+  return { kind: "structKey", name: structKeyName(struct), struct, fields };
+}
+
+/**
+ * Retarget every `Map`/`Set` key/element type carried on an item (series 074) —
+ * struct/class field types and fn param/return types — to the `structKey`
+ * newtype when the key struct is f64-bearing.
+ */
+function retargetItemTypes(item: HirItem, structKeys: Set<string>): void {
+  const fn = (f: HirFn): void => {
+    for (const p of f.params) retargetStructKey(p.ty, structKeys);
+    retargetStructKey(f.ret, structKeys);
+  };
+  switch (item.kind) {
+    case "struct":
+    case "class":
+      for (const field of item.fields) retargetStructKey(field.ty, structKeys);
+      if (item.kind === "class") {
+        if (item.ctor) fn(item.ctor);
+        for (const m of item.methods) fn(m);
+        for (const s of item.statics ?? []) fn(s);
+      }
+      return;
+    case "fn":
+      fn(item);
+      return;
+    case "trait":
+      for (const m of item.methods) fn(m);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
  * Is a type `Hash + Eq` eligible (a valid `Map` key / `Set` element)? Scalars
  * except `f64` are; `OrderedFloat` is; a struct is iff every field is (recursed).
  * An `f64` (a raw number field) is **not** — a struct with one is fail-loud.
@@ -7570,28 +8089,54 @@ function isTypeHashEq(
 
 /**
  * Scan the resolved `bindingTypes` for struct `Map` keys / `Set` elements and
- * return their names — the structs that must derive `Hash, PartialEq, Eq`
- * (series 061). A struct key/element with an `f64` field is **fail-loud** (its
- * own standalone issue: the dual-representation conflict), raised here.
+ * classify each (series 061 + 074), populating `analysis.hashEqStructs` and
+ * `analysis.structKeyStructs`:
+ *
+ *  - **no `f64` anywhere** (`isTypeHashEq`) → the 061 path: derive
+ *    `Hash, PartialEq, Eq` on the struct, key type = the struct itself.
+ *  - **a *direct scalar* `f64` field** (`isDirectF64Leaf`, no `f64` buried in a
+ *    collection or sub-struct) → the 074 path: a synthesized SameValueZero key
+ *    newtype `<name>Key(<name>)`, key type = the newtype.
+ *  - **an `f64` inside a `Vec`/`Option`/`set` or a sub-struct field**
+ *    (`hasBuriedF64`) → **fail-loud** (needs an element-wise / nested wrap this
+ *    slice doesn't emit; a follow-up recurses).
  */
-function collectHashEqStructs(
-  analysis: ModuleAnalysis,
-): Set<string> {
-  const out = new Set<string>();
+function collectHashEqStructs(analysis: ModuleAnalysis): {
+  hashEq: Set<string>;
+  structKey: Set<string>;
+} {
+  const hashEq = new Set<string>();
+  const structKey = new Set<string>();
   const consider = (ty: RustType): void => {
     if (ty.kind !== "struct") return;
-    if (!isTypeHashEq(ty, analysis.structFields)) {
+    if (isTypeHashEq(ty, analysis.structFields)) {
+      hashEq.add(ty.name);
+      return;
+    }
+    const fields = analysis.structFields.get(ty.name) ?? [];
+    // An `f64` buried in a `Vec`/`Option`/`set` or a sub-struct field is out of
+    // this first slice's reach (needs an element-wise / nested wrap) — fail-loud.
+    if (fields.some((f) => hasBuriedF64(f.ty, analysis.structFields))) {
       throw new UnsupportedError({
-        type: `struct '${ty.name}' used as a Map key / Set element has a non-Hash+Eq (f64) field — its own issue`,
+        type: `struct '${ty.name}' used as a Map key / Set element has an f64 nested inside a collection or sub-struct field — fail-loud (follow-up)`,
       });
     }
-    out.add(ty.name);
+    // A direct scalar `f64` field → the 074 SameValueZero key newtype.
+    if (fields.some((f) => isDirectF64Leaf(f.ty))) {
+      structKey.add(ty.name);
+      return;
+    }
+    // No `f64` reachable, yet not `Hash+Eq` eligible (an `fnPtr` field, …) — the
+    // 061 non-hashable-key rejection stands.
+    throw new UnsupportedError({
+      type: `struct '${ty.name}' used as a Map key / Set element has a non-Hash+Eq field`,
+    });
   };
   for (const ty of analysis.bindingTypes.values()) {
     if (ty.kind === "hashmap") consider(ty.key);
     if (ty.kind === "set") consider(ty.elem);
   }
-  return out;
+  return { hashEq, structKey };
 }
 
 function lowerType(ty: TSType, structs: Set<string>): RustType {

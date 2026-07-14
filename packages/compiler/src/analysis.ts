@@ -106,6 +106,15 @@ export interface ModuleAnalysis {
    */
   hashEqStructs: Set<string>;
   /**
+   * Struct names used as a `Map` key / `Set` element that carry a (direct) `f64`
+   * field (series 074) — they get a synthesized SameValueZero key newtype
+   * `<name>Key(<name>)` rather than a derived `Hash/Eq`. The user struct keeps its
+   * raw `f64` fields and `===`-faithful derived `PartialEq`; the newtype is the
+   * collection's actual key type. Disjoint from `hashEqStructs`. Populated by
+   * `lower()` alongside `hashEqStructs`; empty here.
+   */
+  structKeyStructs: Set<string>;
+  /**
    * Names of bindings whose initializer is `Object.entries(...)` — a
    * `Vec<(K, V)>` of pairs (series 043). A pair index `es[i][0]`/`es[i][1]` on
    * such a binding lowers to tuple field access `.0`/`.1`. Populated during
@@ -1331,6 +1340,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     structFields: new Map(),
     // Filled by `lower()` after `bindingTypes` (needs the resolved map/set types).
     hashEqStructs: new Set(),
+    structKeyStructs: new Set(),
     // Populated during lowering as `Object.entries` bindings are seen.
     entriesBindings: new Set(),
     // Populated during lowering when a binding's init is a `spawn` node (051c).

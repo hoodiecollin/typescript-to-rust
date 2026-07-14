@@ -1,11 +1,44 @@
 # 072 — Map/Set non-empty construction + `this.field` / field receivers
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the two 061
-> deferrals, issue **#37**. Dialect calls made with Collin 2026-07-10
-> (`needs-user-input` cleared). The `localVar.field` **borrow/ownership tail** is split
-> to **#45** and stays fail-loud in the interim. Struct-`f64`-field keys remain **#30**.
+> **Status: SHIPPED (2026-07-14).** Graduates one of the two 061 deferrals — issue
+> **#37** — **non-empty construction** (Seam 1). Dialect calls made with Collin
+> 2026-07-10 (`needs-user-input` cleared). Struct-`f64`-field keys remain **#30**.
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Seam 2 (field receivers + `&mut self`) was already shipped by series 082** — the
+> tsc-oracle `collectionOf` cut-over resolves `this.field`, `localVar.field`, *and*
+> `getX()` receivers (`ORAC1`–`ORAC4` in `type-oracle.test.ts`), and `mutatesThis`
+> already classifies a `this.field.set(…)` method `&mut self` (`analysis.ts:698`). So
+> 082 subsumed Fork C entirely — including the `localVar.field` case this design had
+> split to **#45** and the `getX()` case it listed fail-loud. #37's genuinely-new work
+> was therefore **Seam 1 only** (below). #45 is moot for the map/set slice; its
+> generic borrow-conflict classification stands on its own.
+>
+> ## Impl notes (what shipped)
+>
+> - **`lowerMapNew` / `lowerSetNew`** (`lower.ts`) replace the `lowerNew` Map/Set
+>   branch. Empty construction (061) unchanged. Non-empty:
+>   - **Literal path** — `new Map([[k,v],…])` → `IndexMap::<K,V>::from([(wrap(k),v),…])`;
+>     `new Set([x,…])` → `IndexSet::<T>::from([wrap(x),…])`. Keys `wrapKey`-wrapped
+>     inline (061 policy). Type args honored, else inferred from the first
+>     pair/element via `scalarKeyElemType` (Fork B).
+>   - **Set variable path** (Fork A2) — `new Set(items)` where `items` is an
+>     `Array<T>` binding (`bindingTypes` → `vec`) → `.into_iter()[.map(|x| OrderedFloat(x))]
+>     .collect::<IndexSet<T>>()`.
+> - **HIR** — `mapNew`/`setNew` gained an optional `init` (`MapInit`/`SetInit`:
+>   `literal` | `iter`). The **emitter** renders `::from([...])` / `.into_iter()…collect()`.
+> - **New `init` fields carry through `retargetStructKey`** unchanged (the `key`/`value`/
+>   `elem` types are still where the struct-key newtype retarget lands).
+>
+> ### Scoped-around (fail-loud, unchanged)
+>
+> - **Map variable path** (`new Map(entries)`) — needs `Array<[K,V]>` element typing,
+>   but **`TSTupleType` is not in the accepted dialect surface** (validator + `lowerType`
+>   both reject it — the design's flagged open detail). So a variable Map initializer
+>   stays fail-loud where the Set `Array<T>` path succeeds. Expanding the array/tuple
+>   annotation surface is a separate dialect decision, not this slice.
+> - Non-array Map/Set arg (another `Map`, `Object.entries()`, iterator, spread),
+>   un-inferable empty literal (`new Map([])` no type args), struct-`f64`-field key
+>   (#30) — all unchanged fail-loud.
 
 ## Problem
 

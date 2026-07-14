@@ -73,6 +73,15 @@ export type RustType =
   | { kind: "orderedFloat" }
   /** A named `struct` (from an `interface`); rendered as the bare name. */
   | { kind: "struct"; name: string }
+  /**
+   * The synthesized SameValueZero **key newtype** `<name>Key(<name>)` for a struct
+   * used as a `Map` key / `Set` element that carries a (direct) `f64` field
+   * (series 074). It wraps the user struct and carries custom `Hash`/`PartialEq`/
+   * `Eq` impls that wrap each `f64` leaf in `OrderedFloat` at hash/eq time, so the
+   * user struct keeps its raw `f64` fields and its `===`-faithful (NaN≠NaN) derived
+   * `PartialEq`. Rendered as `<name>Key`; only ever a map key / set element type.
+   */
+  | { kind: "structKey"; name: string }
   /** A fallible function's return type: `Result<ok, err>` (`err` is `String` today). */
   | { kind: "result"; ok: RustType; err: RustType }
   /**
@@ -205,10 +214,13 @@ export type HirExpr =
   /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */
   | { kind: "hashmap"; entries: { key: HirExpr; value: HirExpr }[] }
   /** `new Map<K, V>()` → `IndexMap::<K, V>::new()` (series 061, turbofish so an
-   * un-annotated `let` still infers). */
-  | { kind: "mapNew"; key: RustType; value: RustType }
-  /** `new Set<T>()` → `IndexSet::<T>::new()` (series 061). */
-  | { kind: "setNew"; elem: RustType }
+   * un-annotated `let` still infers). A non-empty `new Map([...])` / `new Map(entries)`
+   * carries a `MapInit` (series 072): `literal` → `IndexMap::<K, V>::from([(k, v), …])`
+   * (keys pre-wrapped), `iter` → `src.into_iter()[.map(…)].collect::<IndexMap<K, V>>()`. */
+  | { kind: "mapNew"; key: RustType; value: RustType; init?: MapInit }
+  /** `new Set<T>()` → `IndexSet::<T>::new()` (series 061). A non-empty `new Set([...])`
+   * / `new Set(items)` carries a `SetInit` (series 072), mirroring `MapInit`. */
+  | { kind: "setNew"; elem: RustType; init?: SetInit }
   /** `&expr` / `&mut expr` — an explicit borrow at a call site (`m.get(&k)`,
    * series 061). */
   | { kind: "ref"; mut: boolean; expr: HirExpr }
@@ -276,6 +288,12 @@ export type HirExpr =
    * (not individually awaited — the macro polls them).
    */
   | { kind: "join"; futures: HirExpr[] }
+  /**
+   * A Rust tuple expression `(e0, e1, …)` (series 067). Emitted for a fixed-arity
+   * array-literal source of an array-destructuring binding (`const [a, b] = [x, y]`
+   * → `let (a, b) = (x, y)`), where the element count is statically known.
+   */
+  | { kind: "tuple"; elems: HirExpr[] }
   /**
    * `tokio::try_join!(f0, f1, …)` — like `join!` but for fallible element
    * futures; yields `Result<(T0, T1, …), E>`, short-circuiting on the first
@@ -504,6 +522,23 @@ export type MapBuildPart =
   | { kind: "spread"; expr: HirExpr }
   | { kind: "entry"; key: HirExpr; value: HirExpr };
 
+/**
+ * A non-empty `new Map([...])` / `new Map(entries)` initializer (series 072).
+ * `literal` — an array literal of `[k, v]` pairs → `IndexMap::from([(k, v), …])`
+ * (keys already `wrapKey`-wrapped at lower time). `iter` — an array-typed variable
+ * / expression → `src.into_iter()[.map(|(k, v)| (wrap(k), v))].collect::<IndexMap<…>>()`
+ * (`wrap` present only when the key needs `OrderedFloat`/newtype wrapping).
+ */
+export type MapInit =
+  | { kind: "literal"; entries: { key: HirExpr; value: HirExpr }[] }
+  | { kind: "iter"; source: HirExpr; wrapKey: boolean };
+
+/** A non-empty `new Set([...])` / `new Set(items)` initializer (series 072), mirroring
+ * `MapInit`: `literal` → `IndexSet::from([…])`, `iter` → `.into_iter()[.map(wrap)].collect()`. */
+export type SetInit =
+  | { kind: "literal"; elems: HirExpr[] }
+  | { kind: "iter"; source: HirExpr; wrapElem: boolean };
+
 // ── Statements ───────────────────────────────────────────────────────────────
 
 export type HirStmt =
@@ -520,6 +555,15 @@ export type HirStmt =
        * await Promise.all([…])` whose initializer is a `join!`/`try_join!` tuple.
        */
       names?: string[];
+      /**
+       * A struct-pattern destructuring binding (series 067): when present, the
+       * `let` renders `let <pat> = init` — a Rust struct pattern like
+       * `Point { x, y }` from `const { x, y } = point`. `name` is still set (to the
+       * first field, so liveness re-defines it) but `pat` takes over emission and
+       * `ty` is null (the field types come from the source struct). Set only for an
+       * object-pattern over a named-struct source.
+       */
+      pat?: string;
       /**
        * A task-escape share wrap (series 051c increment 2): the binding is shared
        * into ≥2 spawned tasks (or one task and reused by the parent), so its
@@ -868,6 +912,26 @@ export interface HirStruct {
 }
 
 /**
+ * A synthesized SameValueZero **key newtype** `<name>Key(<struct>)` (series 074) —
+ * the actual `Map`/`Set` key type for a struct with a (direct) `f64` field. It
+ * wraps the user struct (`struct PointKey(Point);`) and carries custom
+ * `Hash`/`PartialEq`/`Eq` impls that wrap each `f64` leaf in `OrderedFloat` at
+ * hash/eq time, so the wrapped struct keeps its raw `f64` fields (arithmetic
+ * untouched) and its `===`-faithful derived `PartialEq` (NaN≠NaN). Non-`f64`
+ * fields compare/hash with plain `==`/`.hash()`. `Clone`/`Debug` derive via the
+ * wrapped struct. One per distinct f64-bearing key struct.
+ */
+export interface HirStructKey {
+  kind: "structKey";
+  /** The newtype name (`<struct>Key`). */
+  name: string;
+  /** The wrapped user struct's name (`self.0: <struct>`). */
+  struct: string;
+  /** The wrapped struct's fields, in order, each flagged whether it is an `f64` leaf. */
+  fields: { name: string; f64: boolean }[];
+}
+
+/**
  * A `class` — emitted as a `struct` (its `fields`) plus an `impl` holding the
  * associated constructor (`ctor`, a `new` with no receiver) and `methods` (each
  * carrying a `self` receiver).
@@ -1017,6 +1081,7 @@ export interface HirGenerator {
 export type HirItem =
   | HirFn
   | HirStruct
+  | HirStructKey
   | HirClass
   | HirErrorEnum
   | HirEnum

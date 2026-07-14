@@ -72,6 +72,9 @@ export function isTypeCloneable(
       return isTypeCloneable(ty.elem, table, seen);
     case "orderedFloat":
       return true;
+    case "structKey":
+      // The 074 key newtype derives `Clone` (via its wrapped struct).
+      return isStructCloneable(ty.name, table, seen);
     case "struct":
       return isStructCloneable(ty.name, table, seen);
     default:
@@ -118,6 +121,9 @@ function isTypeDebug(
       return isTypeDebug(ty.elem, table, seen);
     case "orderedFloat":
       return true;
+    case "structKey":
+      // The 074 key newtype derives `Debug` (via its wrapped struct).
+      return isTypeDebug({ kind: "struct", name: ty.name }, table, seen);
     case "struct": {
       if (seen.has(ty.name)) return true;
       const fields = table.get(ty.name);
@@ -165,6 +171,9 @@ export function isTypePartialEq(
     case "set":
       return isTypePartialEq(ty.elem, table, seen);
     case "orderedFloat":
+      return true;
+    case "structKey":
+      // The 074 key newtype has a custom `PartialEq` (SameValueZero).
       return true;
     case "struct": {
       if (seen.has(ty.name)) return true;

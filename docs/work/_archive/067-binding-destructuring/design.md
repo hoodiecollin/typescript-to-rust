@@ -1,8 +1,30 @@
 # 067 — Binding destructuring (exact-arity `const {x,y}=` / `const [a,b]=`)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the 008 residual,
-> issue **#34**. Dialect calls made with Collin 2026-07-10 (`needs-user-input`
-> cleared). Blocks **#39** (generator array-destructuring is a special case).
+> **Status: SHIPPED (2026-07-14).** Graduates the 008 residual, issue **#34**.
+> Dialect calls made with Collin 2026-07-10 (`needs-user-input` cleared). Blocks
+> **#39** (generator array-destructuring is a special case). Specs:
+> `specs.md` → `packages/compiler/tests/binding-destructure.test.ts` (BD1–BD13).
+>
+> **Impl notes / deviations:**
+> - **Object-pattern** (`const { x, y } = point`) lowers to a struct-pattern `let`
+>   via a new optional `pat?: string` field on the HIR `let` node; the emitter
+>   renders `let <pat> = <init>;`. The source struct name is resolved from the
+>   046/048 `bindingTypes` table (`sourceStructName`); a non-named-struct source is
+>   fail-loud. Shorthand fields only (mirrors 064/058).
+> - **Array-pattern** graduates the **fixed-arity array-literal** source
+>   (`const [a, b] = [e0, e1]` → `let (a, b) = (e0, e1)`) via a new `tuple` HIR expr
+>   kind, reusing the 051a `names` tuple-`let` machinery. The `join!`/`try_join!`
+>   `Promise.all` tuple source is unchanged. A `Vec`/`Array`-typed source, an arity
+>   mismatch, and rest/spread are fail-loud (Vec source points at #42).
+> - **Ownership is handled by the existing pass, not hand-rolled.** Lowering the
+>   object-pattern's init to the bare source ident lets `refineOwnership`'s
+>   `let b = a` move-detection insert `.clone()` exactly when the source stays live
+>   (the design's move/Copy/clone table) — no new liveness lookup was needed.
+> - **The generator case** `const [a, b] = g()` (design's "includes the generator
+>   case") is **not** part of this graduation — a generator call yields an iterator,
+>   not a fixed tuple, so it stays fail-loud; #39 remains open for it.
+> - Rest elements are rejected by the `validate.ts` allowlist pre-pass (earlier than
+>   the lowerer), which is still the intended fail-loud outcome.
 >
 > Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
 

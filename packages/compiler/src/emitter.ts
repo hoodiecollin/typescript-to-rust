@@ -34,6 +34,7 @@ import type {
   HirModule,
   HirStmt,
   HirStruct,
+  HirStructKey,
   HirTrait,
   RustType,
 } from "./hir";
@@ -177,8 +178,14 @@ export function emitModule(mod: HirModule): string {
   // `Set<T>` → `IndexSet` (series 061), same insertion-order fidelity as `IndexMap`.
   if (usesKind(mod, "set") || usesKind(mod, "setNew"))
     imports.push("use indexmap::IndexSet;");
-  // Scalar-`f64` map keys / set elements wrap in `OrderedFloat` (series 061).
-  if (usesKind(mod, "orderedFloat"))
+  // Scalar-`f64` map keys / set elements wrap in `OrderedFloat` (series 061); a
+  // synthesized f64-bearing struct-key newtype (series 074) wraps its `f64` leaves
+  // in `OrderedFloat` at hash/eq time, so it needs the import too.
+  if (
+    usesKind(mod, "orderedFloat") ||
+    usesKind(mod, "structKey") ||
+    mod.items.some((i) => i.kind === "structKey")
+  )
     imports.push("use ordered_float::OrderedFloat;");
   if (
     usesKind(mod, "rc") ||
@@ -218,6 +225,8 @@ function emitItem(
       return emitFn(item);
     case "struct":
       return emitStruct(item, structs, usesJson);
+    case "structKey":
+      return emitStructKey(item);
     case "class":
       return emitClass(item, structs, usesJson);
     case "errorEnum":
@@ -508,11 +517,76 @@ function emitStruct(
   return [decl, ...impls].join("\n\n");
 }
 
+/** The Rust name for a `structKey` type — the base struct name, `Key`-suffixed. */
+function structKeyRustName(struct: string): string {
+  return `${rid(struct)}Key`;
+}
+
+/**
+ * The tuple-struct *constructor* name that wraps a raw key/element into its
+ * hashable Rust key type in a `new Map(x)`/`new Set(x)` `.map` closure (series
+ * 072): `OrderedFloat` for a scalar number, `<Struct>Key` for an f64-bearing
+ * struct key. Distinct from `emitType` (which renders `OrderedFloat<f64>`).
+ */
+function wrapCtor(ty: RustType): string {
+  return ty.kind === "structKey" ? structKeyRustName(ty.name) : "OrderedFloat";
+}
+
+/**
+ * A synthesized SameValueZero key newtype (series 074): the tuple struct
+ * `<Struct>Key(<Struct>)` plus custom `PartialEq`/`Eq`/`Hash` impls. Each `f64`
+ * leaf is wrapped in `OrderedFloat` at compare/hash time (JS SameValueZero:
+ * `NaN == NaN`, `-0`/`+0` collapse); every other field uses plain `==`/`.hash()`.
+ * `Clone`/`Debug` derive via the wrapped struct. The wrapped struct keeps its raw
+ * `f64` fields (arithmetic untouched) and its `===`-faithful derived `PartialEq`.
+ */
+function emitStructKey(k: HirStructKey): string {
+  const name = structKeyRustName(k.struct);
+  const wrapped = rid(k.struct);
+  // `OrderedFloat(<proj>)` for an f64 leaf; the bare `<proj>` otherwise.
+  const proj = (recv: string, field: string, f64: boolean): string => {
+    const p = `${recv}.0.${rid(field)}`;
+    return f64 ? `OrderedFloat(${p})` : p;
+  };
+  const decl = `struct ${name}(${wrapped});`;
+
+  const eqBody =
+    k.fields.length === 0
+      ? "true"
+      : k.fields
+          .map(
+            (f) =>
+              `${proj("self", f.name, f.f64)} == ${proj("o", f.name, f.f64)}`,
+          )
+          .join("\n            && ");
+  const partialEq = [
+    `impl PartialEq for ${name} {`,
+    `${INDENT}fn eq(&self, o: &Self) -> bool {`,
+    `${INDENT}${INDENT}${eqBody}`,
+    `${INDENT}}`,
+    "}",
+  ].join("\n");
+
+  const eq = `impl Eq for ${name} {}`;
+
+  const hashBody = k.fields
+    .map((f) => `${INDENT}${INDENT}${proj("self", f.name, f.f64)}.hash(s);`)
+    .join("\n");
+  const hash = [
+    `impl std::hash::Hash for ${name} {`,
+    `${INDENT}fn hash<H: std::hash::Hasher>(&self, s: &mut H) {`,
+    hashBody,
+    `${INDENT}}`,
+    "}",
+  ].join("\n");
+
+  return [decl, partialEq, eq, hash].join("\n\n");
+}
+
 function emitFn(fn: HirFn): string {
   const asyncKw = fn.isAsync ? "async " : "";
   // A method's `self` receiver leads the parameter list; free/associated fns omit it.
-  const self =
-    fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
+  const self = selfReceiver(fn.recv);
   const rest = fn.params.map(
     (p) => `${p.pat ?? rid(p.name)}: ${emitType(p.ty)}`,
   );
@@ -557,6 +631,12 @@ function emitStmt(stmt: HirStmt): string {
       if (stmt.names) {
         const pat = stmt.names.map(rid).join(", ");
         return `let (${pat}) = ${emitExpr(stmt.init)};`;
+      }
+      // A struct-pattern destructuring binding (series 067): `let Point { x, y } =
+      // <source>;`. The pattern is pre-built by the lowerer; field names bind the
+      // source's struct fields, so no type annotation is emitted.
+      if (stmt.pat) {
+        return `let ${stmt.pat} = ${emitExpr(stmt.init)};`;
       }
       const mut = stmt.mut ? "mut " : "";
       const ty = stmt.ty ? `: ${emitType(stmt.ty)}` : "";
@@ -1146,10 +1226,37 @@ function emitExpr(expr: HirExpr): string {
         .join(", ");
       return `IndexMap::from([${entries}])`;
     }
-    case "mapNew":
-      return `IndexMap::<${emitType(expr.key)}, ${emitType(expr.value)}>::new()`;
-    case "setNew":
-      return `IndexSet::<${emitType(expr.elem)}>::new()`;
+    case "mapNew": {
+      const kv = `${emitType(expr.key)}, ${emitType(expr.value)}`;
+      if (!expr.init) return `IndexMap::<${kv}>::new()`;
+      // Non-empty literal (series 072): keys are already `wrapKey`-wrapped.
+      if (expr.init.kind === "literal") {
+        const entries = expr.init.entries
+          .map((e) => `(${emitExpr(e.key)}, ${emitExpr(e.value)})`)
+          .join(", ");
+        return `IndexMap::<${kv}>::from([${entries}])`;
+      }
+      // Variable/array-expression: collect its `into_iter()`, wrapping keys in a
+      // `.map` closure only when the key type needs an `OrderedFloat`/newtype wrap.
+      const iter = `${emitExpr(expr.init.source)}.into_iter()`;
+      const mapped = expr.init.wrapKey
+        ? `${iter}.map(|(k, v)| (${wrapCtor(expr.key)}(k), v))`
+        : iter;
+      return `${mapped}.collect::<IndexMap<${kv}>>()`;
+    }
+    case "setNew": {
+      const t = emitType(expr.elem);
+      if (!expr.init) return `IndexSet::<${t}>::new()`;
+      if (expr.init.kind === "literal") {
+        const elems = expr.init.elems.map(emitExpr).join(", ");
+        return `IndexSet::<${t}>::from([${elems}])`;
+      }
+      const iter = `${emitExpr(expr.init.source)}.into_iter()`;
+      const mapped = expr.init.wrapElem
+        ? `${iter}.map(|x| ${wrapCtor(expr.elem)}(x))`
+        : iter;
+      return `${mapped}.collect::<IndexSet<${t}>>()`;
+    }
     case "collectVec":
       return `${emitExpr(expr.iter)}.collect::<Vec<_>>()`;
     case "ref": {
@@ -1220,6 +1327,8 @@ function emitExpr(expr: HirExpr): string {
       return `Box::new(${emitExpr(expr.value)})`;
     case "await":
       return `${emitExpr(expr.expr)}.await`;
+    case "tuple":
+      return `(${expr.elems.map(emitExpr).join(", ")})`;
     case "join":
       return `tokio::join!(${expr.futures.map(emitExpr).join(", ")})`;
     case "tryJoin":
@@ -1399,6 +1508,8 @@ function emitType(ty: RustType): string {
       return "OrderedFloat<f64>";
     case "struct":
       return rid(ty.name);
+    case "structKey":
+      return structKeyRustName(ty.name);
     case "result":
       return `Result<${emitType(ty.ok)}, ${emitType(ty.err)}>`;
     case "appError":
