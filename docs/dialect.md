@@ -500,12 +500,49 @@ a `fn`-pointer; a bare top-level fn or normalized arrow coerces to it
 
 ## Nullability & optional chaining
 
-`T | undefined` / `T | null` → `Option<T>`; `??` → `unwrap_or`; `=== undefined` /
-`=== null` narrows via `if let`. Only single-level optional chaining is built.
+Absence is modeled first-class as `Option<T>` (series 066, issue #42) — **absence
+is out-of-band, always `Option::None`, never an in-band value of the type**. The
+settled rules:
+
+- **Representation (A).** `null ≡ undefined` collapse to a single `Option::None`
+  (both spellings accepted). An *absent value of a `T`* (`T | undefined`, optional
+  field, failed lookup) is `Option<T>`; a *no-meaningful-result* (`void` fn,
+  statement value) is Rust `()`. **Emptiness is never absence** — `0`, `""`, `[]`,
+  empty `Map`/`Set`, and `()` are present, operable values; `Some(vec![])`
+  (present-but-empty) is distinct from `None` (absent).
+- **Surface (B).** `T | undefined`, `T | null`, and `?` optional fields/params all
+  denote `Option<T>`. A literal `undefined`/`null` in such a slot → `None`; a value
+  → `Some(v)` (let-init, arg, return, field init, **and reassignment** all coerce).
+  Bare/unannotated absence stays fail-loud (`strictNullChecks`).
+- **Print / collapse (C).** Canonical `None` print spelling is the literal
+  `undefined`: `console.log` of a `Some(v)` renders `v`, of a `None` renders
+  `undefined`. A source `null` therefore prints `undefined` (a deliberate
+  divergence). A `T | null | undefined` union (carrying *both* spellings) compiles
+  but records a **non-fatal 056-channel warning** — its collapsed print/`===`/
+  coercion may diverge from JS. A single-spelling union warns nothing.
+- **`None → T` coercion (D) — required-explicit, never automatic.** `x ?? d` →
+  `unwrap_or(d)` (**absence-only**); default param `f(x = d)` → an `Option<T>` param
+  plus a `let x = x.unwrap_or(d);` body prelude; non-null `x!` → `.unwrap()`
+  (explicit opt-in, panics on `None`); `if (x !== undefined)` / `x != null` /
+  `if (x)` narrow via `if let Some(x)`. No silent `None → T::default()`.
+- **JS-truthiness (E).** `x || d` takes **full JS falsy** semantics (falsy =
+  `false`/`0`/`-0`/`""`/`null`/`undefined`/`NaN`) — it is **not** `unwrap_or`. One
+  shared `tslib::truthy::is_truthy` helper powers `||`, `&&`, `if (x)`, and `!x`; a
+  bare-`bool` operand stays a native short-circuit op (no helper).
+- **Arithmetic on optionals (F) — fail-loud.** An un-narrowed optional in a value
+  position (arithmetic `optNum + 1`, or a `T`-expecting callee) without an explicit
+  coercion is rejected — narrow or default first. `NaN` is a *present, invalid*
+  `f64` (`0.0/0.0`), unrelated to absence, and maps straight through.
+
+Only single-level optional chaining (`a?.b`) is built.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
+| Un-narrowed optional in arithmetic (`optNum + 1`) | Not yet | `arithmetic on an un-narrowed optional — narrow it (…) or coerce (…) first` |
+| Un-narrowed optional passed to a `T`-expecting callee | Not yet | `an un-narrowed optional passed where '<fn>' expects a concrete value — narrow it (…) or coerce (…) first` |
+| Bare `null` / `undefined` type (not inside a union) | Not yet | generic `Unsupported <node>` |
 | Optional chaining deeper than one `a?.b` member (`a?.b?.c`, `a?.[i]`, `a?.()`) | Not yet | `optional chaining beyond a single `a?.b` member (deeper chains are a later slice)` |
+| `T \| null \| undefined` (both spellings) | Warned (056) | `a `T \| null \| undefined` union collapses both `null` and `undefined`…` |
 
 ---
 
