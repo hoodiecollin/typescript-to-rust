@@ -173,6 +173,49 @@ export function lower(program: Program, source?: string): HirModule {
   // and a receiver's element type. Needs `lowerType`, so it runs here, not in
   // `analyzeModule`.
   analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
+  // Manual-`step()` generator consumers (series 075): a whole-program scan for
+  // `it.next()` / `g().next()`, `const [a, b] = g()`, and `const r = yield* inner()`
+  // that forces the referenced generator to the state-machine struct (the surface
+  // that carries `step()` / `Steppable`), never the straight-line fast path. Needs
+  // the generator names and the binding→generator map, so it runs here.
+  collectSteppedGenerators(normalized, analysis);
+  // Generator name → declared completion type `R` (series 075) — the 2nd
+  // `Generator<Y, R>` type arg. Used to type a read `yield*` delegate's `Steppable`
+  // box. Absent 2nd arg → unit (a value-less delegate).
+  for (const stmt of normalized.body) {
+    if (
+      stmt.type === "FunctionDeclaration" &&
+      (stmt as { generator?: boolean }).generator === true
+    ) {
+      const gname = (stmt as { id?: { name?: string } }).id?.name;
+      const gann = (stmt as FunctionDeclaration).returnType?.typeAnnotation;
+      const gref =
+        gann?.type === "TSTypeReference"
+          ? (gann as Extract<TSType, { type: "TSTypeReference" }>)
+          : null;
+      const yAnn = gref?.typeArguments?.params?.[0];
+      const rAnn = gref?.typeArguments?.params?.[1];
+      // The 3rd `Generator<Y, R, TNext>` arg (series 076): the resume-in type that
+      // types `resume(&mut self, sent: TNext)`. Absent for a non-bidirectional
+      // generator (a read yield result over one → fail-loud in the state machine).
+      const nAnn = gref?.typeArguments?.params?.[2];
+      if (gname && yAnn) {
+        analysis.generatorItemTypes.set(
+          gname,
+          lowerType(yAnn, analysis.structs),
+        );
+      }
+      if (gname && rAnn) {
+        analysis.generatorRetTypes.set(gname, lowerType(rAnn, analysis.structs));
+      }
+      if (gname && nAnn) {
+        analysis.generatorNextTypes.set(
+          gname,
+          lowerType(nAnn, analysis.structs),
+        );
+      }
+    }
+  }
   // Struct `Map` keys / `Set` elements: an `f64`-free struct derives
   // `Hash, PartialEq, Eq` (series 061); a struct with a *direct* `f64` field gets
   // a synthesized SameValueZero key newtype (series 074); an `f64` nested in a
@@ -873,6 +916,12 @@ function lowerGenerator(
     throw new UnsupportedError({ type: "generator without an item type" });
   const item = lowerType(itemAnn, analysis.structs);
 
+  // The completion type `R` (series 075) — the 2nd `Generator<Y, R>` type arg. When
+  // absent it is inferred at the state-machine build (from a `return <value>`);
+  // bare `return` / fall-off is unit. An explicit `R` here overrides inference.
+  const retAnn = ref.typeArguments?.params?.[1];
+  const declaredRetTy = retAnn ? lowerType(retAnn, analysis.structs) : null;
+
   if (!func.body)
     throw new UnsupportedError({ type: "generator without a body" });
 
@@ -882,7 +931,7 @@ function lowerGenerator(
   // resumable state machine (`buildGeneratorStateMachine`). A `yield*` / bare
   // `yield` makes the body non-straight-line, so it falls to the state-machine
   // path, which keeps them fail-loud residuals.
-  const isStraightLine = func.body.body.every((s) => {
+  const straightLineBody = func.body.body.every((s) => {
     if (s.type !== "ExpressionStatement") return false;
     const e = (s as ExpressionStatement).expression as unknown as {
       type: string;
@@ -891,6 +940,13 @@ function lowerGenerator(
     };
     return e.type === "YieldExpression" && !e.delegate && !!e.argument;
   });
+  // A generator consumed by a manual `step()` surface (manual `.next()`,
+  // destructure, or a read `yield*` completion value — series 075) must lower to
+  // the state-machine struct, which carries `step()` / `Steppable`. The
+  // straight-line `vec![…].into_iter()` fast path has no struct, so force the
+  // machine for those consumers even when the body is straight-line.
+  const isStraightLine =
+    straightLineBody && !analysis.steppedGenerators.has(name);
 
   if (isStraightLine) {
     // `vec![e1, …].into_iter()` is an idiomatic `impl Iterator<Item = T>` — no
@@ -922,7 +978,14 @@ function lowerGenerator(
     };
   }
 
-  return buildGeneratorStateMachine(func, name, params, item, analysis);
+  return buildGeneratorStateMachine(
+    func,
+    name,
+    params,
+    item,
+    declaredRetTy,
+    analysis,
+  );
 }
 
 // ── Generator state machines (series 052) ────────────────────────────────────
@@ -942,9 +1005,16 @@ function lowerGenerator(
 type GenTerm =
   | { kind: "goto"; target: number }
   | { kind: "branch"; cond: Expression; then: number; else: number }
-  | { kind: "yield"; value: Expression; resume: number }
-  | { kind: "yieldStar"; iter: Expression; resume: number }
-  | { kind: "done" };
+  // `resultTarget` is the binding of a **read** yield result (`const x = yield e`,
+  // series 076) — the resumed arm binds `x` to the sent value; `null` is a pure
+  // `yield e;` statement (052, no result read).
+  | { kind: "yield"; value: Expression; resume: number; resultTarget: string | null }
+  // `yield*` delegation; `resultTarget` is the binding of a read completion value
+  // (`const r = yield* inner()`, series 075), else `null` (065's unread form).
+  | { kind: "yieldStar"; iter: Expression; resume: number; resultTarget: string | null }
+  // `done` with an optional `return <value>` payload (series 075): the completion
+  // value carried to `GenStep::Return`. `null` is a bare `return` / fall-off (`R = ()`).
+  | { kind: "done"; value?: Expression | null };
 
 /** A basic block: straight-line leaf statements then a terminator. */
 interface GenBlock {
@@ -958,6 +1028,7 @@ function buildGeneratorStateMachine(
   name: string,
   params: HirParam[],
   item: RustType,
+  declaredRetTy: RustType | null,
   analysis: ModuleAnalysis,
 ): HirGenerator {
   // A borrowed param can't be captured owned in the struct (it would need a
@@ -999,16 +1070,65 @@ function buildGeneratorStateMachine(
           // `yield* <iter>` (series 065) → a delegating state; a plain `yield v` →
           // a suspend state (052).
           bat(cur).term = e.delegate
-            ? { kind: "yieldStar", iter: e.argument, resume }
-            : { kind: "yield", value: e.argument, resume };
+            ? { kind: "yieldStar", iter: e.argument, resume, resultTarget: null }
+            : { kind: "yield", value: e.argument, resume, resultTarget: null };
           return resume;
         }
         bat(cur).stmts.push(s);
         return cur;
       }
-      case "VariableDeclaration":
+      case "VariableDeclaration": {
+        // `const r = yield* inner()` (series 075) — a read `yield*` completion
+        // value: a delegating state that binds the delegate's `GenStep::Return`
+        // payload to `r`. A single declarator only (the common shape).
+        const decls = (s as VariableDeclaration).declarations;
+        const d0 = decls[0] as
+          | { id?: { type?: string; name?: string }; init?: unknown }
+          | undefined;
+        const init0 = d0?.init as
+          | { type?: string; delegate?: boolean; argument?: Expression }
+          | undefined;
+        if (
+          decls.length === 1 &&
+          d0?.id?.type === "Identifier" &&
+          d0.id.name &&
+          init0?.type === "YieldExpression" &&
+          init0.delegate &&
+          init0.argument
+        ) {
+          const resume = newBlock();
+          bat(cur).term = {
+            kind: "yieldStar",
+            iter: init0.argument,
+            resume,
+            resultTarget: d0.id.name,
+          };
+          return resume;
+        }
+        // `const x = yield e` (series 076) — a **read** yield result: a suspend
+        // state whose resumed arm binds `x` to the sent value. This makes the
+        // generator bidirectional (a `resume(&mut self, sent)` method). A single
+        // identifier declarator only (the common shape).
+        if (
+          decls.length === 1 &&
+          d0?.id?.type === "Identifier" &&
+          d0.id.name &&
+          init0?.type === "YieldExpression" &&
+          !init0.delegate &&
+          init0.argument
+        ) {
+          const resume = newBlock();
+          bat(cur).term = {
+            kind: "yield",
+            value: init0.argument,
+            resume,
+            resultTarget: d0.id.name,
+          };
+          return resume;
+        }
         bat(cur).stmts.push(s);
         return cur;
+      }
       case "IfStatement": {
         const iff = s as IfStatement;
         // A yield-free `if` is an ordinary leaf statement — keep it whole so the
@@ -1122,12 +1242,10 @@ function buildGeneratorStateMachine(
         return null;
       }
       case "ReturnStatement": {
-        if ((s as { argument?: Expression | null }).argument) {
-          throw new UnsupportedError({
-            type: "generator `return <value>` (only a bare `return` ends iteration)",
-          });
-        }
-        bat(cur).term = { kind: "done" };
+        // `return <value>` (series 075) carries the completion value to the
+        // terminal as the `GenStep::Return` payload; a bare `return` is `R = ()`.
+        const arg = (s as { argument?: Expression | null }).argument ?? null;
+        bat(cur).term = { kind: "done", value: arg };
         return null;
       }
       default:
@@ -1154,6 +1272,32 @@ function buildGeneratorStateMachine(
   const exit = buildSeq(body.body, entry);
   if (exit !== null) bat(exit).term = { kind: "done" };
   const terminal = blocks.length; // the reserved `_ => None` state
+
+  // The completion type `R` (series 075): an explicit `Generator<Y, R>` arg wins;
+  // otherwise inferred from the first `return <value>`; bare `return` / fall-off is
+  // unit. `hasReturnValue` drives the `__ret: Option<R>` field + `step()` `take()`.
+  const returnValueExprs = blocks
+    .map((b) => (b.term.kind === "done" ? b.term.value ?? null : null))
+    .filter((v): v is Expression => v !== null);
+  const hasReturnValue = returnValueExprs.length > 0;
+  let retTy: RustType = declaredRetTy ?? UNIT;
+  if (!declaredRetTy && hasReturnValue) {
+    // Infer `R` from the first `return <value>` — type its lowered form with the
+    // param context (across-yield locals aren't in scope for a numeric return, the
+    // common case). An unresolved type is fail-loud (annotate `Generator<Y, R>`).
+    const ctx = new Map<string, RustType>();
+    for (const p of params) ctx.set(p.name, p.ty);
+    const inferred = typeCbBody(
+      lowerExpr(returnValueExprs[0] as Expression, analysis),
+      ctx,
+    );
+    if (!inferred || inferred.kind === "unit") {
+      throw new UnsupportedError({
+        type: "generator `return <value>` whose completion type can't be inferred — annotate `Generator<Y, R>`",
+      });
+    }
+    retTy = inferred;
+  }
 
   // ── Pass 2: liveness → which locals become struct fields ───────────────────
   const paramNames = new Set(params.map((p) => p.name));
@@ -1189,6 +1333,7 @@ function buildGeneratorStateMachine(
     if (b.term.kind === "branch") addUpwardReads(b.term.cond);
     if (b.term.kind === "yield") addUpwardReads(b.term.value);
     if (b.term.kind === "yieldStar") addUpwardReads(b.term.iter);
+    if (b.term.kind === "done" && b.term.value) addUpwardReads(b.term.value);
     useSet.push(uses);
     defSet.push(defs);
   }
@@ -1243,8 +1388,44 @@ function buildGeneratorStateMachine(
     }
   }
 
-  // ── Lower each block's leaf statements (field-aware `let` → assign) ─────────
+  // A read `yield*` completion binding (`const r = yield* inner()`, series 075) is
+  // written in the delegating arm and read afterward — always a carried field, typed
+  // by the delegate generator's declared `R`.
   const fieldTypes = new Map<string, RustType>();
+  for (const b of blocks) {
+    if (b.term.kind === "yieldStar" && b.term.resultTarget !== null) {
+      fieldNames.add(b.term.resultTarget);
+      const delegateRet = isGeneratorCall(b.term.iter, analysis)
+        ? (analysis.generatorRetTypes.get(
+            ((b.term.iter as CallExpression).callee as Identifier).name,
+          ) ?? UNIT)
+        : UNIT;
+      fieldTypes.set(b.term.resultTarget, delegateRet);
+    }
+  }
+
+  // A **read** yield result (`const x = yield e`, series 076) makes the generator
+  // bidirectional. Its `TNext` (the 3rd `Generator<Y, R, TNext>` type arg) types
+  // the resumed binding and the `resume(sent: TNext)` param; unannotated → fail-loud
+  // (can't type `sent`). Each such binding is written in its resumed arm and read
+  // afterward → a carried field.
+  const bidirectional = blocks.some(
+    (b) => b.term.kind === "yield" && b.term.resultTarget !== null,
+  );
+  const nextTy = analysis.generatorNextTypes.get(name) ?? null;
+  if (bidirectional && !nextTy) {
+    throw new UnsupportedError({
+      type: "generator reads a `yield` result (`const x = yield e`) but declares no resume-in type — annotate `Generator<Y, R, TNext>` (fail-loud residual, series 076)",
+    });
+  }
+  for (const b of blocks) {
+    if (b.term.kind === "yield" && b.term.resultTarget !== null) {
+      fieldNames.add(b.term.resultTarget);
+      fieldTypes.set(b.term.resultTarget, nextTy as RustType);
+    }
+  }
+
+  // ── Lower each block's leaf statements (field-aware `let` → assign) ─────────
   for (const p of params) fieldTypes.set(p.name, p.ty);
 
   const loweredBlocks = blocks.map((b) => {
@@ -1273,10 +1454,31 @@ function buildGeneratorStateMachine(
     return out;
   });
 
+  // A resumed arm of a **read** yield (`const x = yield e`, series 076) binds the
+  // sent value to `x` at its head: `self.<x> = self.__sent.take().unwrap();`. `resume`
+  // stashes `__sent` before the loop; the initial state (state 0) has no pending
+  // yield, so the first-resume value is discarded (matching JS).
+  const resumeBindings = new Map<number, string>();
+  for (const b of blocks) {
+    if (b.term.kind === "yield" && b.term.resultTarget !== null) {
+      resumeBindings.set(b.term.resume, b.term.resultTarget);
+    }
+  }
+
   // ── Assemble the `match` arms (append each block's terminator) ──────────────
-  const delegateFields: string[] = [];
+  const delegateFields: {
+    name: string;
+    steppable: boolean;
+    delegateRet: RustType;
+  }[] = [];
   const states = blocks.map((b) => {
     const arm: HirStmt[] = [...(loweredBlocks[b.id] as HirStmt[])];
+    const sentBind = resumeBindings.get(b.id);
+    if (sentBind !== undefined) {
+      // Bind the sent value at the head of the resumed arm (field-ref rewritten
+      // below to `self.<sentBind>`). `genResumeBind` takes the stashed `__sent`.
+      arm.unshift({ kind: "genResumeBind", target: sentBind });
+    }
     switch (b.term.kind) {
       case "goto":
         arm.push({ kind: "gotoState", state: b.term.target });
@@ -1297,25 +1499,50 @@ function buildGeneratorStateMachine(
         });
         break;
       case "yieldStar": {
-        // `yield* <iter>` (065): a delegating state with its own boxed iterator
-        // field, seeded from `<iter>.into_iter()` and pumped to exhaustion.
+        // `yield* <iter>` (065/075): a delegating state with its own boxed iterator
+        // field. Unread (065): `<iter>.into_iter()` boxed as `dyn Iterator`, pumped
+        // to exhaustion. Read completion (075, `const r = yield*`): the delegate must
+        // be a known generator (its struct impls `Steppable`) — box the call directly
+        // as `dyn Steppable` and pump `.step()`, binding the `Return` payload.
         const field = `__delegate_${b.id}`;
-        delegateFields.push(field);
+        const readResult = b.term.resultTarget !== null;
+        if (readResult && !isGeneratorCall(b.term.iter, analysis)) {
+          throw new UnsupportedError({
+            type: "read `yield*` completion value over a non-generator iterable (no completion value exists — only a generator delegate carries one)",
+          });
+        }
+        const delegateRet = readResult
+          ? (analysis.generatorRetTypes.get(
+              ((b.term.iter as CallExpression).callee as Identifier).name,
+            ) ?? UNIT)
+          : UNIT;
+        delegateFields.push({ name: field, steppable: readResult, delegateRet });
         arm.push({
           kind: "yieldStarStep",
           field,
-          iter: {
-            kind: "method",
-            receiver: lowerExpr(b.term.iter, analysis),
-            name: "into_iter",
-            args: [],
-          },
+          iter: readResult
+            ? lowerExpr(b.term.iter, analysis)
+            : {
+                kind: "method",
+                receiver: lowerExpr(b.term.iter, analysis),
+                name: "into_iter",
+                args: [],
+              },
           resumeState: b.term.resume,
+          readResult: readResult || undefined,
+          resultTarget: b.term.resultTarget ?? undefined,
         });
         break;
       }
       case "done":
-        arm.push({ kind: "genDone", terminal });
+        arm.push({
+          kind: "genDone",
+          terminal,
+          retValue: b.term.value
+            ? lowerExpr(b.term.value, analysis)
+            : undefined,
+          hasRet: hasReturnValue,
+        });
         break;
     }
     return { id: b.id, body: rewriteFieldRefs(arm, fieldNames) };
@@ -1328,16 +1555,29 @@ function buildGeneratorStateMachine(
       ty: fieldTypes.get(n) ?? ({ kind: "f64" } as RustType),
     }));
 
+  // A `TNext` is **defaultable** (series 076) when it carries the 066 undefined
+  // model — i.e. lowers to `Option<T>` (default `None`, faithful to JS's `undefined`
+  // sent by `for-of`/spread). Then the generator keeps `impl Iterator` / `step()`
+  // (routed through `resume(<default>)`); a non-defaultable `TNext` is `resume`-only
+  // (for-of / collect over it → fail-loud at the consumption site).
+  const nextDefaultable = bidirectional && (nextTy as RustType).kind === "option";
+
   return {
     kind: "generator",
     name,
     structName: capitalizeAscii(name) + "Gen",
     item,
+    retTy,
+    exposesStep: analysis.steppedGenerators.has(name),
+    hasReturnValue,
     params,
     localFields,
     states,
     terminal,
     delegateFields,
+    bidirectional,
+    nextTy: bidirectional ? (nextTy as RustType) : UNIT,
+    nextDefaultable,
   };
 }
 
@@ -4259,6 +4499,21 @@ function lowerForOf(
     analysis.generators.has(
       ((stmt.right as CallExpression).callee as Identifier).name,
     );
+  // A **non-defaultable** `TNext` bidirectional generator (series 076) has no `impl
+  // Iterator` (only `resume`), so `for-of` over it can't send a faithful default —
+  // fail-loud. A defaultable `TNext` keeps `impl Iterator` (the loop sends the
+  // `undefined`-model default), so it iterates fine.
+  if (overGenerator) {
+    const gName = ((stmt.right as CallExpression).callee as Identifier).name;
+    if (
+      analysis.bidirectionalGenerators.has(gName) &&
+      analysis.generatorNextTypes.get(gName)?.kind !== "option"
+    ) {
+      throw new UnsupportedError({
+        type: "for-of over a bidirectional generator with a non-defaultable resume-in type `TNext` — the loop can't send a faithful default (only `resume(v)` can drive it); annotate `TNext` to include `undefined` for a for-of surface (fail-loud residual, series 076)",
+      });
+    }
+  }
   // Named-struct destructuring `for (const { x, y } of pts)` (series 064) → a Rust
   // struct pattern `for Point { x, y } in &pts`. Same "named/statically-shaped
   // only" boundary as 058's destructuring params: an anonymous element is
@@ -4804,6 +5059,24 @@ function lowerVarDecl(
         }
         return el.name;
       });
+      // A generator source `const [a, b] = g()` (series 075, rides 067): a
+      // fixed-arity prefix pull off the generator's `impl Iterator` —
+      // `let (a, b) = { let mut __it = g(); (__it.next().unwrap(), …) };`. The arity
+      // is the pattern length (a rest element is already rejected above → #58).
+      if (isGeneratorCall(d.init, analysis)) {
+        return {
+          kind: "let",
+          name: names[0] as string,
+          mut: false,
+          ty: null,
+          init: {
+            kind: "genPrefixPull",
+            source: lowerExpr(d.init, analysis),
+            arity: names.length,
+          },
+          names,
+        };
+      }
       const init = lowerExpr(d.init, analysis);
       if (isJoinTuple(init)) {
         return {
@@ -4855,6 +5128,76 @@ function lowerVarDecl(
     // field is fail-loud. The source's struct name is resolved from its known
     // binding type; the ownership pass clones the source if it stays live.
     if ((d.id as { type: string }).type === "ObjectPattern") {
+      // `const { value, done } = it.next()` (series 075) — a manual generator step
+      // read as JS's `{ value, done }`. Lowers to a `(value, done)` tuple driven off
+      // `step()`. Requires the generator's `Y === R` (so `value` is one Rust type);
+      // otherwise the un-resolvable-`.value` residual → fail-loud.
+      const nextInfo = resolveGeneratorNext(d.init, analysis);
+      if (nextInfo) {
+        const objPat = d.id as unknown as ObjectPattern;
+        const names = objPat.properties.map((prop) => {
+          if ((prop as { type?: string }).type !== "Property") {
+            throw new UnsupportedError({
+              type: "manual generator `.next()` destructure supports only `{ value, done }` shorthand",
+            });
+          }
+          const key = prop.key as unknown as { type: string; name?: string };
+          const value = prop.value as unknown as { type: string; name?: string };
+          if (
+            prop.computed ||
+            key.type !== "Identifier" ||
+            value.type !== "Identifier" ||
+            key.name !== value.name ||
+            (key.name !== "value" && key.name !== "done")
+          ) {
+            throw new UnsupportedError({
+              type: "manual generator `.next()` destructure supports only `{ value, done }` shorthand bindings",
+            });
+          }
+          return key.name as string;
+        });
+        if (
+          names.length !== 2 ||
+          names[0] !== "value" ||
+          names[1] !== "done"
+        ) {
+          throw new UnsupportedError({
+            type: "manual generator `.next()` destructure must bind exactly `{ value, done }` in order",
+          });
+        }
+        const yTy = analysis.generatorItemTypes.get(nextInfo.genName);
+        const rTy = analysis.generatorRetTypes.get(nextInfo.genName) ?? UNIT;
+        if (!yTy || JSON.stringify(yTy) !== JSON.stringify(rTy)) {
+          throw new UnsupportedError({
+            type: "manual generator `.next()` `{ value, done }` read where the yield type `Y` and return type `R` differ — `value` has no single Rust type (fail-loud residual, series 075)",
+          });
+        }
+        // A send `.next(v)` (076) is only valid over a bidirectional generator (one
+        // that reads a `yield` result). Sending into a pull-only generator is
+        // fail-loud (there is no `resume` / `TNext` to receive it).
+        const bidi = analysis.bidirectionalGenerators.has(nextInfo.genName);
+        if (nextInfo.sent && !bidi) {
+          throw new UnsupportedError({
+            type: "send value `gen.next(v)` into a non-bidirectional generator (it reads no `yield` result — nothing receives the sent value)",
+          });
+        }
+        return {
+          kind: "let",
+          name: "value",
+          mut: false,
+          ty: null,
+          init: {
+            kind: "genStepTuple",
+            recv: lowerExpr(nextInfo.recvExpr, analysis),
+            sent: bidi
+              ? nextInfo.sent
+                ? lowerExpr(nextInfo.sent, analysis)
+                : null
+              : undefined,
+          },
+          names: ["value", "done"],
+        };
+      }
       const structName = sourceStructName(d.init, analysis);
       if (!structName) {
         throw new UnsupportedError({
@@ -4925,7 +5268,13 @@ function lowerVarDecl(
       !isArrayFindCall(d.init) &&
       !isAllSettledAwait(d.init) &&
       !isSpawnInit(d.init, analysis) &&
-      !isBitwiseInit(d.init)
+      !isBitwiseInit(d.init) &&
+      // A `const it = g()` generator instance is typed by construction (the wrapper
+      // fn's `impl Iterator` / the struct); no dialect annotation expresses it.
+      !isGeneratorCall(d.init, analysis) &&
+      // `Array.from(src, fn)` (075) → a `Vec` typed by the lifted callback's return;
+      // Rust infers it (like `<array>.map(fn)`), so no annotation is required.
+      !isArrayFromMapCall(d.init)
     ) {
       throw new UnsupportedError({
         type: `binding '${d.id.name}' without a type annotation`,
@@ -4965,10 +5314,17 @@ function lowerVarDecl(
       };
       analysis.dynBindings.set(d.id.name, base);
     }
+    // A stepped generator instance (`const it = g()`, series 075) is mutated by each
+    // `it.step()` (`&mut self`), so it must bind `let mut` even without a TS reassign.
+    const steppedInstance =
+      isGeneratorCall(d.init, analysis) &&
+      analysis.steppedGenerators.has(
+        ((d.init as CallExpression).callee as Identifier).name,
+      );
     return {
       kind: "let",
       name: d.id.name,
-      mut: mutable?.has(d.id.name) ?? false,
+      mut: (mutable?.has(d.id.name) ?? false) || steppedInstance,
       ty: letTy,
       init,
     };
@@ -6345,25 +6701,83 @@ function lowerCall(
       return lowerObjectStatic(methodName, call, analysis);
     }
     // `Array.from(iter)` (series 065) → `iter.collect::<Vec<_>>()` — the eager
-    // consumer of a generator's `impl Iterator` (or any iterable). The mapping
-    // overload `Array.from(iter, fn)` stays fail-loud (a later slice).
+    // consumer of a generator's `impl Iterator`. The mapping overload
+    // `Array.from(src, fn)` (series 075) reuses 057's callback-lift: it lowers to
+    // `<src-iter>.map(__cb).collect::<Vec<_>>()`, with `.enumerate()` for the `(x,i)`
+    // index overload. The source is widened to any array/iterable in the mapping
+    // form (a generator uses its `impl Iterator`, an array its `.iter()`); the
+    // no-mapping form keeps its 065 generator-only gate.
     if (
       m.object.type === "Identifier" &&
       (m.object as Identifier).name === "Array" &&
       methodName === "from"
     ) {
       const arg = call.arguments[0];
-      if (call.arguments.length !== 1 || !arg) {
+      const mapFn = call.arguments[1];
+      if (!arg) {
+        throw new UnsupportedError({ type: "Array.from with no source" });
+      }
+      if (!mapFn) {
+        // No-mapping form (065): generator source only.
+        if (!isGeneratorCall(arg, analysis)) {
+          throw new UnsupportedError({
+            type: "Array.from over a non-generator (only `Array.from(g())` over a generator is modeled)",
+          });
+        }
+        return { kind: "collectVec", iter: lowerExpr(arg, analysis) };
+      }
+      // Mapping form (075): `Array.from(src, fn)`.
+      if (mapFn.type !== "ArrowFunctionExpression") {
         throw new UnsupportedError({
-          type: "Array.from with a mapping function (only `Array.from(iter)` is modeled)",
+          type: "Array.from mapping argument must be an arrow function",
         });
       }
-      if (!isGeneratorCall(arg, analysis)) {
-        throw new UnsupportedError({
-          type: "Array.from over a non-generator (only `Array.from(g())` over a generator is modeled)",
-        });
+      const fromGenerator = isGeneratorCall(arg, analysis);
+      // The element type: a generator's `Item`, else the array source's element.
+      const elemType = fromGenerator
+        ? (analysis.generatorItemTypes.get(
+            ((arg as CallExpression).callee as Identifier).name,
+          ) ?? { kind: "f64" })
+        : elementTypeOf(arg, analysis);
+      const lifted = liftCallback(
+        mapFn as ArrowFunctionExpression,
+        analysis,
+        "map",
+        elemType,
+        1,
+        undefined,
+        { indexAllowed: true },
+      );
+      return {
+        kind: "arrayFromMap",
+        source: lowerExpr(arg, analysis),
+        fromIterator: fromGenerator,
+        cbName: lifted.cbName,
+        elemParam: lifted.paramNames[0] as string,
+        indexParam: lifted.indexParam,
+        forwarded: lifted.forwarded,
+        elemMode: lifted.elemMode,
+      };
+    }
+    // A bare `gen.next(v)` / `gen.next()` on a **bidirectional** generator (series
+    // 076) — driven forward without reading the `{ value, done }` result (the common
+    // "advance and discard" statement). Routes to `gen.resume(<sent>)`; a bare
+    // `.next()` sends the `TNext` default. (The `{ value, done }`-destructured read
+    // is handled in `lowerVarDecl` via `genStepTuple`.)
+    if (methodName === "next") {
+      const nx = resolveGeneratorNext(call, analysis);
+      if (nx && analysis.bidirectionalGenerators.has(nx.genName)) {
+        return {
+          kind: "method",
+          receiver: lowerExpr(nx.recvExpr, analysis),
+          name: "resume",
+          args: [
+            nx.sent
+              ? lowerExpr(nx.sent, analysis)
+              : { kind: "raw", text: "Default::default()" },
+          ],
+        };
       }
-      return { kind: "collectVec", iter: lowerExpr(arg, analysis) };
     }
     // Manual `.next()` on a generator (series 065) → fail-loud: Rust's
     // `Iterator::next()` is pull-only (`Option<T>`, no `{value, done}`, no
@@ -7380,6 +7794,240 @@ function isGeneratorCall(e: Expression, analysis: ModuleAnalysis): boolean {
       ((e as CallExpression).callee as Identifier).name,
     )
   );
+}
+
+/** Is `e` an `Array.from(src, fn)` mapping-overload call (series 075)? */
+function isArrayFromMapCall(e: Expression): boolean {
+  if (e.type !== "CallExpression") return false;
+  const call = e as CallExpression;
+  if (call.callee.type !== "MemberExpression") return false;
+  const m = call.callee as MemberExpression;
+  return (
+    m.object.type === "Identifier" &&
+    (m.object as Identifier).name === "Array" &&
+    m.property.type === "Identifier" &&
+    (m.property as Identifier).name === "from" &&
+    call.arguments.length === 2
+  );
+}
+
+/**
+ * If `e` is a manual generator step `<recv>.next()` / `<recv>.next(v)` — where
+ * `<recv>` is a direct generator call `g()` or a generator-instance binding `it`
+ * (`const it = g()`) — return `{ recvExpr, genName, sent }` (`sent` the send-value
+ * argument of a bidirectional `.next(v)`, series 076, else `null` for a bare
+ * `.next()`). Otherwise null. (Series 075/076.)
+ */
+function resolveGeneratorNext(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): { recvExpr: Expression; genName: string; sent: Expression | null } | null {
+  if (e.type !== "CallExpression") return null;
+  const call = e as CallExpression;
+  if (call.callee.type !== "MemberExpression") return null;
+  // A bare `.next()` (075) or a single-arg `.next(v)` send (076); more args isn't a
+  // generator step.
+  if (call.arguments.length > 1) return null;
+  const sent = (call.arguments[0] as Expression | undefined) ?? null;
+  const m = call.callee as MemberExpression;
+  if (
+    m.property.type !== "Identifier" ||
+    (m.property as Identifier).name !== "next"
+  ) {
+    return null;
+  }
+  if (isGeneratorCall(m.object as Expression, analysis)) {
+    return {
+      recvExpr: m.object as Expression,
+      genName: ((m.object as CallExpression).callee as Identifier).name,
+      sent,
+    };
+  }
+  if (
+    m.object.type === "Identifier" &&
+    analysis.generatorInstances.has((m.object as Identifier).name)
+  ) {
+    return {
+      recvExpr: m.object as Expression,
+      genName: analysis.generatorInstances.get(
+        (m.object as Identifier).name,
+      ) as string,
+      sent,
+    };
+  }
+  return null;
+}
+
+/**
+ * Whole-program pre-scan (series 075) → `analysis.steppedGenerators`: the set of
+ * generator names consumed by a manual `step()` surface, which must therefore lower
+ * to the state-machine struct (never the straight-line fast path). Three triggers:
+ *   - a manual `.next()` — `g().next()` or `it.next()` where `it` is a
+ *     generator-instance binding (`const it = g()`, tracked here);
+ *   - a fixed-arity destructure `const [a, b] = g()`;
+ *   - a `yield*` whose completion value is read (`const r = yield* inner()`), which
+ *     needs the delegate boxed as `dyn Steppable`.
+ * Name-based (matching the rest of this intra-procedural analysis).
+ */
+function collectSteppedGenerators(
+  program: Program,
+  analysis: ModuleAnalysis,
+): void {
+  const stepped = analysis.steppedGenerators;
+  // Binding → generator fn name, from `const it = g()` over a known generator.
+  const instances = new Map<string, string>();
+  const genOf = (e: unknown): string | null => {
+    if (
+      e &&
+      typeof e === "object" &&
+      (e as { type?: string }).type === "CallExpression" &&
+      isGeneratorCall(e as Expression, analysis)
+    ) {
+      return ((e as CallExpression).callee as Identifier).name;
+    }
+    return null;
+  };
+
+  // Pass 1: record generator-instance bindings so `it.next()` resolves.
+  const scanBindings = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const c of node) scanBindings(c);
+      return;
+    }
+    const n = node as { type?: string; declarations?: unknown[] };
+    if (n.type === "VariableDeclaration") {
+      for (const d of n.declarations ?? []) {
+        const dd = d as { id?: { type?: string; name?: string }; init?: unknown };
+        if (dd.id?.type === "Identifier" && dd.id.name) {
+          const g = genOf(dd.init);
+          if (g) instances.set(dd.id.name, g);
+        }
+      }
+    }
+    for (const v of Object.values(n)) scanBindings(v);
+  };
+  scanBindings(program);
+  for (const [k, v] of instances) analysis.generatorInstances.set(k, v);
+
+  // Pass 1b: mark **bidirectional** generators (series 076) — those whose body reads
+  // a `yield` result (`const x = yield e`, a VariableDeclaration whose init is a
+  // non-delegate `YieldExpression`). Their consumers route `.next(v)` → `resume(v)`.
+  for (const stmt of program.body) {
+    if (
+      (stmt as { type?: string }).type === "FunctionDeclaration" &&
+      (stmt as { generator?: boolean }).generator === true
+    ) {
+      const gname = (stmt as { id?: { name?: string } }).id?.name;
+      const gbody = (stmt as { body?: unknown }).body;
+      if (gname && readsYieldResult(gbody)) {
+        analysis.bidirectionalGenerators.add(gname);
+      }
+    }
+  }
+
+  // Pass 2: find the manual-step trigger sites.
+  const scan = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const c of node) scan(c);
+      return;
+    }
+    const n = node as {
+      type?: string;
+      callee?: unknown;
+      object?: unknown;
+      property?: { name?: string };
+      declarations?: unknown[];
+      argument?: unknown;
+      delegate?: boolean;
+    };
+    // `<recv>.next()` — a manual step over a generator call or instance binding.
+    if (
+      n.type === "CallExpression" &&
+      (n.callee as { type?: string })?.type === "MemberExpression"
+    ) {
+      const m = n.callee as MemberExpression;
+      if (
+        m.property.type === "Identifier" &&
+        (m.property as Identifier).name === "next"
+      ) {
+        const direct = genOf(m.object);
+        if (direct) stepped.add(direct);
+        else if (
+          m.object.type === "Identifier" &&
+          instances.has((m.object as Identifier).name)
+        ) {
+          stepped.add(instances.get((m.object as Identifier).name) as string);
+        }
+      }
+    }
+    // `const [a, b] = g()` — a fixed-arity generator destructure.
+    if (n.type === "VariableDeclaration") {
+      for (const d of n.declarations ?? []) {
+        const dd = d as { id?: { type?: string }; init?: unknown };
+        if (dd.id?.type === "ArrayPattern") {
+          const g = genOf(dd.init);
+          if (g) stepped.add(g);
+        }
+        // `const r = yield* inner()` — a read `yield*` completion value.
+        const init = dd.init as { type?: string; delegate?: boolean; argument?: unknown } | undefined;
+        if (init?.type === "YieldExpression" && init.delegate) {
+          const g = genOf(init.argument);
+          if (g) stepped.add(g);
+        }
+      }
+    }
+    for (const v of Object.values(n)) scan(v);
+  };
+  scan(program);
+}
+
+/**
+ * Does this generator body **read** a `yield` result (`const x = yield e`, series
+ * 076)? Scans for a VariableDeclaration whose init is a non-delegate
+ * `YieldExpression`, without descending into nested functions (their `yield`s bind
+ * to a different generator). Marks the generator bidirectional.
+ */
+function readsYieldResult(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  const n = node as {
+    type?: string;
+    id?: { name?: string };
+    init?: { type?: string; delegate?: boolean };
+    declarations?: unknown[];
+  };
+  // Don't descend into a nested function — its `yield`s are a different generator.
+  if (
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression" ||
+    n.type === "FunctionDeclaration"
+  ) {
+    return false;
+  }
+  if (n.type === "VariableDeclaration") {
+    for (const d of n.declarations ?? []) {
+      const dd = d as {
+        id?: { type?: string };
+        init?: { type?: string; delegate?: boolean } | null;
+      };
+      if (
+        dd.init?.type === "YieldExpression" &&
+        !dd.init.delegate &&
+        dd.id?.type === "Identifier"
+      ) {
+        return true;
+      }
+    }
+  }
+  for (const v of Object.values(n)) {
+    if (Array.isArray(v)) {
+      for (const c of v) if (readsYieldResult(c)) return true;
+    } else if (readsYieldResult(v)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Is `e` a call to `Object.entries(...)` (series 043)? */

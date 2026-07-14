@@ -165,6 +165,12 @@ export type HirExpr =
   | { kind: "ident"; name: string }
   /** A Rust path like `Color::Red` (an enum variant). Segments are `::`-joined. */
   | { kind: "path"; segments: string[] }
+  /**
+   * A verbatim Rust snippet with no TS-source counterpart (series 076): the
+   * `TNext` default `Default::default()` passed to `gen.resume(...)` when a bare
+   * `gen.next()` drives a bidirectional generator forward. Emitted as-is.
+   */
+  | { kind: "raw"; text: string }
   | {
       kind: "binary";
       op: string;
@@ -231,6 +237,25 @@ export type HirExpr =
    * without a target-type annotation.
    */
   | { kind: "collectVec"; iter: HirExpr }
+  /**
+   * A manual generator step `it.next()` / `it.next(v)` read as `{ value, done }`
+   * (series 075/076): `match <recv>.step() { GenStep::Yield(v) => (v, false),
+   * GenStep::Return(v) => (v, true) }` — a `(value, done)` tuple, bound by a
+   * tuple-destructure `let`. Requires the generator's `Y` and `R` to be the same Rust
+   * type (so `value` is one type); otherwise lowering is fail-loud. For a
+   * bidirectional generator (076) the driver is `<recv>.resume(<sent>)` — `sent` the
+   * `.next(v)` send value, or `Default::default()` for a bare `.next()`.
+   */
+  | { kind: "genStepTuple"; recv: HirExpr; sent?: HirExpr | null }
+  /**
+   * A fixed-arity generator destructure `const [a, b] = g()` (series 075, rides
+   * 067): a prefix pull off the generator's `impl Iterator` —
+   * `{ let mut __it = <source>; (__it.next().unwrap(), …<arity>) }` — bound by a
+   * tuple-destructure `let`. Each `.next().unwrap()` assumes the generator yields at
+   * least `arity` values (an early exhaustion panics, matching a fail-loud contract;
+   * JS would bind `undefined`, which the dialect has no model for).
+   */
+  | { kind: "genPrefixPull"; source: HirExpr; arity: number }
   /** struct object literal → `Name { field: value, … }`. */
   | {
       kind: "structLit";
@@ -382,6 +407,23 @@ export type HirExpr =
        * usize` is threaded before the forwarded free vars. Absent → single-param.
        */
       indexParam?: string;
+    }
+  /**
+   * `Array.from(src, fn)` — the mapping overload (series 075), reusing 057's
+   * callback lift. `<src>.map(cb).collect::<Vec<_>>()` when `fromIterator` (a
+   * generator's `impl Iterator` is already an iterator), else
+   * `<src>.iter().map(cb).collect::<Vec<_>>()` (an array source). The `(x, i)` index
+   * overload adds `.enumerate()` (forwarding `i as f64`), exactly like `iterMap`.
+   */
+  | {
+      kind: "arrayFromMap";
+      source: HirExpr;
+      fromIterator: boolean;
+      cbName: string;
+      elemParam: string;
+      indexParam?: string;
+      forwarded: HirExpr[];
+      elemMode: ElemMode;
     }
   /**
    * `xs.filter(p => body)` →
@@ -670,9 +712,21 @@ export type HirStmt =
   /**
    * A generator state-machine terminal (series 052): `self.state = <terminal>;
    * return None;`. Parks the machine in its exhausted state so every subsequent
-   * `next()` also returns `None`.
+   * `next()` also returns `None`. When `retValue` is present (a `return <value>`,
+   * series 075) it stashes `self.__ret = Some(<value>);` before parking so `step()`
+   * can `take()` it as the `GenStep::Return` payload. `hasRet` records that the
+   * generator has a non-`()` `R` (a `__ret` field exists), so a value-less terminal
+   * still returns `GenStep::Return(self.__ret.take()…)` rather than `Return(())`.
    */
-  | { kind: "genDone"; terminal: number }
+  | { kind: "genDone"; terminal: number; retValue?: HirExpr; hasRet?: boolean }
+  /**
+   * The head of a **resumed** arm of a bidirectional generator (series 076): binds
+   * the sent value to the `const x = yield e` target — `self.<target> =
+   * self.__sent.take().unwrap();`. `resume(&mut self, sent)` stashes `self.__sent =
+   * Some(sent)` before the loop; the resumed arm `take()`s it. State 0 has no
+   * pending yield, so the first-resume value is discarded (matching JS).
+   */
+  | { kind: "genResumeBind"; target: string }
   /**
    * `yield* <iter>` delegation (series 065). A delegating state in the 052 machine:
    * lazily seeds a boxed delegate iterator field (`self.<field> =
@@ -680,7 +734,20 @@ export type HirStmt =
    * `Some(v)` re-yields `v` (stays in this state), `None` clears the field and
    * transitions to `resumeState`. `<iter>` is `<expr>.into_iter()` boxed.
    */
-  | { kind: "yieldStarStep"; field: string; iter: HirExpr; resumeState: number }
+  | {
+      kind: "yieldStarStep";
+      field: string;
+      iter: HirExpr;
+      resumeState: number;
+      /**
+       * A read `yield*` completion value (series 075 — `const r = yield* inner()`):
+       * the delegate is boxed as `dyn Steppable` and pumped via `.step()`; on
+       * `GenStep::Return(rv)` the payload binds to `resultTarget` before advancing.
+       * When unset the 065 `dyn Iterator` + `.next()` box is kept byte-for-byte.
+       */
+      readResult?: boolean;
+      resultTarget?: string;
+    }
   /**
    * `throw new Error(msg)` → `return Err(value);` (`value` is the message). Under
    * a `"use panic"` scope (series 028a) `panic` is set and it emits
@@ -1058,6 +1125,26 @@ export interface HirGenerator {
   structName: string;
   /** `Item = T` — from the `Generator<T>` / `IterableIterator<T>` annotation. */
   item: RustType;
+  /**
+   * The completion type `R` (series 075) — the 2nd `Generator<Y, R>` type arg, else
+   * inferred from a `return <value>`; bare `return` / fall-off is `()` (unit). Backs
+   * the `GenStep::Return(R)` payload and the `Steppable<Y, R>` / `step()` surface.
+   */
+  retTy: RustType;
+  /**
+   * Whether this generator is consumed by a manual `step()` surface (series 075 —
+   * `it.next()` / destructure / read `yield*`). When true the public wrapper fn
+   * returns the **concrete struct** (which impls both `Iterator` and `Steppable`)
+   * rather than an opaque `impl Iterator` (which would hide `step()`); `for-of` /
+   * `.collect()` still compose (the struct is `IntoIterator` via its `Iterator`).
+   */
+  exposesStep: boolean;
+  /**
+   * Whether any state carries a `return <value>` payload (series 075). When true a
+   * `__ret: Option<R>` field is emitted and `step()` `take()`s it at the terminal;
+   * when false every terminal is `Return(())` and no field is needed.
+   */
+  hasReturnValue: boolean;
   /** The wrapper fn / `new` params; each is also a struct field (captured owned). */
   params: HirParam[];
   /**
@@ -1071,10 +1158,31 @@ export interface HirGenerator {
   /** The reserved terminal state number (the `_ => return None` arm). */
   terminal: number;
   /**
-   * `yield*` delegate fields (series 065) — one per delegating state, each an
-   * `Option<Box<dyn Iterator<Item = T>>>` seeded lazily and pumped to exhaustion.
+   * `yield*` delegate fields (series 065/075) — one per delegating state. An unread
+   * completion (`steppable: false`) is `Option<Box<dyn Iterator<Item = Y>>>`, seeded
+   * lazily and pumped to exhaustion (065, byte-for-byte). A read completion
+   * (`steppable: true`, `const r = yield* inner()`) is `Option<Box<dyn Steppable<Y,
+   * Rd>>>` pumped via `.step()`, its `Return` payload bound (series 075).
    */
-  delegateFields: string[];
+  delegateFields: { name: string; steppable: boolean; delegateRet: RustType }[];
+  /**
+   * Whether this generator **reads** a `yield` result (`const x = yield e`) and is
+   * therefore bidirectional (series 076). When true the struct gains an inherent
+   * `resume(&mut self, sent: TNext) -> GenStep<Y, R>` (the value-**in** driver) and a
+   * `__sent: Option<TNext>` field, and `step()` / `impl Iterator` route through
+   * `resume(<default>)` (when `nextDefaultable`). When false the generator stays on
+   * 075's pull-only `step()` driver, byte-for-byte.
+   */
+  bidirectional: boolean;
+  /** The resume-in type `TNext` (series 076) — the `resume` param / `__sent` field. */
+  nextTy: RustType;
+  /**
+   * Whether `TNext` is **defaultable** — lowers to `Option<T>` (the 066 undefined
+   * model, default `None`). When true the bidirectional generator keeps `impl
+   * Iterator` / `step()` (routed through `resume(<default>)`), so `for-of` / spread /
+   * `.collect()` still compose; when false the struct is `resume`-only.
+   */
+  nextDefaultable: boolean;
 }
 
 /** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */

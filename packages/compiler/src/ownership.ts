@@ -428,6 +428,12 @@ function transfer(
       map.set(s, liveAfter);
       return union(exprUses(s.iter, movable), liveAfter);
     }
+    case "genResumeBind": {
+      // Binds `self.<target> = self.__sent.take()` (076) — struct-field writes/reads
+      // only, no movable local involved; liveness passes through unchanged.
+      map.set(s, liveAfter);
+      return liveAfter;
+    }
   }
 }
 

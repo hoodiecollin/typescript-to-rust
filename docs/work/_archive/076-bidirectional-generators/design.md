@@ -1,12 +1,42 @@
 # 076 — Bidirectional generators (`gen.next(v)` resume-value, stable, extends 052)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the bidirectional
-> `gen.next(v)` deferral, issue **#32**. Dialect calls made with Collin 2026-07-10
-> (`needs-user-input` cleared). **Extends 075's `GenStep<Y, R>`** with a send channel —
-> 075 establishes the result type, 076 adds the value-in path. **Stable Rust** (no
-> nightly `Coroutine`, no stackful crate); rides 052's hand-rolled stackless machine.
+> **Status: SHIPPED (2026-07-14).** Graduates the bidirectional `gen.next(v)` deferral,
+> issue **#32**. Dialect calls made with Collin 2026-07-10 (`needs-user-input` cleared).
+> **Extends 075's `GenStep<Y, R>`** with a send channel — 075 establishes the result
+> type, 076 adds the value-in path. **Stable Rust** (no nightly `Coroutine`, no stackful
+> crate); rides 052's hand-rolled stackless machine. Specs: `specs.md` →
+> `packages/compiler/tests/bidirectional-generators.test.ts` (10 specs, all green; full
+> suite 774 pass / 0 fail, typecheck clean).
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **Bidirectional detection** is a whole-program pre-scan (`readsYieldResult`, in
+>   `collectSteppedGenerators`) → `analysis.bidirectionalGenerators`: a generator whose
+>   body has a `const x = yield e` (a VariableDeclaration with a **non-delegate**
+>   `YieldExpression` init, not descending into nested functions). `TNext` comes from the
+>   3rd `Generator<Y, R, TNext>` arg → `analysis.generatorNextTypes`.
+> - **`resume(&mut self, sent: TNext) -> GenStep<Y, R>`** is emitted as an **inherent**
+>   method and is the **single driver** for a bidirectional generator: it stashes
+>   `self.__sent = Some(sent)` before the shared `loop { match self.state { … } }`, and
+>   each resumed arm's head (`genResumeBind` HIR stmt) does `self.<x> =
+>   self.__sent.take().unwrap()`. State 0 has no pending yield, so the first-resume value
+>   is discarded for free (matching JS). `__sent: Option<TNext>` is a new struct field.
+> - The **`const x = yield e`** CFG terminator reuses the `yield` node with a new
+>   `resultTarget` (mirroring `yieldStar`'s `resultTarget`); the target is a carried
+>   field (written in its resumed arm, read after), typed by `TNext`.
+> - **Dual surface (Q3):** when `TNext` lowers to `Option<T>` (the 066 undefined model,
+>   default `None`), `impl Steppable::step` and `impl Iterator::next` both route through
+>   `self.resume(Default::default())` — faithful to JS's `for-of` sending `undefined`. A
+>   **non-defaultable** `TNext` is `resume`-only: no `step`/`Iterator`, and its wrapper fn
+>   returns the concrete struct. `for-of` over a non-defaultable bidirectional generator
+>   is **fail-loud at lowering** (`lowerForOf`).
+> - **Consumer routing:** `gen.next(v)` / `gen.next()` `{ value, done }`-destructured
+>   → `genStepTuple` now drives `(&mut recv).resume(<sent>)` (`Default::default()` for a
+>   bare `.next()`) rather than `step()`. A **bare** `gen.next(v)` statement (advance +
+>   discard) lowers to a `resume(<sent>)` method call. A send `.next(v)` into a
+>   **non-bidirectional** generator is fail-loud. A new `raw` HIR expr carries the
+>   `Default::default()` snippet (no TS source).
+> - **Unannotated `TNext`** with a read yield result → fail-loud in
+>   `buildGeneratorStateMachine` (can't type `sent`).
 
 ## Problem
 

@@ -1,13 +1,44 @@
 # 075 — Generator consumption tail (`Array.from(_,fn)`, manual `{value,done}`, `yield*` return-value, destructuring)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the four 065
-> deferred consumption residuals, issue **#39**. Dialect calls made with Collin
-> 2026-07-10 (`needs-user-input` cleared). Introduces the **`GenStep<Y, R>`** result
-> type **shared with #32** (series 076) — #39 establishes it, #32 adds the send channel.
-> Blocked-by **#34** (067 binding-destructuring, design-complete, **not yet shipped**) —
-> only the generator-destructuring *impl slice* waits on it; the rest ships independently.
+> **Status: SHIPPED (2026-07-14).** Graduates the four 065 deferred consumption
+> residuals, issue **#39**. Dialect calls made with Collin 2026-07-10
+> (`needs-user-input` cleared). Introduces the **`GenStep<Y, R>`** result type
+> **shared with #32** (series 076) — #39 establishes it, #32 adds the send channel.
+> Rode **#34** (067 binding-destructuring, shipped in-tree) for the generator-
+> destructuring slice. Specs: `specs.md` →
+> `packages/compiler/tests/generator-consumption-tail.test.ts` (18 specs, all green;
+> full suite 764 pass / 0 fail).
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **`GenStep<Y, R>` + `Steppable<Y, R>`** live in `crates/tslib/src/gen.rs`
+>   (`GenStep::Yield(Y)` / `GenStep::Return(R)`; `Steppable::step(&mut self) ->
+>   GenStep<Y, R>`). Every state-machine generator emits `impl Steppable` as the
+>   **primary driver** and `impl Iterator` delegates to it
+>   (`step() { Yield(v)=>Some(v), Return(_)=>None }`) — no duplicated state match.
+>   The module imports `use tslib::gen::GenStep;` when any generator is present.
+> - **`return <value>`** carries the payload to the terminal via a `__ret: Option<R>`
+>   field (emitted only when a value-carrying `return` exists); `step()` `take()`s it.
+>   `R` is the 2nd `Generator<Y, R>` arg, else inferred from the return expr, else
+>   `()`. A repeated `step()` past a non-`()` completion **panics** (documented residual).
+> - **Manual `.next()`** is scoped to the **`{ value, done }` shorthand destructure**
+>   (`const { value, done } = it.next()`), lowered to a `(value, done)` tuple off
+>   `step()`. It requires **`Y === R`** (so `value` is one Rust type) — a mismatch, a
+>   renamed/partial destructure, or binding the whole result (`const s = it.next()`)
+>   stays fail-loud. A stepped generator's wrapper fn returns the **concrete struct**
+>   (not opaque `impl Iterator`) so `step()` is reachable; a `const it = g()` instance
+>   binds `let mut` and is exempt from the annotation gate.
+> - **`Array.from(src, fn)`** reuses 057 `liftCallback`; a generator source maps its
+>   `impl Iterator` directly (`g().map(cb)`), an array source via `.iter().map(cb)`,
+>   both `.enumerate()` for the `(x, i)` overload, then `.collect::<Vec<_>>()`.
+> - **`yield*` completion value** (`const r = yield* inner()`): the delegate is boxed
+>   as `Box<dyn Steppable<Y, Rd>>` and pumped via `.step()`, binding the `Return`
+>   payload to a carried field; the unread path keeps 065's `dyn Iterator` box
+>   byte-for-byte. A read `yield*` over a non-generator iterable is fail-loud.
+> - **Generator destructuring** `const [a, b] = g()`: a fixed-arity prefix pull
+>   (`{ let mut __it = g(); (__it.next().unwrap(), …) }`) off the `impl Iterator` — no
+>   `Steppable` needed. A rest element is fail-loud (rides 058).
+> - A whole-program pre-scan (`collectSteppedGenerators`) drives the `steppedGenerators`
+>   / `generatorInstances` / `generator{Item,Ret}Types` analysis maps.
 
 ## Problem
 

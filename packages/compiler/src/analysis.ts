@@ -238,6 +238,50 @@ export interface ModuleAnalysis {
    */
   generators: Set<string>;
   /**
+   * Generator names that are consumed by a **manual `step()`** surface (series 075):
+   * a manual `it.next()` / `g().next()` read, a fixed-arity destructure
+   * `const [a, b] = g()`, or a `yield*` whose completion value is read. Such a
+   * generator must lower to the state-machine struct (which carries `step()` /
+   * `Steppable`), never the straight-line `vec![…].into_iter()` fast path. Populated
+   * by a whole-program pre-scan in `lower()`.
+   */
+  steppedGenerators: Set<string>;
+  /**
+   * Local binding name → the generator fn it was bound to (series 075) — from
+   * `const it = g()`. Lets a later `it.next()` / `it.step()` resolve the generator
+   * instance (065 gated manual consumers to a *direct* `g().next()` call). Name-based,
+   * last-write-wins (matching the rest of this intra-procedural analysis).
+   */
+  generatorInstances: Map<string, string>;
+  /**
+   * Generator name → its declared completion type `R` (series 075), from the 2nd
+   * `Generator<Y, R>` type arg. Used to type a read `yield*` delegate's `Steppable<Y,
+   * R>` box and the bound completion value. Absent → the delegate's `R` is unit.
+   */
+  generatorRetTypes: Map<string, RustType>;
+  /**
+   * Generator name → its yield type `Y` (series 075), from the 1st `Generator<Y, R>`
+   * type arg. Used with `generatorRetTypes` to check `Y === R` for a `{ value, done }`
+   * read (so the `value` binding is a single Rust type).
+   */
+  generatorItemTypes: Map<string, RustType>;
+  /**
+   * Generator name → its resume-in type `TNext` (series 076), from the 3rd
+   * `Generator<Y, R, TNext>` type arg. Types `resume(&mut self, sent: TNext)`.
+   * Absent for a generator that declares no 3rd arg — a read yield result over such
+   * a generator is fail-loud (can't type `sent`).
+   */
+  generatorNextTypes: Map<string, RustType>;
+  /**
+   * Generator names whose yield **result is read** (`const x = yield e`), making
+   * them **bidirectional** (series 076): the struct gains an inherent
+   * `resume(&mut self, sent: TNext) -> GenStep<Y, R>` (the value-**in** path), and
+   * the pull-only `step()` / `impl Iterator` surfaces route through
+   * `resume(<default>)` when `TNext` is defaultable. Populated by a pre-scan in
+   * `lower()`.
+   */
+  bidirectionalGenerators: Set<string>;
+  /**
    * Binding name → its resolved `RustType` (series 048). Populated by `lower()`
    * (it needs `lowerType`) over every `const`/`let`/`var` and function param.
    * Used by the callback-lifting pass to type a forwarded free variable and to
@@ -1363,6 +1407,18 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     rcScopes,
     arenaScopes,
     generators,
+    // Filled by `lower()` — needs `bindingTypes` to resolve `const it = g()` binds.
+    steppedGenerators: new Set(),
+    // Filled by `lower()` — `const it = g()` binding → generator fn name.
+    generatorInstances: new Map(),
+    // Filled by `lower()` (needs `lowerType`) — generator name → declared `R`.
+    generatorRetTypes: new Map(),
+    // Filled by `lower()` (needs `lowerType`) — generator name → yield type `Y`.
+    generatorItemTypes: new Map(),
+    // Filled by `lower()` (needs `lowerType`) — generator name → declared `TNext`.
+    generatorNextTypes: new Map(),
+    // Filled by `lower()` — generator names whose yield result is read (#32).
+    bidirectionalGenerators: new Set(),
     // Filled in by `lower()` (needs `lowerType`); empty/zero here.
     bindingTypes: new Map(),
     // Built by `lower()` only when source text is threaded in (series 082); null

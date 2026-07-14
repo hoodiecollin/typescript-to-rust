@@ -17,5 +17,6 @@
 //! `as usize` cast.
 
 pub mod array;
+pub mod gen;
 pub mod json;
 pub mod string;

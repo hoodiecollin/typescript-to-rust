@@ -194,6 +194,10 @@ export function emitModule(mod: HirModule): string {
   ) {
     imports.push("use std::rc::Rc;", "use std::cell::RefCell;");
   }
+  // A state-machine generator (series 075) drives its arms via `GenStep<Y, R>`
+  // (tslib); import it so the `impl Steppable` / `step()` arms name it unqualified.
+  if (mod.items.some((i) => i.kind === "generator"))
+    imports.push("use tslib::gen::GenStep;");
   const prelude = imports.length > 0 ? `${imports.join("\n")}\n\n` : "";
   return `${prelude}${parts.join("\n\n")}\n`;
 }
@@ -255,16 +259,29 @@ function emitItem(
 function emitGenerator(g: HirGenerator): string {
   const sname = rid(g.structName);
   const itemTy = emitType(g.item);
+  const retTy = emitType(g.retTy);
 
   // 1. struct — `state: u32` first, then owned params, then across-yield locals.
-  // `yield*` delegate fields (065): a boxed trait-object iterator, `None` until the
-  // delegating state is first entered.
-  const delegateTy = `Option<Box<dyn Iterator<Item = ${itemTy}>>>`;
+  // A `return <value>` generator (075) also carries `__ret: Option<R>` (stashed at
+  // the terminal, `take()`n by `step()`). `yield*` delegate fields box either a `dyn
+  // Iterator` (065 unread) or a `dyn Steppable` (075 read-completion) trait object,
+  // `None` until the delegating state is first entered.
+  const delegateFieldLines = g.delegateFields.map((f) => {
+    const ty = f.steppable
+      ? `Option<Box<dyn tslib::gen::Steppable<${itemTy}, ${emitType(f.delegateRet)}>>>`
+      : `Option<Box<dyn Iterator<Item = ${itemTy}>>>`;
+    return `${INDENT}${rid(f.name)}: ${ty},`;
+  });
+  // A bidirectional generator (076) also carries `__sent: Option<TNext>` — the send
+  // value stashed by `resume(sent)` before the loop, `take()`n at the resumed arm.
+  const nextTy = emitType(g.nextTy);
   const fieldLines = [
     `${INDENT}state: u32,`,
+    ...(g.hasReturnValue ? [`${INDENT}__ret: Option<${retTy}>,`] : []),
+    ...(g.bidirectional ? [`${INDENT}__sent: Option<${nextTy}>,`] : []),
     ...g.params.map((p) => `${INDENT}${rid(p.name)}: ${emitType(p.ty)},`),
     ...g.localFields.map((f) => `${INDENT}${rid(f.name)}: ${emitType(f.ty)},`),
-    ...g.delegateFields.map((f) => `${INDENT}${rid(f)}: ${delegateTy},`),
+    ...delegateFieldLines,
   ].join("\n");
   const struct = `struct ${sname} {\n${fieldLines}\n}`;
 
@@ -274,9 +291,11 @@ function emitGenerator(g: HirGenerator): string {
     .join(", ");
   const ctorInits = [
     "state: 0",
+    ...(g.hasReturnValue ? ["__ret: None"] : []),
+    ...(g.bidirectional ? ["__sent: None"] : []),
     ...g.params.map((p) => rid(p.name)),
     ...g.localFields.map((f) => `${rid(f.name)}: Default::default()`),
-    ...g.delegateFields.map((f) => `${rid(f)}: None`),
+    ...g.delegateFields.map((f) => `${rid(f.name)}: None`),
   ].join(", ");
   const newFn = [
     `impl ${sname} {`,
@@ -286,32 +305,115 @@ function emitGenerator(g: HirGenerator): string {
     `}`,
   ].join("\n");
 
-  // 3. impl Iterator — the `loop { match self.state { … } }` driver.
+  // 3. the state-machine body — `loop { match self.state { … } }` returning
+  // `GenStep<Y, R>` (052 state arms, 075 completion-value payload). This is the
+  // shared driver: it lives in `step()` for a pull-only generator (075), or in
+  // `resume(sent)` for a bidirectional one (076) with `step()`/`next()` routing
+  // through `resume(<default>)`.
   const arms = g.states
     .map((s) => {
       const body = s.body.map((st) => indent(indent(emitStmt(st)))).join("\n");
       return `${INDENT}${INDENT}${INDENT}${s.id} => {\n${body}\n${INDENT}${INDENT}${INDENT}}`;
     })
     .join("\n");
-  const iter = [
-    `impl Iterator for ${sname} {`,
-    `${INDENT}type Item = ${itemTy};`,
-    `${INDENT}fn next(&mut self) -> Option<${itemTy}> {`,
+  // The terminal fall-through (`_`) re-returns the completion value: `()` re-returns
+  // freely; a non-`()` `R` has no value left after the first `take()` → fail-loud on
+  // a repeated `step()` past done (a documented 075 residual, panics rather than
+  // mis-values). This keeps `Iterator::next` (which drops `R`) returning `None`.
+  const terminalArm = g.hasReturnValue
+    ? `${INDENT}${INDENT}${INDENT}${INDENT}_ => return GenStep::Return(self.__ret.take().expect("generator stepped past completion (return value already consumed)")),`
+    : `${INDENT}${INDENT}${INDENT}${INDENT}_ => return GenStep::Return(()),`;
+  const driverLoop = [
     `${INDENT}${INDENT}loop {`,
     `${INDENT}${INDENT}${INDENT}match self.state {`,
     arms,
-    `${INDENT}${INDENT}${INDENT}${INDENT}_ => return None,`,
+    terminalArm,
     `${INDENT}${INDENT}${INDENT}}`,
     `${INDENT}${INDENT}}`,
-    `${INDENT}}`,
-    `}`,
   ].join("\n");
 
-  // 4. wrapper fn — the unchanged public `impl Iterator` surface.
-  const wrapArgs = g.params.map((p) => rid(p.name)).join(", ");
-  const wrapper = `fn ${rid(g.name)}(${ctorParams}) -> impl Iterator<Item = ${itemTy}> { ${sname}::new(${wrapArgs}) }`;
+  const items: string[] = [struct, newFn];
 
-  return [struct, newFn, iter, wrapper].join("\n\n");
+  if (g.bidirectional) {
+    // 076: `resume(&mut self, sent: TNext)` is the driver — it stashes the send
+    // value in `__sent` (the resumed arm `take()`s it, binding the `const x = yield
+    // e` target) then runs the shared state loop.
+    const resume = [
+      `impl ${sname} {`,
+      `${INDENT}fn resume(&mut self, sent: ${nextTy}) -> GenStep<${itemTy}, ${retTy}> {`,
+      `${INDENT}${INDENT}self.__sent = Some(sent);`,
+      driverLoop,
+      `${INDENT}}`,
+      `}`,
+    ].join("\n");
+    items.push(resume);
+
+    // When `TNext` is defaultable (`Option<T>`, default `None` — the 066 undefined
+    // model), the generator keeps the pull-only surfaces via `resume(<default>)`:
+    // `Steppable::step` and `impl Iterator` both route through it, so `for-of` /
+    // spread / `.collect()` / `yield*` still compose (JS sends `undefined` there).
+    // A non-defaultable `TNext` is `resume`-only — no `step`/`Iterator` (for-of /
+    // collect over it is fail-loud at the consumption site).
+    if (g.nextDefaultable) {
+      const steppable = [
+        `impl tslib::gen::Steppable<${itemTy}, ${retTy}> for ${sname} {`,
+        `${INDENT}fn step(&mut self) -> GenStep<${itemTy}, ${retTy}> {`,
+        `${INDENT}${INDENT}self.resume(Default::default())`,
+        `${INDENT}}`,
+        `}`,
+      ].join("\n");
+      const iter = [
+        `impl Iterator for ${sname} {`,
+        `${INDENT}type Item = ${itemTy};`,
+        `${INDENT}fn next(&mut self) -> Option<${itemTy}> {`,
+        `${INDENT}${INDENT}match self.resume(Default::default()) {`,
+        `${INDENT}${INDENT}${INDENT}GenStep::Yield(__v) => Some(__v),`,
+        `${INDENT}${INDENT}${INDENT}GenStep::Return(_) => None,`,
+        `${INDENT}${INDENT}}`,
+        `${INDENT}}`,
+        `}`,
+      ].join("\n");
+      items.push(steppable, iter);
+    }
+  } else {
+    // 075 pull-only path (byte-for-byte): `Steppable::step` is the driver; `impl
+    // Iterator::next` delegates to it, dropping the completion value.
+    const steppable = [
+      `impl tslib::gen::Steppable<${itemTy}, ${retTy}> for ${sname} {`,
+      `${INDENT}fn step(&mut self) -> GenStep<${itemTy}, ${retTy}> {`,
+      driverLoop,
+      `${INDENT}}`,
+      `}`,
+    ].join("\n");
+    const iter = [
+      `impl Iterator for ${sname} {`,
+      `${INDENT}type Item = ${itemTy};`,
+      `${INDENT}fn next(&mut self) -> Option<${itemTy}> {`,
+      `${INDENT}${INDENT}match tslib::gen::Steppable::step(self) {`,
+      `${INDENT}${INDENT}${INDENT}GenStep::Yield(__v) => Some(__v),`,
+      `${INDENT}${INDENT}${INDENT}GenStep::Return(_) => None,`,
+      `${INDENT}${INDENT}}`,
+      `${INDENT}}`,
+      `}`,
+    ].join("\n");
+    items.push(steppable, iter);
+  }
+
+  // 5. wrapper fn — the public surface. Normally `impl Iterator<Item = Y>` (065,
+  // byte-for-byte). A manually-stepped generator (075) returns the concrete struct
+  // so `step()` / `Steppable` is reachable through the binding (`for-of` still
+  // composes — the struct is `IntoIterator` via its `Iterator`). A `resume`-only
+  // bidirectional generator (076, non-defaultable `TNext`) has no `impl Iterator`,
+  // so its wrapper must also return the concrete struct.
+  const wrapArgs = g.params.map((p) => rid(p.name)).join(", ");
+  const wrapRet =
+    g.exposesStep || (g.bidirectional && !g.nextDefaultable)
+      ? sname
+      : `impl Iterator<Item = ${itemTy}>`;
+  const wrapper = `fn ${rid(g.name)}(${ctorParams}) -> ${wrapRet} { ${sname}::new(${wrapArgs}) }`;
+  items.push(wrapper);
+
+  return items.join("\n\n");
 }
 
 /**
@@ -715,27 +817,69 @@ function emitStmt(stmt: HirStmt): string {
       return stmt.label ? `continue '${stmt.label};` : "continue;";
     case "yieldReturn":
       // A generator suspend point (052): record the resume arm, then hand the
-      // yielded value back to the caller.
-      return `self.state = ${stmt.resumeState};\nreturn Some(${emitExpr(stmt.value)});`;
+      // yielded value back to the caller. Emitted inside `step()` — the primary
+      // driver (series 075) — so it wraps in `GenStep::Yield`; `next()` delegates.
+      return `self.state = ${stmt.resumeState};\nreturn GenStep::Yield(${emitExpr(stmt.value)});`;
     case "gotoState":
       // A straight-through generator transition (052) — the enclosing
       // `loop { match self.state { … } }` re-enters the target arm.
       return `self.state = ${stmt.state};`;
-    case "genDone":
-      // The generator's terminal transition (052): park in the exhausted state
-      // and return `None` (every later `next()` also returns `None`).
-      return `self.state = ${stmt.terminal};\nreturn None;`;
+    case "genDone": {
+      // The generator's terminal transition (052/075): stash any `return <value>`
+      // payload into `__ret`, park in the exhausted state, and return
+      // `GenStep::Return(<payload>)`. A bare `return` / fall-off returns
+      // `GenStep::Return(())`. `step()` is the driver; `next()` delegates.
+      const park = `self.state = ${stmt.terminal};`;
+      if (stmt.retValue) {
+        return [
+          `self.__ret = Some(${emitExpr(stmt.retValue)});`,
+          park,
+          `return GenStep::Return(self.__ret.take().unwrap());`,
+        ].join("\n");
+      }
+      // With a non-`()` `R` but no value on *this* path, the terminal still needs a
+      // payload — `__ret.take()` (seeded by another `return`). A pure `R = ()` unit
+      // generator returns `()` directly (no `__ret` field exists).
+      return stmt.hasRet
+        ? [park, `return GenStep::Return(self.__ret.take().unwrap());`].join("\n")
+        : [park, `return GenStep::Return(());`].join("\n");
+    }
+    case "genResumeBind":
+      // The head of a bidirectional generator's resumed arm (076): bind the sent
+      // value (stashed by `resume(sent)` in `__sent`) to the `const x = yield e`
+      // target. `resume` always seeds `__sent` before entering the loop.
+      return `self.${rid(stmt.target)} = self.__sent.take().unwrap();`;
     case "yieldStarStep": {
-      // `yield* <iter>` delegation (065): seed the boxed delegate on first entry,
-      // then pump it — re-yield each `Some(v)`, and on `None` clear the field and
-      // advance to the resume state (the enclosing `loop` re-enters that arm).
+      // `yield* <iter>` delegation (065/075): seed the boxed delegate on first
+      // entry, then pump it. The unread-completion path keeps 065's `dyn Iterator`
+      // box + `.next()` (re-yield each `Some(v)`); the read path (`readResult`)
+      // uses a `dyn Steppable` box + `.step()`, binding the `Return` payload.
       const f = rid(stmt.field);
+      if (stmt.readResult) {
+        // Bind the delegate's completion value into `self.<resultTarget>` (a carried
+        // field) so it survives to the resume arm that reads it.
+        const assign = stmt.resultTarget
+          ? `${INDENT}${INDENT}self.${rid(stmt.resultTarget)} = __rv;\n`
+          : "";
+        return [
+          `if self.${f}.is_none() {`,
+          `${INDENT}self.${f} = Some(Box::new(${emitExpr(stmt.iter)}));`,
+          `}`,
+          `match self.${f}.as_mut().unwrap().step() {`,
+          `${INDENT}GenStep::Yield(__v) => return GenStep::Yield(__v),`,
+          `${INDENT}GenStep::Return(__rv) => {`,
+          `${assign}${INDENT}${INDENT}self.${f} = None;`,
+          `${INDENT}${INDENT}self.state = ${stmt.resumeState};`,
+          `${INDENT}}`,
+          `}`,
+        ].join("\n");
+      }
       return [
         `if self.${f}.is_none() {`,
         `${INDENT}self.${f} = Some(Box::new(${emitExpr(stmt.iter)}));`,
         `}`,
         `match self.${f}.as_mut().unwrap().next() {`,
-        `${INDENT}Some(__v) => return Some(__v),`,
+        `${INDENT}Some(__v) => return GenStep::Yield(__v),`,
         `${INDENT}None => {`,
         `${INDENT}${INDENT}self.${f} = None;`,
         `${INDENT}${INDENT}self.state = ${stmt.resumeState};`,
@@ -1168,6 +1312,10 @@ function emitExpr(expr: HirExpr): string {
       return rid(expr.name);
     case "path":
       return expr.segments.map(rid).join("::");
+    case "raw":
+      // A verbatim Rust snippet (series 076) — the `TNext` default in a bare
+      // `gen.next()` → `resume(Default::default())`. No TS source to lower.
+      return expr.text;
     case "binary": {
       const prec = BINARY_PREC[expr.op] ?? 0;
       const op = BINARY_OPS[expr.op] ?? expr.op;
@@ -1259,6 +1407,29 @@ function emitExpr(expr: HirExpr): string {
     }
     case "collectVec":
       return `${emitExpr(expr.iter)}.collect::<Vec<_>>()`;
+    case "genStepTuple": {
+      // `it.next()` / `it.next(v)` read as `{ value, done }` (075/076): drive the
+      // generator into a `(value, done)` tuple. `Y === R` is enforced in lowering, so
+      // `value` is one type. A pull-only generator (075) uses `Steppable::step`
+      // (UFCS); a bidirectional one (076) uses `resume(<sent>)` — the `.next(v)` send
+      // value, or `Default::default()` for a bare `.next()`.
+      const driver =
+        expr.sent === undefined
+          ? `tslib::gen::Steppable::step(&mut ${emitExpr(expr.recv)})`
+          : `(&mut ${emitExpr(expr.recv)}).resume(${
+              expr.sent ? emitExpr(expr.sent) : "Default::default()"
+            })`;
+      return `match ${driver} { GenStep::Yield(__v) => (__v, false), GenStep::Return(__v) => (__v, true) }`;
+    }
+    case "genPrefixPull": {
+      // `const [a, b] = g()` (075): pull a fixed-arity prefix off the generator's
+      // `impl Iterator` into a tuple, bound by a tuple-destructure `let`.
+      const pulls = Array.from(
+        { length: expr.arity },
+        () => "__it.next().unwrap()",
+      ).join(", ");
+      return `{ let mut __it = ${emitExpr(expr.source)}; (${pulls}) }`;
+    }
     case "ref": {
       // A ref of an atomic expr needs no parens; a binary/unary/cast operand does.
       const inner = emitExpr(expr.expr);
@@ -1370,6 +1541,26 @@ function emitExpr(expr: HirExpr): string {
         return `${recv}.iter().enumerate().map(|(${i}, ${p})| ${expr.cbName}(${elem}, ${i} as f64${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
       }
       return `${recv}.iter().map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+    }
+    case "arrayFromMap": {
+      // `Array.from(src, fn)` (075). A generator source is already an iterator by
+      // value (`g().map(|x| cb(x))`, no `.iter()` / no deref); an array source
+      // borrows via `.iter()` and derefs the element (057's `elemSingle`).
+      const src = emitExpr(expr.source);
+      const p = rid(expr.elemParam);
+      if (expr.fromIterator) {
+        if (expr.indexParam) {
+          const i = rid(expr.indexParam);
+          return `${src}.enumerate().map(|(${i}, ${p})| ${expr.cbName}(${p}, ${i} as f64${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+        }
+        return `${src}.map(|${p}| ${expr.cbName}(${p}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+      }
+      const elem = elemSingle(expr.elemMode, expr.elemParam);
+      if (expr.indexParam) {
+        const i = rid(expr.indexParam);
+        return `${src}.iter().enumerate().map(|(${i}, ${p})| ${expr.cbName}(${elem}, ${i} as f64${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+      }
+      return `${src}.iter().map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
     }
     case "iterFilter": {
       // A filter predicate receives `&&T`; a Copy element derefs `**p` and the
