@@ -1,13 +1,40 @@
 # 079 — Closure-captured containers (env-threading, by-need borrows)
 
-> **Status: DESIGN COMPLETE (2026-07-11). Impl pending.** Graduates closure capture
-> of a container (read **or** mutated), issue **#46** (split from #45). Dialect calls
-> made with Collin 2026-07-11. Keeps the 048 **no-real-closures** architecture:
-> captured containers are **threaded as call-site parameters**, borrowed **by need**
-> (`&` / `&mut`, `Rc<RefCell<T>>` only when shared). The shared-`Rc` subcase reuses
-> **#45/078** promotion → sequenced after #45 (fail-loud interim).
+> **Status: SHIPPED (2026-07-14).** Graduates closure capture of a container (read
+> **or** mutated), issue **#46** (split from #45). Dialect calls made with Collin
+> 2026-07-11. Keeps the 048 **no-real-closures** architecture: captured containers are
+> **threaded as call-site parameters**, borrowed **by need** (`&` / `&mut`). Specs:
+> `specs.md` → `packages/compiler/tests/closure-captured-containers.test.ts` (CC1–CC16).
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **Stored path (`const add = (…) => …`)** — a pure pre-analysis AST transform in
+>   `normalizeArrows` (`lower.ts`). `classifyStoredCapture` collects the arrow's free
+>   container captures (excluding params — incl. destructured — and body locals via
+>   `collectBoundNames`); `threadStoredCapture` hoists the arrow to a `__arrow_n` fn
+>   with the captured containers **prepended as leading params** carrying their owned
+>   type annotation (synthesized by `containerAnnotationOf` from the declaration /
+>   `new Set<T>()` / array-literal), and records a call-site rewrite (`add(a)` →
+>   `__arrow_n(s, a)`). The fn-pointer binding is **dropped**. The threaded param's
+>   `&`/`&mut` borrow and the call-site `&s`/`&mut s` are then derived by the existing
+>   `analyzeFunction` ownership inference + `lowerCall` — no new borrow machinery.
+> - **Inline path (`.map`/`.filter`/…)** — `freeVarsOf` now returns
+>   `{ names, mutated }` (a bare captured-container method-mutation is recorded in
+>   `mutated`, not rejected); `liftCallback` forwards a container free var as `&T` /
+>   `&mut T` (reusing the 057 `{kind:"ref"}` param + a `ref` forwarded arg) via
+>   `isCaptureContainerType`. **Read-only** inline capture ships (CC6).
+> - **Escape check** (`assertNonEscaping`) — every use of the stored binding must be a
+>   direct call; a returned / stored / passed closure is fail-loud (CC9, CC10).
+>
+> **Fail-loud residuals (kept):**
+> - **Shared/aliased captured container** → the `Rc<RefCell>` row (needs `refineRc`
+>   into `liftedFns`) stays fail-loud (`ctx.aliased` guard, CC11).
+> - **Inline *mutable* container capture** — the 048/057 numeric-surface body typer
+>   can't type a mutating expression body (a block body isn't liftable at all), so it
+>   stays fail-loud (CC7). The stored path covers mutable capture (CC2/CC3/CC5/CC8).
+> - **Field-of-captured mutation** (`c.entries.set(…)` on a captured owner) — a nested
+>   receiver → deeper shape (→ Rc row), still fail-loud (unchanged from #45).
+> - **Scalar mutable capture / captured container reassigned wholesale** — unchanged
+>   048 fail-loud (CC12, CC13). **Capture through two closure levels** — fail-loud.
 
 ## Problem
 

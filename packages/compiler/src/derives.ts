@@ -72,6 +72,10 @@ export function isTypeCloneable(
       return isTypeCloneable(ty.elem, table, seen);
     case "orderedFloat":
       return true;
+    case "rc":
+      // A promoted alias-escape handle `Rc<RefCell<T>>` is always `Clone` (a shared
+      // handle bump), regardless of the inner type (series 069).
+      return true;
     case "structKey":
       // The 074 key newtype derives `Clone` (via its wrapped struct).
       return isStructCloneable(ty.name, table, seen);
@@ -121,6 +125,9 @@ function isTypeDebug(
       return isTypeDebug(ty.elem, table, seen);
     case "orderedFloat":
       return true;
+    case "rc":
+      // `Rc<RefCell<T>>` is `Debug` iff its inner is (series 069).
+      return isTypeDebug(ty.inner, table, seen);
     case "structKey":
       // The 074 key newtype derives `Debug` (via its wrapped struct).
       return isTypeDebug({ kind: "struct", name: ty.name }, table, seen);
@@ -172,6 +179,10 @@ export function isTypePartialEq(
       return isTypePartialEq(ty.elem, table, seen);
     case "orderedFloat":
       return true;
+    case "rc":
+      // `Rc<RefCell<T>>` is `PartialEq` iff its inner is (structural, not identity —
+      // `Rc`/`RefCell` both forward `PartialEq` to the inner value; series 069).
+      return isTypePartialEq(ty.inner, table, seen);
     case "structKey":
       // The 074 key newtype has a custom `PartialEq` (SameValueZero).
       return true;

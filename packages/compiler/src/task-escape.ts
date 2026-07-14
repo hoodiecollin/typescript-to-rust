@@ -307,6 +307,7 @@ function assertNoNestedBindingSpawns(body: HirStmt[]): void {
         case "while":
         case "block":
         case "forIn":
+        case "forInReborrow":
         case "forRange":
           s.body.forEach((c) => scanStmt(c));
           break;
@@ -338,6 +339,7 @@ function assertNoNestedBindingSpawns(body: HirStmt[]): void {
         break;
       case "block":
       case "forIn":
+      case "forInReborrow":
       case "forRange":
         s.body.forEach(scanStmt);
         break;
@@ -744,6 +746,7 @@ function calleeMutatesParam(fn: HirFn, param: string): boolean {
         break;
       case "block":
       case "forIn":
+      case "forInReborrow":
       case "forRange":
         s.body.forEach(walkStmt);
         break;
@@ -844,6 +847,7 @@ function rewriteCallee(fn: HirFn, argIndex: number, mutated: boolean): void {
         break;
       case "block":
       case "forIn":
+      case "forInReborrow":
       case "forRange":
         s.body.forEach(rwStmt);
         break;

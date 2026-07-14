@@ -152,6 +152,17 @@ export interface ModuleAnalysis {
    */
   methodParams: Map<string, ParamInfo[]>;
   /**
+   * **Consuming-method candidates** (series 068, issue #35): a method name →
+   * the class field it moves out of `this`. A candidate has the shape `m(): T {
+   * return this.field }` — a bare `return this.field` (return is terminal, so
+   * there is trivially no subsequent `self` use), with a non-`&mut self` receiver.
+   * Whether a candidate is *actually* emitted consuming (`fn m(self)`, dropping the
+   * 038 field clone) is finalized by the alias-escape pass, which demotes any whose
+   * receiver is **reused after the call** (that receiver promotes to `Rc<RefCell<T>>`
+   * and the method falls back to `&self` + clone). Name-based, like `mutatingMethods`.
+   */
+  consumingCandidates: Map<string, string>;
+  /**
    * Per-class getter/setter names (series 060), populated during lowering. A read
    * `obj.g` of a getter → `obj.g()`; a write `obj.s = v` of a setter →
    * `obj.set_s(v)`. Drives the member-site rewrite in `lowerMember`/assignment.
@@ -660,6 +671,33 @@ function mutableBindings(
     const mutating = isMutatingMethodCall(n);
     if (mutating) mut.add(mutating.object);
 
+    // A collection-mutating method on a `localVar.field` receiver
+    // (`c.entries.set(…)`, `c.tags.add(…)`, series 078 / issue #45) mutates the
+    // field-held collection through the owning local, so — exactly like a mutating
+    // call on a bare local (above) or a local field write (`s.x = …` below) — the
+    // owner must be a `mut` binding. Withheld when the owner is **aliased**: a
+    // mutated-and-aliased field-held collection is the shared-mutable case the
+    // alias-escape pass promotes to `Rc<RefCell<T>>` (interior mutability, never
+    // `mut`), so declaring it `mut` here would fight that promotion. This is the
+    // `localVar.field` clean-owner piece the 072 clean path did not wire.
+    if (
+      n.type === "CallExpression" &&
+      isNode(n.callee) &&
+      n.callee.type === "MemberExpression" &&
+      isNode((n.callee as AnyNode).object) &&
+      ((n.callee as AnyNode).object as AnyNode).type === "MemberExpression"
+    ) {
+      const field = (n.callee as AnyNode).object as AnyNode;
+      const prop = identName((n.callee as AnyNode).property);
+      const root =
+        isNode(field.object) && field.object.type === "Identifier"
+          ? identName(field.object)
+          : null;
+      if (root && root !== "self" && prop && MUTATING_METHODS.has(prop)) {
+        if (!aliased.has(root)) mut.add(root);
+      }
+    }
+
     // `delete obj[k]` (series 061) → `obj.shift_remove(&k)`, which needs `mut obj`.
     if (
       n.type === "UnaryExpression" &&
@@ -726,16 +764,25 @@ function mutableBindings(
 function mutatesThis(body: unknown): boolean {
   let mutates = false;
   walk(body, (n) => {
-    // A direct field write `this.x = …`.
+    // A direct field write `this.x = …`, or an indexed field-element write
+    // `this.items[i] = …` (the computed lvalue's root is still `this`) — both need
+    // `&mut self`.
     if (n.type === "AssignmentExpression") {
       const left = n.left;
-      if (
-        isNode(left) &&
-        left.type === "MemberExpression" &&
-        isNode((left as AnyNode).object) &&
-        ((left as AnyNode).object as AnyNode).type === "ThisExpression"
-      ) {
-        mutates = true;
+      if (isNode(left) && left.type === "MemberExpression") {
+        const obj = (left as AnyNode).object;
+        // `this.x = …`.
+        if (isNode(obj) && obj.type === "ThisExpression") mutates = true;
+        // `this.field[i] = …` — the lvalue is a computed member over `this.field`.
+        else if (
+          (left as AnyNode).computed &&
+          isNode(obj) &&
+          obj.type === "MemberExpression" &&
+          isNode((obj as AnyNode).object) &&
+          ((obj as AnyNode).object as AnyNode).type === "ThisExpression"
+        ) {
+          mutates = true;
+        }
       }
       return;
     }
@@ -760,6 +807,37 @@ function mutatesThis(body: unknown): boolean {
     }
   });
   return mutates;
+}
+
+/**
+ * The class field a method **consumes** out of `this` (series 068), or null. A
+ * consuming candidate's body ends in a bare `return this.field;` — a terminal move
+ * of the field out of the receiver. Because the move is the `return`, no `self` use
+ * can follow it (return is terminal), which is exactly the design's "moves a field
+ * out and does not use `self` after" condition, established syntactically without a
+ * separate CFG pass. Broader move-out shapes (into an owned local, into a call arg)
+ * stay non-consuming here — they keep the 038 clone / cargo backstop (fail-loud).
+ *
+ * The **non-`Copy`** gate is applied later (in the alias-escape pass, which has the
+ * lowered field types): a `return this.n` of a `number` field is a candidate here
+ * but is never emitted consuming (a Copy field needs no move-avoidance).
+ */
+function consumingField(body: unknown): string | null {
+  // `classMethods` passes the `FunctionExpression`; its statement list is `body.body`.
+  const fnBody = (body as { body?: { body?: AnyNode[] } } | null)?.body?.body;
+  if (!Array.isArray(fnBody) || fnBody.length === 0) return null;
+  const last = fnBody[fnBody.length - 1];
+  if (!isNode(last) || last.type !== "ReturnStatement") return null;
+  const arg = (last as AnyNode).argument;
+  if (
+    !isNode(arg) ||
+    arg.type !== "MemberExpression" ||
+    !isNode((arg as AnyNode).object) ||
+    ((arg as AnyNode).object as AnyNode).type !== "ThisExpression"
+  ) {
+    return null;
+  }
+  return identName((arg as AnyNode).property);
 }
 
 /** Does a body call a self-mutating method on `this` (`this.<mutating>()`)? */
@@ -1183,6 +1261,17 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     if (!changed) break;
   }
 
+  // Consuming-method candidates (series 068): a `m(): T { … return this.field }`
+  // whose receiver is *not* already `&mut self` (a mutating method keeps its
+  // name-based receiver). The non-`Copy` gate and the call-site-reuse demotion are
+  // applied later, in the alias-escape pass (which has the lowered field types).
+  const consumingCandidates = new Map<string, string>();
+  for (const m of methods) {
+    if (mutatingMethods.has(m.name)) continue;
+    const field = consumingField(m.body);
+    if (field) consumingCandidates.set(m.name, field);
+  }
+
   const mut = new Map<string, Set<string>>();
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
@@ -1391,6 +1480,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     joinHandleBindings: new Set(),
     mutatingMethods,
     methodParams,
+    consumingCandidates,
     // Filled during lowering as getters/setters are seen (like `structFields`).
     accessors: new Map(),
     tryCounter: 0,

@@ -1,10 +1,38 @@
 # 068 — Broad owned-`self` (consuming methods → `fn m(self)`)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the 060 owned-`self`
-> deferral, issue **#35**. Dialect calls made with Collin 2026-07-10 (`needs-user-input`
-> cleared). Design-couples to **#38** (both extend the 062 alias-escape pass).
+> **Status: SHIPPED (2026-07-14).** Graduates the 060 owned-`self` deferral, issue
+> **#35**. Dialect calls made with Collin 2026-07-10 (`needs-user-input` cleared).
+> Couples to **#38** (both extend the 062/069 alias-escape pass). Specs: `specs.md`
+> → `packages/compiler/tests/owned-self.test.ts`.
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **Consuming-candidate detection is syntactic (`analysis.ts`, `consumingField`),
+>   not a separate CFG pass.** A candidate is a method whose body **ends in** a bare
+>   `return this.field;` — because the move *is* the terminal `return`, "no
+>   subsequent `self` use" holds trivially, so the design's move-analysis reduces to
+>   a shape match. Broader move-out shapes (into an owned local, into a call arg)
+>   stay non-consuming (038 clone / cargo backstop). `analysis.consumingCandidates`
+>   is the method→field map; a `&mut self` method is never a candidate.
+> - **The non-`Copy` gate + the call-site-reuse decision live in `computeAutoRc`**
+>   (the single #38 union-find), which the design flagged as the coupling point. It
+>   is threaded `consumingCandidates` and, per scope, reuses `ownership.ts`'s CFG
+>   liveness (new export `computeLiveOut`) over the class bindings to decide each
+>   `obj.m()` call site. A candidate is finalized **consuming** iff its moved-out
+>   field is non-`Copy` **and** every call site is a clean owned-local move.
+> - **Demotion is broader than "reuse".** Besides a live-after (reused) receiver
+>   (which force-promotes that binding to `Rc<RefCell<T>>`, bypassing the ≥2-member
+>   gate), a candidate is also demoted when called on a **`this`/`self`** receiver
+>   (`this.m()` inside another method) or a **field receiver** (`self.base.m()`, the
+>   inheritance-composition path) — neither can move out of a borrowed/place
+>   receiver. Demoted ⇒ `&self` + 038 clone; a non-`Clone` field under any demotion
+>   ⇒ `DialectError`.
+> - `AutoRcResult` gained one field, **`consumingMethods: Set<string>`** — the
+>   finalized owned-receiver method names. A new `applyOwnedSelf` pass (in `lower`,
+>   after `computeAutoRc`, before `refineOwnership`) retags each to `recv: "owned"`;
+>   the emitter renders `self`, and `ownership.ts`'s `selfParams` types `self` as the
+>   owned struct so the `return self.field` move-out drops the clone.
+> - `SelfRecv` gained `"owned"` (`hir.ts`); the emitter's receiver rendering is
+>   factored into `selfReceiver`.
 
 ## Problem
 

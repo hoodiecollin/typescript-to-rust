@@ -669,6 +669,49 @@ export type HirStmt =
       label?: string;
     }
   /**
+   * **Mutate-during-iteration over an aliased container** (series 077 / issue #41).
+   * The 062 panic pattern — iterating a field held in an `Rc<RefCell<T>>` alias
+   * closure while the body mutates the *same* cell — lowered to an **index-based
+   * re-borrow** loop that holds **no** borrow across the body, so `RefCell` never
+   * panics and JS's live-cursor semantics are reproduced.
+   *
+   * `owner` is the borrow expression for the iterated cell (an `Rc<RefCell<T>>`
+   * ident); `field` the container field on its borrowed inner struct. `shape` routes
+   * the template:
+   *   - `"array"` — a live positional walk (`items[i]`, `len()` re-read each step).
+   *   - `"map"` / `"set"` — a stable key-snapshot `Vec` + a growing `__added`
+   *     append-buffer + a `__seen` once-guard, draining in two phases with a
+   *     per-step `contains`/`get` recheck (deletes skipped, value read live). Visible
+   *     inserts in `body` were instrumented (an `__added.push`) by `refineRc`;
+   *     `addedKeys` names the pushed-key exprs so the emitter wires the buffer.
+   *
+   * `body` is the already-`rc`-rewritten loop body. `binder`/`keyBinder`/`valBinder`
+   * carry the loop pattern (a single element name for array/set, the `(k, v)` pair
+   * for a map). `keyPat` optionally wraps a struct-key newtype (series 074).
+   */
+  | {
+      kind: "forInReborrow";
+      shape: "array" | "map" | "set";
+      owner: HirExpr;
+      field: string;
+      body: HirStmt[];
+      /** Array/Set element (or Map value) binder name. */
+      binder: string;
+      /** Map key binder name (absent for array/set). */
+      keyBinder?: string;
+      /** Struct-key newtype wrapper for the key (series 074), e.g. `PointKey`. */
+      keyNewtype?: string;
+      /** Struct-key newtype wrapper for a set element (series 074). */
+      elemNewtype?: string;
+      /**
+       * The key/element type (Map key / Set element), for the `__keys`/`__added`
+       * snapshot-`Vec` annotations so a delete-only loop (no push) still type-checks.
+       * Absent for the array shape (element type inferred by the positional read).
+       */
+      keyType?: RustType;
+      label?: string;
+    }
+  /**
    * `for <counter> in <start>..<end> { body }` (`..=` when `inclusive`). An
    * idiomatic integer range, recovered from a canonical counting `for` by
    * `promoteRanges` (numeric.ts) — the counter's `let` and update are folded into
@@ -943,8 +986,13 @@ export interface HirParam {
   pat?: string;
 }
 
-/** A method's `self` receiver: `&self` (`ref`) or `&mut self` (`refMut`). */
-export type SelfRecv = "ref" | "refMut";
+/**
+ * A method's `self` receiver: `&self` (`ref`), `&mut self` (`refMut`), or an owned
+ * `self` (`owned`) — a **consuming** method that moves a non-`Copy` field out of
+ * `this` with no subsequent `self` use (series 068). An owned receiver drops the
+ * 038 field clone; the emitter renders it as a bare `self`.
+ */
+export type SelfRecv = "ref" | "refMut" | "owned";
 
 export interface HirFn {
   kind: "fn";

@@ -1,10 +1,36 @@
 # 077 — Robust mutate-during-iteration over an aliased container (index-based re-borrow)
 
-> **Status: DESIGN COMPLETE (2026-07-11). Impl pending.** Graduates the sole hard
-> `DialectError` 062 left behind, issue **#41** (split from #38). Dialect calls made with
-> Collin 2026-07-11 (`needs-user-input` cleared). Turns the pattern into a **correct
-> lowering that never panics** — neither a `DialectError` nor a 056 warning. Rides 062's
-> alias-escape / `refineRc` machinery.
+> **Status: SHIPPED (2026-07-14).** Graduates the sole hard `DialectError` 062 left
+> behind, issue **#41** (split from #38). Dialect calls made with Collin 2026-07-11
+> (`needs-user-input` cleared). Turns the pattern into a **correct lowering that never
+> panics** — neither a `DialectError` nor a 056 warning. Rides 062's alias-escape /
+> `refineRc` machinery. Specs: `specs.md` →
+> `packages/compiler/tests/mutate-during-iteration.test.ts` (11 specs, all green).
+>
+> **Impl notes / deviations:**
+> - **`alias-escape.ts`** — `AutoRcResult` gains `aliasRootOf` (promoted union-find key →
+>   component root), so the lowering can ask "does this loop body mutate the **same** cell
+>   it iterates?" — reusing 062's transitive closure, no new analysis.
+> - **`rc.ts` `refineRc`** — a new `tryReborrow` on each `for-of` over a promoted
+>   `owner.field.iter()` whose body mutates the same cell rewrites it to the
+>   `forInReborrow` HIR node (the dedicated-node route from the open sub-detail). The
+>   array branch is uninstrumented; the map/set branch instruments each **visible**
+>   `insert` on the cell with an `__added` enqueue guard and rejects an **opaque** cell
+>   mutation (fail-loud). Loop binders are materialized as real HIR `let`s over the owned
+>   per-step clones so `refineOwnership` sees them (clone-on-reuse) and the body's
+>   comparisons type-check against owned values. A `strConcat` case was added to
+>   `refineRc`'s `rewrite` (a latent gap: a `+`-concat part reading a promoted field
+>   missed its `.borrow()`).
+> - **`emitter.ts`** — `emitReborrowLoop` renders the array live-positional walk and the
+>   map/set two-phase drain (`__keys077` snapshot + `__added077` buffer + `__seen077`
+>   guard + per-step `contains`/`get` recheck). The `__…077` scaffolding names avoid user
+>   collisions.
+> - **`analysis.ts` `mutatesThis`** — extended to mark an indexed field-element write
+>   `this.items[i] = v` as `&mut self` (a latent gap surfaced by the array live-write
+>   spec; without it such a method emitted `&self` and failed to borrow the element mut).
+> - **`hir.ts` / `ownership.ts` / `task-escape.ts`** — the `forInReborrow` node threads
+>   through the post-`refineRc` passes (body-recursion + `owner`-liveness), disjoint from
+>   `forIn`.
 >
 > Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
 

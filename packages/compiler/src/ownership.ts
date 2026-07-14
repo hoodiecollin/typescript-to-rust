@@ -112,19 +112,24 @@ function isCloneableMovable(
  * an inherent/impl method, or a trait name (`IAnimal`) for a trait default — for
  * a trait the receiver struct is the base class (strip the leading `I`), whose
  * fields drive the projection-clone decision.
+ *
+ * An **owned** receiver (`recv === "owned"`, a consuming method — series 068) is
+ * typed as the plain class struct (no borrow), so a `return self.field` of a
+ * non-Copy field is a **legal partial move** out of the owned `self` — the 038
+ * clone is dropped, which is the whole point of graduating owned-`self`.
  */
 function selfParams(method: HirFn, ownerName: string): HirParam[] {
   if (!method.recv) return method.params;
   const structName = ownerName.startsWith("I")
     ? ownerName.slice(1)
     : ownerName;
+  const structTy: RustType = { kind: "struct", name: structName };
   const self: HirParam = {
     name: "self",
-    ty: {
-      kind: "ref",
-      mut: method.recv === "refMut",
-      inner: { kind: "struct", name: structName },
-    },
+    ty:
+      method.recv === "owned"
+        ? structTy
+        : { kind: "ref", mut: method.recv === "refMut", inner: structTy },
   };
   return [self, ...method.params];
 }
@@ -214,6 +219,7 @@ function collectLetTypes(body: HirStmt[], env: Map<string, RustType>): void {
       case "while":
       case "block":
       case "forIn":
+      case "forInReborrow":
       case "forRange":
         collectLetTypes(s.body, env);
         break;
@@ -233,6 +239,25 @@ function collectLetTypes(body: HirStmt[], env: Map<string, RustType>): void {
         break;
     }
   }
+}
+
+/**
+ * The per-statement `liveOut` sets over a caller-supplied `tracked` name set,
+ * exposed for the alias-escape pass (series 068). It reuses the exact CFG-liveness
+ * engine the clone-placement uses, but tracks arbitrary bindings (a class receiver
+ * that is *not* cloneable-movable — e.g. one with a non-`Clone` field — is still
+ * tracked, so "is the receiver live after this consuming call?" is answered by real
+ * liveness, not a syntactic proxy). A name is in a statement's `liveOut` iff it is
+ * read on some path *after* that statement.
+ */
+export function computeLiveOut(
+  body: HirStmt[],
+  tracked: ReadonlySet<string>,
+): Map<HirStmt, Live> {
+  const movable: Live = new Set(tracked);
+  const map = new Map<HirStmt, Live>();
+  liveInOfSeq(body, new Set(), { brk: new Set(), cont: new Set() }, movable, map);
+  return map;
 }
 
 // ── Backward liveness ────────────────────────────────────────────────────────
@@ -347,6 +372,18 @@ function transfer(
     case "forIn":
       return loopTransfer(
         exprUses(s.iter, movable),
+        s.body,
+        liveAfter,
+        ctx,
+        movable,
+        map,
+        s,
+      );
+    // Series 077 mutate-during-iteration re-borrow loop: the `owner` cell is
+    // re-borrowed every step, so it stays live across the loop (like an `iter`).
+    case "forInReborrow":
+      return loopTransfer(
+        exprUses(s.owner, movable),
         s.body,
         liveAfter,
         ctx,
@@ -533,6 +570,9 @@ function collectUses(e: HirExpr, movable: Live, out: Live): void {
     case "array":
       for (const el of e.elements) collectUses(el, movable, out);
       return;
+    case "tuple":
+      for (const el of e.elems) collectUses(el, movable, out);
+      return;
     case "hashmap":
       for (const en of e.entries) {
         collectUses(en.key, movable, out);
@@ -715,6 +755,10 @@ function placeStmt(s: HirStmt, ctx: PlaceCtx): void {
       placeInExpr(s.iter, all, ctx);
       placeSeq(s.body, ctx);
       return;
+    case "forInReborrow":
+      placeInExpr(s.owner, all, ctx);
+      placeSeq(s.body, ctx);
+      return;
     case "forRange":
       placeInExpr(s.start, all, ctx);
       placeInExpr(s.end, all, ctx);
@@ -841,6 +885,13 @@ function placeInExpr(e: HirExpr, liveOut: Live, ctx: PlaceCtx): void {
           });
         });
         return;
+      case "tuple":
+        x.elems.forEach((_, i) => {
+          owning(x.elems[i] as HirExpr, (c) => {
+            x.elems[i] = c;
+          });
+        });
+        return;
       case "hashmap":
         for (const en of x.entries) {
           owning(en.key, (c) => {
@@ -935,6 +986,7 @@ function collectLetBindings(
       case "while":
       case "block":
       case "forIn":
+      case "forInReborrow":
       case "forRange":
         collectLetBindings(s.body, movable, structs);
         break;

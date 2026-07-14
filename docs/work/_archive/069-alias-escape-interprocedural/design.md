@@ -1,9 +1,53 @@
 # 069 — Alias-escape tail: interprocedural + field-store promotion
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** Graduates the 062 promotion-
-> recall tail, issue **#38**. Dialect calls made with Collin 2026-07-10
-> (`needs-user-input` cleared). Design-couples to **#35** (shares the alias-escape pass).
-> The mutate-during-iteration guard is **out of scope** → issue **#41**.
+> **Status: SHIPPED (2026-07-14).** Graduates the 062 promotion-recall tail, issue
+> **#38**. Dialect calls made with Collin 2026-07-10 (`needs-user-input` cleared).
+> Design-couples to **#35** (shares the alias-escape pass). The mutate-during-iteration
+> guard is **out of scope** → issue **#41**. Specs: `specs.md` →
+> `packages/compiler/tests/alias-escape-interproc.test.ts` (6 specs, all green; full
+> suite 780 pass / 0 fail, typecheck clean).
+>
+> **Impl notes / deviations:**
+> - **`computeAutoRc` lifted to module-level** (`alias-escape.ts`) — returns a
+>   three-part `AutoRcResult`: `promoted` (scope → local/param binding names),
+>   `promotedParams` (callee key → param names), `promotedFields` (class → field
+>   names), plus `paramOrder` (callee → positional param names, for the call-site
+>   arg→param mapping). This is the **single promoted-set representation** #35/#45/#41
+>   graft onto — a downstream series extends the maps, it does not rework them.
+> - **One union-find over three namespaces** threads aliasing across scopes: a
+>   local/param is `"<scope>::<name>"` (scope = free-fn / `SCRIPT_SCOPE` /
+>   `"<Class>::new"` / `"<Class>.<method>"`); a field is `"<Class>#<field>"`. Edges:
+>   bare-ident alias `const b = a`; field-store `x.f = a` / `this.f = a` / struct-lit
+>   `X { f: a }` (binding ↔ `X#f`); and an **arg↔param** edge at every call passing a
+>   class binding into a resolvable callee's param (binding ↔ `<f>::<param_i>`). The
+>   **interprocedural fixpoint** is: union first, then promote every component with a
+>   mutated member — a mutation in one scope reaches params/fields aliased from another.
+> - **≥2-member component gate** preserves the 062 calculus: a lone binding mutated but
+>   never aliased (a plain owned value with a `&mut self` call) stays unwrapped. An
+>   interprocedural component is already ≥2 (arg+param, or binding+field), so the gate
+>   never blocks cross-boundary promotion. (Regression fix: without it, `const b = new
+>   C(); b.setter()` over-promoted.)
+> - **`refineRc` extended** (`rc.ts`): also processes class ctors/methods (keyed
+>   `"<Class>::new"` / `"<Class>.<m>"`); a promoted **param**'s type becomes
+>   `Rc<RefCell<T>>` and it enters scope already `rc`; a promoted **class field**'s type
+>   becomes `Rc<RefCell<T>>`; a call passing a promoted handle into a promoted param
+>   clones it (`Rc::clone(&x)`, borrow → `owned`); a struct-lit / field-store into a
+>   promoted field clones (`Rc::clone`) an existing handle or wraps (`Rc::new`) a fresh
+>   value; a read through a promoted field borrows (`obj.f.borrow().g`) via a
+>   `classOfExpr` resolver that sees through `.borrow()` and nested promoted fields.
+> - **Derive predicates** (`derives.ts`) gained an `rc` case: `Rc<RefCell<T>>` is always
+>   `Clone`, and `Debug`/`PartialEq` iff its inner is — so a struct that gains a promoted
+>   field keeps `#[derive(Clone, Debug, PartialEq)]` (else the promotion silently dropped
+>   the struct's derives and broke clone/print sites).
+> - **Unresolvable-boundary residual is cargo-loud, not a new `DialectError`.** The spec
+>   sketch floated a pre-emptive `DialectError`; manufacturing one risks false-positive
+>   rejection of valid programs (violating 062's "never a rejected valid program"
+>   calculus). Where the analysis can't resolve a callee (indirect/dynamic dispatch,
+>   unsupported shapes), the arg↔param edge is simply not threaded and the existing
+>   fail-loud backstops (`UnsupportedError` / cargo E0382/E0599) catch it — fail-loud,
+>   never a silent miscompile. Per the design's own "cargo remains the ultimate
+>   backstop." Flagged for Collin; hard-erroring a specific boundary can be a later,
+>   no-false-positive increment.
 >
 > Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
 

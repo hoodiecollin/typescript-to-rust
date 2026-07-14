@@ -380,26 +380,32 @@ export function lower(program: Program, source?: string): HirModule {
   // ownership signal into its `HirParam.ty` (the `Arc` vs `Arc<Mutex>` input), and
   // after the numeric/string/rc/arena refinements so the wrapped inner types are
   // final.
+  const module: HirModule = { items, main, mainRet, mainAsync };
+  // Series 062/069: escaping shared-mutable aliasing auto-promotes to `Rc<RefCell<T>>`
+  // (surgical, per-binding), decoupled from the `"use rc"` directive. Series 068
+  // (issue #35) folds one more edge into the same pass: a consuming (`fn m(self)`)
+  // call whose receiver is live afterward force-promotes that receiver — so
+  // `computeAutoRc` also finalizes which candidate methods emit consuming.
+  const autoRc = computeAutoRc(
+    module,
+    analysis.classes,
+    analysis.mutatingMethods,
+    analysis.consumingCandidates,
+  );
+  // Retag the finalized consuming methods with an owned receiver (`fn m(self)`)
+  // *before* `refineOwnership` — its `selfParams` then types `self` as the owned
+  // struct, so the `return self.field` move-out drops the 038 clone. Runs after
+  // `computeAutoRc` (which decides consuming vs demoted).
+  applyOwnedSelf(module, autoRc.consumingMethods);
   return fixStringScrutinees(
     refineOwnership(
     refineTaskEscape(
       refineArena(
         refineRc(
-          refineStrings(
-            refineNumerics(
-              refineBitwise({ items, main, mainRet, mainAsync }),
-            ),
-          ),
+          refineStrings(refineNumerics(refineBitwise(module))),
           {
             rcScopes: analysis.rcScopes,
-            // Series 062: escaping shared-mutable aliasing auto-promotes to
-            // `Rc<RefCell<T>>` (surgical, per-binding) — computed on the lowered
-            // HIR, decoupled from the `"use rc"` directive.
-            autoRc: computeAutoRc(
-              { items, main, mainRet, mainAsync },
-              analysis.classes,
-              analysis.mutatingMethods,
-            ),
+            autoRc,
             classes: analysis.classes,
             mutatingMethods: analysis.mutatingMethods,
           },
@@ -409,6 +415,26 @@ export function lower(program: Program, source?: string): HirModule {
     ),
     ),
   );
+}
+
+/**
+ * Retag every consuming method (series 068) with an **owned** receiver (`recv:
+ * "owned"` → `fn m(self)`). Only a currently-`&self` method is retagged (a
+ * `&mut self` method is never a consuming candidate); the change flows to the
+ * emitter and to `refineOwnership`'s `selfParams`, which together drop the 038
+ * field clone.
+ */
+function applyOwnedSelf(
+  module: HirModule,
+  consuming: ReadonlySet<string>,
+): void {
+  if (consuming.size === 0) return;
+  for (const item of module.items) {
+    if (item.kind !== "class") continue;
+    for (const m of item.methods) {
+      if (m.recv === "ref" && consuming.has(m.name)) m.recv = "owned";
+    }
+  }
 }
 
 /**
@@ -480,6 +506,305 @@ function walkMatchDiscs(stmts: HirStmt[], strRefParams: Set<string>): void {
 // ── Arrow normalization ──────────────────────────────────────────────────────
 
 /**
+ * A captured container's owned TS type annotation, synthesized (series 079) from a
+ * declarator so a lifted `__arrow_*` fn can take it as a leading param. Reuses the
+ * declaration's own `Array<T>` / `Set<T>` / `Map<K,V>` annotation when present, else
+ * synthesizes one from the initializer (`new Set<T>()` / `new Map<K,V>()` / an array
+ * literal / a string literal). Returns null when it can't be resolved to a container
+ * — the capture then is not a threadable container (→ scalar fail-loud).
+ */
+function containerAnnotationOf(decl: {
+  annotation?: unknown;
+  init?: unknown;
+}): TSTypeAnnotation | null {
+  // A declared annotation for a container type carries straight through as the
+  // param annotation (the borrow is inferred from body use, like any param).
+  const ann = decl.annotation as { typeAnnotation?: unknown } | undefined;
+  const inner = ann?.typeAnnotation as { type?: string; typeName?: { name?: string } } | undefined;
+  if (inner?.type === "TSTypeReference") {
+    const n = inner.typeName?.name;
+    if (n === "Array" || n === "Set" || n === "Map" || n === "ReadonlyArray") {
+      return ann as TSTypeAnnotation;
+    }
+  }
+  if (inner?.type === "TSStringKeyword") return ann as TSTypeAnnotation;
+  // No usable annotation → synthesize a `TSTypeReference` from the initializer.
+  const init = decl.init as
+    | { type?: string; callee?: { name?: string }; typeArguments?: unknown; elements?: unknown[]; value?: unknown }
+    | undefined;
+  if (!init) return null;
+  const mkRef = (name: string, typeArguments: unknown): TSTypeAnnotation =>
+    ({
+      type: "TSTypeAnnotation",
+      typeAnnotation: {
+        type: "TSTypeReference",
+        typeName: { type: "Identifier", name },
+        typeArguments,
+      },
+    }) as unknown as TSTypeAnnotation;
+  if (init.type === "NewExpression" && init.callee?.name) {
+    const name = init.callee.name;
+    if ((name === "Set" || name === "Map") && init.typeArguments) {
+      return mkRef(name, init.typeArguments);
+    }
+    return null; // an un-parameterized `new Set()` can't be typed → fail-loud
+  }
+  if (init.type === "ArrayExpression") {
+    const first = (init.elements ?? [])[0] as { type?: string; value?: unknown } | undefined;
+    // Only a numeric array literal can be typed at this pre-analysis stage; a
+    // heterogeneous / empty un-annotated array stays fail-loud (no element type).
+    if (first?.type === "Literal" && typeof first.value === "number") {
+      return mkRef("Array", {
+        type: "TSTypeParameterInstantiation",
+        params: [{ type: "TSNumberKeyword" }],
+      });
+    }
+    return null;
+  }
+  if (init.type === "Literal" && typeof init.value === "string") {
+    return { type: "TSTypeAnnotation", typeAnnotation: { type: "TSStringKeyword" } } as unknown as TSTypeAnnotation;
+  }
+  return null;
+}
+
+/** Plain-object AST walk (no `isAstNode`, which is defined later) — series 079. */
+function astWalk(node: unknown, visit: (n: { type: string; [k: string]: unknown }) => void): void {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) {
+    for (const c of node) astWalk(c, visit);
+    return;
+  }
+  const n = node as { type?: string; [k: string]: unknown };
+  if (typeof n.type === "string") visit(n as { type: string; [k: string]: unknown });
+  for (const k in n) {
+    if (k === "type") continue;
+    astWalk(n[k], visit);
+  }
+}
+
+/**
+ * Collect every identifier name bound by a binding pattern (series 079): a plain
+ * `Identifier`, an object pattern `{ x, y }` (incl. renames / defaults / rest), an
+ * array pattern `[a, b]`, a default `x = …`, or a rest `...xs`. Used to exclude a
+ * closure's own params (destructured or not) and its body locals from the free set.
+ */
+function collectBoundNames(pat: unknown, out: Set<string>): void {
+  if (!pat || typeof pat !== "object") return;
+  const n = pat as { type?: string; [k: string]: unknown };
+  switch (n.type) {
+    case "Identifier":
+      out.add(n.name as string);
+      return;
+    case "ObjectPattern":
+      for (const prop of (n.properties as unknown[]) ?? []) {
+        const p = prop as { type?: string; value?: unknown; argument?: unknown };
+        if (p.type === "RestElement") collectBoundNames(p.argument, out);
+        else collectBoundNames(p.value, out);
+      }
+      return;
+    case "ArrayPattern":
+      for (const el of (n.elements as unknown[]) ?? []) collectBoundNames(el, out);
+      return;
+    case "AssignmentPattern":
+      collectBoundNames(n.left, out);
+      return;
+    case "RestElement":
+      collectBoundNames(n.argument, out);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Classify a stored arrow's captures (series 079, issue #46). Walks the arrow body
+ * for free identifiers not bound by its own params; each free var that a
+ * `containerAnnotationOf` resolves to a container is a **threadable capture**; a
+ * scalar capture (an `=`/`++`/`--` on a free var, a wholesale rebind of a captured
+ * container `s = …`, or a free var that is not a resolvable container) is fail-loud.
+ * Returns the captured container names in first-occurrence order (a stable param
+ * order for the sig and every rewritten call site), or `null` for a non-capturing
+ * arrow (the existing lift is unchanged).
+ *
+ * @throws {UnsupportedError} on a scalar mutable capture, a wholesale-reassigned
+ *   captured container, or a captured free var that is not a threadable container.
+ */
+function classifyStoredCapture(
+  arrow: ArrowFunctionExpression,
+  declInfoOf: (name: string) => { annotation?: unknown; init?: unknown } | undefined,
+  topLevelFns: ReadonlySet<string>,
+): string[] | null {
+  // Names bound by the arrow itself (its params, incl. destructured `{x, y}` /
+  // `[a, b]` patterns) plus any binding declared *inside* the body (`const h = …`,
+  // `let n = …`, a for-of/catch binding) — none of these is a free capture.
+  const bound = new Set<string>();
+  for (const p of arrow.params) collectBoundNames(p, bound);
+  astWalk(arrow.body, (n) => {
+    if (n.type === "VariableDeclarator") collectBoundNames(n.id, bound);
+    if (n.type === "ArrowFunctionExpression" || n.type === "FunctionExpression") {
+      // A nested closure's own params are bound in its scope, not the outer one —
+      // but the outer walk still visits them; a two-level capture is a residual, so
+      // treating a nested param as bound here is safe (it can't be an outer capture).
+      for (const p of ((n as { params?: unknown[] }).params ?? [])) collectBoundNames(p, bound);
+    }
+  });
+  const captured: string[] = [];
+  const seen = new Set<string>();
+  // A free identifier is a candidate capture unless it is bound (param / local), a
+  // top-level fn, or a known callback global (`console`, `Math`, …).
+  const isFree = (name: string): boolean =>
+    !bound.has(name) && !topLevelFns.has(name) && !CB_GLOBALS.has(name);
+
+  let scalarCapture = false;
+  astWalk(arrow.body, (n) => {
+    // A wholesale rebind of a free var (`s = …`, `n++`) is a scalar-style capture —
+    // fail-loud (unchanged 048 for a scalar; a captured container reassigned
+    // wholesale is out of scope, per the 079 residuals).
+    if (n.type === "AssignmentExpression") {
+      const left = n.left as { type?: string; name?: string };
+      if (left?.type === "Identifier" && left.name && isFree(left.name)) scalarCapture = true;
+    }
+    if (n.type === "UpdateExpression") {
+      const arg = n.argument as { type?: string; name?: string };
+      if (arg?.type === "Identifier" && arg.name && isFree(arg.name)) scalarCapture = true;
+    }
+  });
+  if (scalarCapture) {
+    throw new UnsupportedError({
+      type: "mutable capture in a closure (a captured scalar reassignment / a container rebound wholesale — lift to a named fn taking the state as an explicit param)",
+    });
+  }
+
+  // A free identifier read (`arr[0]`, `s.add(...)`, a bare `x`) contributes a capture.
+  // A resolvable container captures cleanly; any other free read (a scalar, an
+  // un-typeable binding) is the 048 scalar-capture residual → fail-loud.
+  const collect = (name: string): void => {
+    if (!isFree(name) || seen.has(name)) return;
+    seen.add(name);
+    const info = declInfoOf(name);
+    if (info && containerAnnotationOf(info)) {
+      captured.push(name);
+    } else {
+      throw new UnsupportedError({
+        type: `capture of '${name}' in a closure is not a threadable container (only Set/Map/Array/String captures thread; a captured scalar stays fail-loud)`,
+      });
+    }
+  };
+  // A context-aware walk: a non-computed member **property** name (`s.add` → `add`) is
+  // a field, not a free var, so it is not descended into as an identifier read. A
+  // nested arrow is not descended into (capture-through-two-levels is a fail-loud
+  // residual — a nested capturing arrow is rejected on its own turn).
+  const walkExpr = (node: unknown): void => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const c of node) walkExpr(c);
+      return;
+    }
+    const n = node as { type?: string; [k: string]: unknown };
+    if (n.type === "Identifier") {
+      collect(n.name as string);
+      return;
+    }
+    if (n.type === "MemberExpression") {
+      walkExpr(n.object);
+      if (n.computed) walkExpr(n.property); // `arr[i]` — `i` is a read
+      return; // a static `.prop` is a field name, not a free var
+    }
+    if (n.type === "ArrowFunctionExpression" || n.type === "FunctionExpression") {
+      return; // don't descend into a nested closure (two-level capture → fail-loud)
+    }
+    for (const k in n) {
+      if (k === "type") continue;
+      walkExpr(n[k]);
+    }
+  };
+  walkExpr(arrow.body);
+  return captured.length > 0 ? captured : null;
+}
+
+/**
+ * Escape check (series 079): a captured-container stored closure `add` is
+ * non-escaping iff **every** use of `add` in the program is a direct call
+ * (`add(...)`). A use as an argument, a return value, a field/array store, or a
+ * reassignment means the bound environment would outlive the call — env-threading
+ * can't represent it, so fail-loud.
+ *
+ * @throws {UnsupportedError} when `add` escapes.
+ */
+function assertNonEscaping(name: string, body: Statement[]): void {
+  // Every free read of `name` must be the callee of a direct call. A context-aware
+  // walk (like the capture walk): a non-computed member **property** named `add`
+  // (`s.add`) is a field, not a use of the binding; a `VariableDeclarator` id
+  // (`const add = …`) is the declaration, not a use. Any other read of `name` — an
+  // argument, a return value, a store, a rebind — is an escape.
+  let escaped = false;
+  const walk = (node: unknown, asDeclId: boolean): void => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const c of node) walk(c, false);
+      return;
+    }
+    const n = node as { type?: string; [k: string]: unknown };
+    if (n.type === "Identifier") {
+      if (n.name === name && !asDeclId) escaped = true; // a bare read that isn't a callee
+      return;
+    }
+    if (n.type === "CallExpression") {
+      const callee = n.callee as { type?: string; name?: string } | undefined;
+      // A direct call `add(...)` is the allowed use — don't flag its callee.
+      if (!(callee?.type === "Identifier" && callee.name === name)) walk(n.callee, false);
+      walk(n.arguments, false);
+      return;
+    }
+    if (n.type === "MemberExpression") {
+      walk(n.object, false);
+      if (n.computed) walk(n.property, false); // a static `.prop` is a field name
+      return;
+    }
+    if (n.type === "VariableDeclarator") {
+      walk(n.id, true); // the binding id is the declaration, not a use
+      walk(n.init, false);
+      return;
+    }
+    for (const k in n) {
+      if (k === "type") continue;
+      walk(n[k], false);
+    }
+  };
+  walk(body, false);
+  if (escaped) {
+    throw new UnsupportedError({
+      type: `closure '${name}' captures a container and escapes (returned, stored, or passed as a value) — env-threading requires it be invoked directly only (fail-loud residual, series 079)`,
+    });
+  }
+}
+
+/**
+ * Rewrite each `add(args)` call site of a threaded stored closure to
+ * `__arrow_n(cap1, …, args)` (series 079): the captured containers become leading
+ * args (bare identifiers; the call-site borrow `&`/`&mut` is folded in later by
+ * `lowerCall` from the lifted fn's inferred param ownership). Mutates the AST in
+ * place over the whole program body.
+ */
+function rewriteThreadedCalls(
+  body: unknown,
+  binding: string,
+  fnName: string,
+  captures: readonly string[],
+): void {
+  astWalk(body, (n) => {
+    if (n.type !== "CallExpression") return;
+    const callee = (n as { callee?: { type?: string; name?: string } }).callee;
+    if (callee?.type === "Identifier" && callee.name === binding) {
+      callee.name = fnName;
+      const capArgs = captures.map((c) => ({ type: "Identifier", name: c }));
+      const node = n as unknown as { arguments: unknown[] };
+      node.arguments = [...capArgs, ...(node.arguments ?? [])];
+    }
+  });
+}
+
+/**
  * Rewrite each top-level `const f = (…) => …` (a single-declarator `const` bound
  * to an arrow, `async` or not) into a synthetic `FunctionDeclaration`, leaving
  * every other statement untouched. Run before analysis so a normalized arrow's
@@ -499,14 +824,67 @@ function normalizeArrows(program: Program): Program {
       if (f.id) fnSigs.set(f.id.name, f);
     }
   }
+  // Container-capture threading (series 079, issue #46): a stored arrow that
+  // captures a container needs, per captured var, its declaration (for the threaded
+  // param's owned type annotation) and whether its owner is aliased (→ the deferred
+  // `Rc<RefCell>` row → fail-loud). Both are program-wide, so collect them once here.
+  const declInfo = collectDeclInfo(program.body);
+  const aliased = collectAliasedVars(program.body);
+  const topLevelFns = new Set<string>(fnSigs.keys());
   const ctx: LiftCtx = {
     hoisted: [],
     counter: { n: 0 },
     fnSigs,
     reassigned: collectReassignedNames(program.body),
+    declInfo,
+    aliased,
+    topLevelFns,
+    threadedRewrites: [],
+    programBody: program.body,
   };
   const body = liftStmts(program.body, ctx, true);
-  return { ...program, body: [...body, ...ctx.hoisted] };
+  // Apply the call-site rewrites (`add(a)` → `__arrow_n(env, a)`) across the whole
+  // resulting body, including the hoisted `__arrow_*` fns (a call site can sit inside
+  // another lifted arrow).
+  const full = [...body, ...ctx.hoisted];
+  for (const rw of ctx.threadedRewrites) {
+    rewriteThreadedCalls(full, rw.binding, rw.fnName, rw.captures);
+  }
+  return { ...program, body: full };
+}
+
+/** A declarator's annotation + init, keyed by binding name (series 079). */
+function collectDeclInfo(
+  stmts: Statement[],
+): Map<string, { annotation?: unknown; init?: unknown }> {
+  const out = new Map<string, { annotation?: unknown; init?: unknown }>();
+  astWalk(stmts, (n) => {
+    if (n.type !== "VariableDeclarator") return;
+    const id = n.id as { type?: string; name?: string; typeAnnotation?: unknown };
+    if (id?.type === "Identifier" && id.name) {
+      out.set(id.name, { annotation: id.typeAnnotation, init: n.init });
+    }
+  });
+  return out;
+}
+
+/**
+ * Vars whose owner is aliased (series 079 / 062): a binding `const t = s` where `s`
+ * is a bare identifier makes `s` (and `t`) aliased — a captured container that is
+ * aliased routes to the deferred `Rc<RefCell>` row → fail-loud in the interim.
+ */
+function collectAliasedVars(stmts: Statement[]): Set<string> {
+  const aliased = new Set<string>();
+  astWalk(stmts, (n) => {
+    if (n.type !== "VariableDeclarator") return;
+    const id = n.id as { type?: string; name?: string };
+    const init = n.init as { type?: string; name?: string } | undefined;
+    if (id?.type === "Identifier" && init?.type === "Identifier" && init.name) {
+      aliased.add(init.name); // the aliased source
+      if (id.name) aliased.add(id.name); // and the new alias
+    }
+  });
+  return aliased;
 }
 
 /** State threaded through the arrow-lift transform (series 058). */
@@ -519,6 +897,19 @@ interface LiftCtx {
   /** Every identifier reassigned somewhere (`x = …`) — a reassigned arrow binding
    * can't be a direct `fn`, so it takes the `fn`-pointer path. */
   reassigned: Set<string>;
+  /** Binding name → its declaration (annotation + init), for a captured container's
+   * threaded param type (series 079). */
+  declInfo: Map<string, { annotation?: unknown; init?: unknown }>;
+  /** Aliased-owner vars (series 079 / 062) — a captured aliased container is the
+   * deferred `Rc<RefCell>` row → fail-loud. */
+  aliased: Set<string>;
+  /** Top-level fn names (excluded from a closure's free-var set). */
+  topLevelFns: Set<string>;
+  /** Deferred call-site rewrites for threaded stored closures (series 079), applied
+   * once over the whole body after lifting. */
+  threadedRewrites: { binding: string; fnName: string; captures: string[] }[];
+  /** The original (pre-lift) program body — for the whole-program escape check. */
+  programBody: Statement[];
 }
 
 /**
@@ -609,6 +1000,23 @@ function liftVarDecl(
     if (init?.type === "ArrowFunctionExpression") {
       const arrow = init as ArrowFunctionExpression;
       const name = (d.id as Identifier).name;
+      // Container-capture threading (series 079, issue #46). A stored arrow that
+      // captures a container (read or method-mutated) can't be a plain free `fn` (it
+      // would reference an out-of-scope binding). Thread the captured containers as
+      // leading params of a hoisted `__arrow_n` and rewrite every call site to pass
+      // them; `analyzeFunction` infers each param's `&`/`&mut` from body use and
+      // `lowerCall` folds the borrow in at the (rewritten) call sites. A scalar
+      // capture, a wholesale rebind, an aliased owner (→ Rc row), or an escaping
+      // binding all fail loud inside `classifyStoredCapture` / the checks below.
+      const captures = classifyStoredCapture(
+        arrow,
+        (n) => ctx.declInfo.get(n),
+        ctx.topLevelFns,
+      );
+      if (captures) {
+        threadStoredCapture(d, arrow, decl, captures, ctx, out);
+        continue;
+      }
       if (topLevel && !ctx.reassigned.has(name)) {
         // Direct promotion → a free `fn` (async carries over); recurse to lift any
         // arrows nested in its body.
@@ -651,6 +1059,69 @@ function liftVarDecl(
     }
   }
   return out;
+}
+
+/**
+ * Thread a stored closure's captured containers as leading params of a hoisted
+ * `__arrow_n` fn and record the call-site rewrite (series 079). The binding itself is
+ * dropped — a container-capturing closure carries a bound environment, so it is no
+ * longer a plain fn-pointer value; every use must be a direct call (checked by
+ * `assertNonEscaping`). Fails loud on an aliased owner (deferred `Rc` row), an
+ * escaping use, or an `async` closure (no env-threaded async form).
+ */
+function threadStoredCapture(
+  d: VariableDeclarator,
+  arrow: ArrowFunctionExpression,
+  _decl: VariableDeclaration,
+  captures: string[],
+  ctx: LiftCtx,
+  _out: Statement[],
+): void {
+  const binding = (d.id as Identifier).name;
+  if (arrow.async) {
+    throw new UnsupportedError({
+      type: "an `async` closure capturing a container (no env-threaded async form, series 079)",
+    });
+  }
+  // An aliased/shared captured container routes to the `Rc<RefCell>` row, which is
+  // deferred (needs `refineRc` to recurse into lifted-fn bodies) — fail-loud interim.
+  for (const cap of captures) {
+    if (ctx.aliased.has(cap)) {
+      throw new UnsupportedError({
+        type: `closure captures a shared/aliased container '${cap}' — needs Rc<RefCell> promotion (deferred to the #45/078-coupled Rc row, fail-loud interim, series 079)`,
+      });
+    }
+  }
+  // Escape check: every use of the binding must be a direct call. Run over the whole
+  // program (a call site can precede or follow the declaration in source order).
+  assertNonEscaping(binding, ctx.programBody);
+
+  // The threaded leading params: each captured container by its owned type annotation
+  // (borrow inferred from body use), then the arrow's own params unchanged.
+  const capParams: Identifier[] = captures.map((cap) => {
+    const info = ctx.declInfo.get(cap);
+    const ann = info ? containerAnnotationOf(info) : null;
+    if (!ann) {
+      // Unreachable: `classifyStoredCapture` only admitted captures `containerAnnotationOf`
+      // resolves. Kept as a fail-loud guard rather than a silent untyped param.
+      throw new UnsupportedError({
+        type: `cannot synthesize a threaded param type for captured container '${cap}' (series 079)`,
+      });
+    }
+    return {
+      type: "Identifier",
+      name: cap,
+      typeAnnotation: ann,
+    } as unknown as Identifier;
+  });
+
+  const fnName = `__arrow_${ctx.counter.n++}`;
+  const id: Identifier = { ...(d.id as Identifier), name: fnName };
+  const fn = arrowToFunctionDecl(id, arrow);
+  fn.params = [...capParams, ...(arrow.params as Identifier[])];
+  ctx.hoisted.push(liftNested(fn, ctx) as FunctionDeclaration);
+  ctx.threadedRewrites.push({ binding, fnName, captures });
+  // No binding statement is emitted — the closure is now a bound-env fn, not a value.
 }
 
 /** Wrap one declarator in its own single-declarator `VariableDeclaration`. */
@@ -7121,28 +7592,68 @@ function arrowShape(
 }
 
 /**
- * The read-only free variables of a callback body, in first-occurrence order: the
+ * Source-level (pre-lowering) collection-mutating method names — a call to one of
+ * these on a **captured** receiver is a mutable capture (series 078 / issue #45,
+ * the field-collection-capture residual → #46). Mirrors `MUTATING_METHODS` in
+ * `analysis.ts`; kept local to the capture check.
+ */
+const CAPTURE_MUTATORS = new Set<string>([
+  "set",
+  "add",
+  "delete",
+  "push",
+  "pop",
+  "shift",
+  "unshift",
+  "splice",
+  "sort",
+  "reverse",
+  "fill",
+  "clear",
+]);
+
+/**
+ * The free variables of a callback body, in first-occurrence order: the
  * `Identifier`s it reads that are not its own params, a top-level fn name, a
  * declared nominal type, a member-access property, or a known global. A free var
- * that is *assigned* (an `=` LHS, or a `++`/`--` target) is a mutable capture —
- * fail-loud (series 048; the user lifts it to a named fn taking the state).
+ * that is *assigned* (an `=` LHS, or a `++`/`--` target) is a scalar mutable capture
+ * — fail-loud (series 048; the user lifts it to a named fn taking the state). A free
+ * var mutated through a **collection method** (`xs.push(…)`, `s.add(…)`) is a
+ * container capture (series 079, issue #46): reported in `mutated` so `liftCallback`
+ * forwards it `&mut` instead of rejecting it. `names` includes both read and mutated
+ * captures (a container read-and-mutated appears once, in `mutated`).
  */
 function freeVarsOf(
   body: Expression,
   params: Set<string>,
   analysis: ModuleAnalysis,
-): string[] {
+): { names: string[]; mutated: Set<string> } {
   const excluded = (name: string): boolean =>
     params.has(name) ||
     analysis.fns.has(name) ||
     analysis.structs.has(name) ||
     CB_GLOBALS.has(name);
+  // The root identifier of a member chain (`c.entries` / `c.a.b` → `c`), or null.
+  const rootOf = (node: unknown): string | null => {
+    let cur: unknown = node;
+    while (isAstNode(cur) && cur.type === "MemberExpression") cur = cur.object;
+    return isAstNode(cur) && cur.type === "Identifier"
+      ? (cur.name as string)
+      : null;
+  };
   const seen = new Set<string>();
   const order: string[] = [];
+  const mutated = new Set<string>();
   const mutableCapture = (): never => {
     throw new UnsupportedError({
       type: "mutable capture in a callback (lift to a named fn taking the state as an explicit param)",
     });
+  };
+  const record = (name: string): void => {
+    if (!excluded(name) && !seen.has(name)) {
+      seen.add(name);
+      order.push(name);
+    }
   };
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) {
@@ -7152,11 +7663,7 @@ function freeVarsOf(
     if (!isAstNode(node)) return;
     switch (node.type) {
       case "Identifier": {
-        const name = node.name as string;
-        if (!excluded(name) && !seen.has(name)) {
-          seen.add(name);
-          order.push(name);
-        }
+        record(node.name as string);
         return;
       }
       case "MemberExpression": {
@@ -7187,6 +7694,42 @@ function freeVarsOf(
         visit(arg);
         return;
       }
+      case "CallExpression": {
+        // A collection-mutating method on a **captured** receiver
+        // (`c.entries.set(…)` / `xs.push(…)` where `xs` is a free var) mutates
+        // captured state through a method — reachable only through the receiver chain
+        // rather than an assignment. Series 079 (issue #46) graduates the **bare**
+        // captured-container case: it is recorded in `mutated` so the container is
+        // forwarded `&mut` (not rejected). A mutation of a **field** of a captured
+        // owner (`c.entries.set(…)`, a nested receiver) still needs promotion — that
+        // stays fail-loud (the #45-coupled Rc row). A property mutator on a param
+        // receiver is fine.
+        const callee = node.callee;
+        if (
+          isAstNode(callee) &&
+          callee.type === "MemberExpression" &&
+          isAstNode(callee.property) &&
+          callee.property.type === "Identifier" &&
+          CAPTURE_MUTATORS.has(callee.property.name as string)
+        ) {
+          const recv = callee.object;
+          const root = rootOf(recv);
+          // A bare captured receiver (`xs.push(…)`, `xs` an Identifier) → `&mut`
+          // forward. A field-of-captured receiver (`c.entries.set(…)`) is a deeper
+          // shape (→ Rc row) → fail-loud.
+          if (root && !excluded(root)) {
+            if (isAstNode(recv) && recv.type === "Identifier") {
+              record(root);
+              mutated.add(root);
+            } else {
+              mutableCapture();
+            }
+          }
+        }
+        visit(node.callee);
+        node.arguments && visit(node.arguments);
+        return;
+      }
       default: {
         for (const key in node) {
           if (key === "type") continue;
@@ -7196,7 +7739,21 @@ function freeVarsOf(
     }
   };
   visit(body);
-  return order;
+  return { names: order, mutated };
+}
+
+/**
+ * Is a `RustType` a container a lifted callback can forward by reference (series
+ * 079): a `Vec`, `Set`, `Map`, or `String`. These are the shapes `freeVarsOf`
+ * classifies read/mut and `liftCallback` threads as `&T` / `&mut T`.
+ */
+function isCaptureContainerType(ty: RustType): boolean {
+  return (
+    ty.kind === "vec" ||
+    ty.kind === "set" ||
+    ty.kind === "hashmap" ||
+    ty.kind === "String"
+  );
 }
 
 /** Is a `RustType` a `Copy` scalar (forwardable by value into a lifted fn)? */
@@ -7354,21 +7911,35 @@ function liftCallback(
 
   const freeParams: HirParam[] = [];
   const forwarded: HirExpr[] = [];
-  for (const name of freeNames) {
+  for (const name of freeNames.names) {
     const t = analysis.bindingTypes.get(name);
     if (!t) {
       throw new UnsupportedError({
         type: `cannot lift callback: free variable '${name}' has unknown type`,
       });
     }
-    if (!isCopyRustType(t)) {
-      throw new UnsupportedError({
-        type: `cannot lift callback: free variable '${name}' is not a Copy scalar (only read-only scalars forward)`,
-      });
+    if (isCopyRustType(t)) {
+      // A Copy scalar forwards by value (the shipped 048 path, unchanged).
+      ctx.set(name, t);
+      freeParams.push({ name, ty: t });
+      forwarded.push({ kind: "ident", name });
+      continue;
     }
-    ctx.set(name, t);
-    freeParams.push({ name, ty: t });
-    forwarded.push({ kind: "ident", name });
+    // A captured **container** (Set/Map/Vec/String) forwards by reference (series
+    // 079, issue #46): `&mut T` when the body mutates it through a method, else `&T`.
+    // The single call site borrows the arg accordingly (`&env` / `&mut env`). Body
+    // references already lower to method calls on the param name — no rewrite beyond
+    // the `&`/`&mut` param type. The typer `ctx` keeps the *value* type.
+    if (isCaptureContainerType(t)) {
+      const mut = freeNames.mutated.has(name);
+      ctx.set(name, t);
+      freeParams.push({ name, ty: { kind: "ref", mut, inner: t } });
+      forwarded.push({ kind: "ref", mut, expr: { kind: "ident", name } });
+      continue;
+    }
+    throw new UnsupportedError({
+      type: `cannot lift callback: free variable '${name}' is not a Copy scalar or a threadable container (only read-only scalars and Set/Map/Array/String captures forward)`,
+    });
   }
 
   const body = lowerExpr(bodyExpr, analysis);

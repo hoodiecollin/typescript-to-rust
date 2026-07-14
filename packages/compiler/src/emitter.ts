@@ -438,11 +438,22 @@ function emitTrait(t: HirTrait): string {
   return `trait ${rid(t.name)} {\n${body}\n}`;
 }
 
+/**
+ * The receiver segment of a method's parameter list: `&mut self` (`refMut`),
+ * `&self` (`ref`), an owned `self` (`owned`, a consuming method — series 068), or
+ * none (a free/associated fn with no receiver).
+ */
+function selfReceiver(recv: HirFn["recv"]): string[] {
+  if (recv === "refMut") return ["&mut self"];
+  if (recv === "ref") return ["&self"];
+  if (recv === "owned") return ["self"];
+  return [];
+}
+
 /** A function signature (no body) — `[async ]fn name(&self, …)[ -> R]`. */
 function emitFnSig(fn: HirFn): string {
   const asyncKw = fn.isAsync ? "async " : "";
-  const self =
-    fn.recv === "refMut" ? ["&mut self"] : fn.recv === "ref" ? ["&self"] : [];
+  const self = selfReceiver(fn.recv);
   const rest = fn.params.map(
     (p) => `${p.pat ?? rid(p.name)}: ${emitType(p.ty)}`,
   );
@@ -794,6 +805,8 @@ function emitStmt(stmt: HirStmt): string {
       else if (stmt.mode === "cloned") iter = `${iter}.iter().cloned()`;
       return `${loopLabel(stmt.label)}for ${rid(stmt.pat)} in ${iter} ${block(stmt.body)}`;
     }
+    case "forInReborrow":
+      return emitReborrowLoop(stmt);
     case "forRange": {
       const dots = stmt.inclusive ? "..=" : "..";
       let range = `${emitExpr(stmt.start)}${dots}${emitExpr(stmt.end)}`;
@@ -993,7 +1006,91 @@ function emitStmt(stmt: HirStmt): string {
   }
 }
 
+/**
+ * Series 077 — emit the index-based re-borrow loop for mutate-during-iteration over
+ * an aliased container. Holds **no** borrow across the (already rc-rewritten) body,
+ * so `RefCell` never panics; reproduces JS's live-cursor semantics.
+ *
+ * The private names are `__`-prefixed with a series tag to avoid colliding with any
+ * user binding (post-`rid` hygiene keeps user names collision-free too).
+ */
+function emitReborrowLoop(
+  stmt: Extract<HirStmt, { kind: "forInReborrow" }>,
+): string {
+  const owner = emitExpr(stmt.owner); // an `Rc<RefCell<T>>` ident.
+  const field = rid(stmt.field);
+  const label = loopLabel(stmt.label);
+  // The loop body, inlined into the loop scope (not a nested `{}` block).
+  const bodyLines = stmt.body.map((s) => indent(emitStmt(s))).join("\n");
+
+  // The user binders (`x` / `k` / `v`) are materialized as real HIR `let`s over the
+  // owned per-step clones (`__x077` / `__k077` / `__v077`) at the head of `body` by
+  // `refineRc` — so `refineOwnership` sees them and the body's comparisons type-check
+  // against owned values. The emitter only provides those owned locals.
+
+  if (stmt.shape === "array") {
+    // A live positional walk: re-borrow to read element `i` (cloned out to release
+    // the borrow), advance, then run the body. `len()` is re-read each step, so
+    // appends are visited and splice-shifts reindex exactly as JS's for-of does.
+    return [
+      "{",
+      `${INDENT}let mut __i077: usize = 0;`,
+      `${INDENT}${label}loop {`,
+      `${INDENT}${INDENT}let __x077 = {`,
+      `${INDENT}${INDENT}${INDENT}let __g077 = ${owner}.borrow();`,
+      `${INDENT}${INDENT}${INDENT}if __i077 >= __g077.${field}.len() { break; }`,
+      `${INDENT}${INDENT}${INDENT}__g077.${field}[__i077].clone()`,
+      `${INDENT}${INDENT}};`,
+      `${INDENT}${INDENT}__i077 += 1;`,
+      indent(indent(bodyLines)),
+      `${INDENT}}`,
+      "}",
+    ].join("\n");
   }
+
+  // Map/Set — a stable key-snapshot `Vec` + a growing `__added077` append-buffer +
+  // a `__seen077` once-guard, drained in two phases with a per-step `contains`/`get`
+  // recheck. `refineRc` instrumented the body's visible inserts (an `__added077.push`)
+  // and rejected opaque cell mutations. Deletes ride the live recheck (skipped).
+  const isMap = stmt.shape === "map";
+  // Snapshot the keys (map) / elements (set) into a stable ordered `Vec`, typed by
+  // the key so a delete-only loop (no `__added` push) still type-checks.
+  const keyTy = stmt.keyType ? emitType(stmt.keyType) : "_";
+  const snapshot = isMap
+    ? `${owner}.borrow().${field}.keys().cloned().collect::<Vec<${keyTy}>>()`
+    : `${owner}.borrow().${field}.iter().cloned().collect::<Vec<${keyTy}>>()`;
+
+  const lines = [
+    "{",
+    `${INDENT}let __keys077: Vec<${keyTy}> = ${snapshot};`,
+    `${INDENT}let mut __added077: Vec<${keyTy}> = Vec::new();`,
+    `${INDENT}let mut __seen077 = std::collections::HashSet::new();`,
+    `${INDENT}let mut __src077: usize = 0;`,
+    `${INDENT}${label}loop {`,
+    `${INDENT}${INDENT}let __k077 = if __src077 < __keys077.len() {`,
+    `${INDENT}${INDENT}${INDENT}let __kk = __keys077[__src077].clone(); __src077 += 1; __kk`,
+    `${INDENT}${INDENT}} else if __src077 - __keys077.len() < __added077.len() {`,
+    `${INDENT}${INDENT}${INDENT}let __kk = __added077[__src077 - __keys077.len()].clone(); __src077 += 1; __kk`,
+    `${INDENT}${INDENT}} else { break; };`,
+    `${INDENT}${INDENT}if !__seen077.insert(__k077.clone()) { continue; }`,
+  ];
+  if (isMap) {
+    // Live value read; skip on a mid-iteration delete. The `k`/`v` HIR binder-`let`s
+    // (owned) sit at the head of `body`.
+    lines.push(
+      `${INDENT}${INDENT}let __v077 = match ${owner}.borrow().${field}.get(&__k077) { Some(v) => v.clone(), None => continue };`,
+    );
+  } else {
+    // A set element *is* the key; the recheck is the read (skip on delete).
+    lines.push(
+      `${INDENT}${INDENT}if !${owner}.borrow().${field}.contains(&__k077) { continue; }`,
+    );
+  }
+  lines.push(indent(indent(bodyLines)));
+  lines.push(`${INDENT}}`, "}");
+  return lines.join("\n");
+}
+
 /** The 073 carrier `try`/`catch`/`finally` HIR node (narrowed for the emit). */
 type HirCarrierTry = Extract<HirStmt, { kind: "carrierTry" }>;
 

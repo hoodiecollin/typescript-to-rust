@@ -1,13 +1,35 @@
 # 078 — Ownership of field-held mutable collections (`localVar.field.<mut>()` borrow tail)
 
-> **Status: DESIGN COMPLETE (2026-07-11). Impl pending.** Graduates the `localVar.field`
-> borrow-conflict tail that **#37/072 ships fail-loud**, issue **#45** (companion to #37).
-> Dialect calls made with Collin 2026-07-11 (`needs-user-input` cleared). **Impl-ordered
-> after 072** (needs `collectionOf` to resolve `localVar.field`). Coordinates the promoted-set
-> representation with **#35/068** and **#38/069**; ties the re-entrant-overlap tail to **#41**.
-> Closure-capture of a mutable container is **split to its own issue** (see Residuals).
+> **Status: SHIPPED (2026-07-14).** Graduates the `localVar.field` borrow-conflict tail
+> that **#37/072 ships fail-loud**, issue **#45** (companion to #37). Dialect calls made
+> with Collin 2026-07-11 (`needs-user-input` cleared). Coordinates the promoted-set
+> representation with **#35/068** and **#38/069**; ties the re-entrant-overlap tail to
+> **#41** and closure-capture to **#46**. Specs: `specs.md` →
+> `packages/compiler/tests/field-collection-ownership.test.ts` (10 specs, all green).
 >
-> Spec-first: this `design.md` → mock → RED `specs.md` → impl → archive.
+> **Impl notes / deviations:**
+> - **Three surgical edits, no parallel machinery** — the promoted-owner path rides the
+>   existing `computeAutoRc` union-find + `refineRc` exactly as scope item 3 asked:
+>   1. **`analysis.ts` `mutableBindings`** — a collection mutator on a `localVar.field`
+>      receiver marks the owner `mut` (the clean-owner `let mut c` the 072 clean path
+>      never wired); withheld when the owner is aliased (it promotes instead).
+>   2. **`alias-escape.ts` `computeAutoRc`** — a new promotion **trigger**: a lowered
+>      collection mutator (`insert`/`shift_remove`, module const `COLLECTION_MUT_METHODS`)
+>      on a `field` receiver marks the owner mutated in the **same** union-find. An
+>      aliased / field-stored owner (a ≥2-member component) then promotes; a lone owner
+>      stays clean (the ≥2-member gate is the single-owner-vs-alias split — no separate
+>      trigger kind was needed, the field-mutation flag suffices). `AutoRcResult` shape
+>      **unchanged** — #45 adds edges, not fields.
+>   3. **`rc.ts` `refineRc` write-mode fix** — a mutating method (`mutatingMethods` ∪
+>      `COLLECTION_MUT_METHODS`) on a promoted-owner `field` receiver threads `write =
+>      true` into the field rewrite → `owner.borrow_mut().field.insert(..)` (was
+>      `.borrow()`, the design's write-mode bug).
+> - **Closure-capture** — `freeVarsOf` (`lower.ts`) now rejects a collection mutator on a
+>   **captured** receiver (`CAPTURE_MUTATORS`) as a mutable capture (a clean `DialectError`
+>   for the lifted-callback shape, extending the interim rejection to field-collections).
+>   Full closure-lift graduation stays **#46**; the `const f = () => {…}` block-arrow shape
+>   remains cargo-loud (out of #45's scope).
+> - **Re-entrant / mutate-during-iteration** stays **cargo-loud → #41** (no new panic).
 
 ## Problem
 
