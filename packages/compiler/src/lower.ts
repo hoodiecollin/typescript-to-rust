@@ -8375,12 +8375,20 @@ function lowerCall(
 ): HirExpr {
   // Explicit call-site type arguments `identity<number>(5)` (series 081) — the
   // dialect infers a generic fn's type params from its arguments (rustc does the
-  // same), so an explicit source-level `<…>` on a call is fail-loud. Checked before
-  // any routing so the guard is uniform across free-fn / method calls.
+  // same), so an explicit source-level `<…>` on a *user* call is fail-loud. Checked
+  // before any routing so the guard is uniform across free-fn / method calls. The
+  // blessed `@t2r/std` shim generics are exempt: `parseJson<T>(s)` (series 084) is
+  // *designed* around an explicit type argument (it has no argument to infer `T`
+  // from), so a shim callee skips the guard and routes to `lowerStdShimCall`.
   if ((call as { typeArguments?: unknown }).typeArguments) {
-    throw new UnsupportedError({
-      type: "explicit type arguments on a generic call `f<…>(…)` (calls are inference-only — drop the `<…>`; rustc infers the type parameter from the arguments)",
-    });
+    const isStdShim =
+      call.callee.type === "Identifier" &&
+      analysis.stdShim.has((call.callee as Identifier).name);
+    if (!isStdShim) {
+      throw new UnsupportedError({
+        type: "explicit type arguments on a generic call `f<…>(…)` (calls are inference-only — drop the `<…>`; rustc infers the type parameter from the arguments)",
+      });
+    }
   }
   // `setTimeout(fn, ms)` — a fire-and-forget delayed task (series 051c
   // increment 1) → `tokio::spawn(async move { sleep(ms).await; <fn body>; })`.
