@@ -97,8 +97,11 @@ flip it.
 
 The accepted type annotations are exactly: `number`, `string`, `boolean`, `void`,
 `Array<T>` / `T[]`, `Record<string, V>`, `Promise<T>`, a declared `interface` /
-`class` name (nominal `struct`), and `T | undefined` / `T | null` (→ `Option<T>`).
-Everything else is fail-loud.
+`class` name (nominal `struct`, incl. a **generic instantiation** `Box<number>` —
+series 081), an in-scope **generic type parameter** `T` (inside a generic class /
+method / fn, series 081 → the `param` type variable), and `T | undefined` /
+`T | null` (→ `Option<T>`). Everything else is fail-loud. (A bare `T` that is *not*
+an in-scope type parameter stays fail-loud as an undeclared type name.)
 
 | Trigger | Kind | Message |
 |---------|------|---------|
@@ -180,7 +183,8 @@ A **named, non-async `function*`** annotated `Generator<T>` /
 
 Modeled: a **named** class with instance fields, a constructor (explicit or
 synthesized), and instance methods. **Single-`extends` class inheritance** (series
-053) is modeled via a composition + trait hybrid; no generics.
+053) is modeled via a composition + trait hybrid. **Generics** (`class Box<T>`) are
+modeled by monomorphization (series 081) — see the *Generics* section below.
 
 ### Construction — implicit & partial constructors (series 070)
 
@@ -240,6 +244,45 @@ A user `static new` that would collide with the synthesized `new()` is fail-loud
 | `get` / `set` accessor | Not yet | `class get accessor` / `class set accessor` |
 | Method without a body | Not yet | `method without a body` |
 | `[Symbol.dispose]()` method without a body | Not yet | `[Symbol.dispose] without a body` |
+
+### Generics (series 081) — monomorphization + interface bounds
+
+Type parameters are the **first user type variable** in the type system (the
+`{kind:"param"}` `RustType`, rendered as the bare name). A generic class/method
+lowers by **monomorphization**: rustc emits one specialization per instantiation
+(zero-cost, idiomatic Rust).
+
+- **Unbounded** `class Box<T> { v: T; get(): T { … } }` → `struct Box<T>` +
+  `impl<T: Clone> Box<T>`. A bare `T` in scope (class or method type params) lowers
+  to `{kind:"param"}`; nested `Vec<T>` / `Option<T>` / `T[]` render the name inside
+  the wrapper unchanged. Multiple params (`class Pair<A, B>`) and a **generic method**
+  (`first<U>(xs: U[]): U`) are modeled.
+- **Bounds are derive-driven.** The struct gets the derives its fields already earn
+  (`Clone` / `Debug` / `PartialEq`); rustc adds the per-derive `T: …` bound. The
+  inherent `impl` and a generic method's own `<U>` additionally carry an explicit
+  `Clone` bound, because a `return this.field` of a `T` field clones it. A
+  `Box<NonClone>` therefore fails at that bound (accepted cost).
+- **Interface-bounded** `class Boxed<T extends I>` where `I` is a **behavioral**
+  interface → `struct Boxed<T: I<Name>>` / `impl<T: I<Name> + Clone> Boxed<T>`
+  (reuses 071 `traitNameOf`); the bounded `T` can **call the interface's methods**
+  (`this.v.area()`).
+- **Construction is inference-only.** `new Box(5)` → `Box::new(5.0)` (rustc infers
+  `Box<f64>` from the ctor arg); no turbofish is emitted. A generic **struct-reference**
+  annotation `const b: Box<number> = new Box(5)` lowers (`Box<f64>`).
+
+**Fail-loud residuals (slice 3, graduates with #44 — the TS type layer):**
+
+| Form | Status | Message shape |
+|------|--------|---------------|
+| An **operator on a bare `T`** (`a + b`, `a < b`, `a === b` where `a,b: T`) | Not yet | `operator '<op>' on a generic type parameter 'T' — … the #44 type-layer wall … compute over a bounded 'T' …` |
+| **Explicit call-site type args** on `new` (`new Box<string>(x)`) | Not yet | `explicit type arguments on \`new Box<…>(…)\` (construction is inference-only …)` |
+| **Explicit call-site type args** on a call (`identity<number>(5)`) | Not yet | `explicit type arguments on a generic call \`f<…>(…)\` (calls are inference-only …)` |
+| A **class** as a bound (`<T extends SomeClass>`) | Not yet | `class '<C>' used as a generic bound … (a class isn't a trait bound)` |
+| A **multi-bound** (`<T extends A & B>`) | Not yet | `multi-bound generic '<T extends A & B>' …` |
+| A **data-only / unknown interface** bound (no trait to bind) | Not yet | `generic bound '<T extends I>' where 'I' is not a behavioral interface …` |
+| A **bound on a method/fn type param** (`<U extends I>`) | Not yet | `a bound on the method/function type parameter '<U>' …` |
+| A generic class that **also** does inheritance / `implements` | Not yet | `generic class '<C>' that also participates in inheritance / \`implements\` …` |
+| `where`-clauses, const generics, lifetime params | Not yet | generic `Unsupported <node>` |
 
 ### Constructors
 
