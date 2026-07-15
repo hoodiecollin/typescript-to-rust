@@ -133,13 +133,18 @@ console.log(new Boxed(new Square(3)).area());`;
 });
 
 describe("081 fail-loud residuals", () => {
-  test("CG8 operator on a bare T fails loud", () => {
+  test("CG8 a mixed-operand operator on a bare T fails loud (retargeted by 088)", () => {
+    // Series 088 graduated operators over a **same-`T`** pair to the tslib
+    // JS-operator trait layer (`a + b` where `a,b: T` now lowers). What stays loud is
+    // the **mixed-operand** JS coercion case — a `T` and a non-`T` operand — the
+    // definition site can't know the coercion. (See generic-operators.test.ts GOP1-8
+    // for the full retarget.)
     const src = `class Box<T> {
   v: T;
   constructor(v: T) { this.v = v; }
-  sum(a: T, b: T): T { return a + b; }
+  bump(): T { return this.v + 1; }
 }
-console.log(new Box(1).sum(1, 2));`;
+console.log(new Box(1).bump());`;
     expect(() => compile(src)).toThrow(UnsupportedError);
   });
 
