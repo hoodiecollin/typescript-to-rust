@@ -18,6 +18,7 @@ import {
   type StructTable,
   buildStructTable,
   structDeriveClause,
+  structDerivesPartialEq,
 } from "./derives";
 import type {
   ElemMode,
@@ -664,7 +665,37 @@ function emitStruct(
     const body = [...getterFns, ...methodFns].join("\n");
     impls.push(`impl ${rid(li.trait)} for ${rid(s.name)} {\n${body}\n}`);
   }
+  // Structural `===` over a struct-typed generic `T` (series 088): a `PartialEq`
+  // struct also implements `tslib::ops::JsEq` (delegating to `==`).
+  const jsEq = jsEqImpl(s, structs);
+  if (jsEq) impls.push(jsEq);
   return [decl, ...impls].join("\n\n");
+}
+
+/**
+ * The per-struct `impl tslib::ops::JsEq` block (series 088) for structural `===`
+ * over a struct-typed generic `T`, or `""` when the struct doesn't derive
+ * `PartialEq` (so the impl wouldn't compile) or is itself generic (a struct-typed
+ * `T` is always a concrete named struct). Delegates to the derived `PartialEq`
+ * (`self == o`), so it stays consistent with concrete struct `===`.
+ */
+function jsEqImpl(
+  s: {
+    name: string;
+    fields: { name: string; ty: RustType }[];
+    hashEq?: boolean;
+    generics?: GenericParam[];
+  },
+  structs: StructTable,
+): string {
+  if (s.generics && s.generics.length > 0) return "";
+  if (!structDerivesPartialEq(s, structs)) return "";
+  return [
+    `impl tslib::ops::JsEq for ${rid(s.name)} {`,
+    `${INDENT}fn js_eq(&self, o: &Self) -> bool { self == o }`,
+    `${INDENT}fn js_ne(&self, o: &Self) -> bool { self != o }`,
+    `}`,
+  ].join("\n");
 }
 
 /** The Rust name for a `structKey` type — the base struct name, `Key`-suffixed. */
@@ -752,10 +783,23 @@ function emitFn(fn: HirFn): string {
  */
 function genericClause(generics: GenericParam[] | undefined): string {
   if (!generics || generics.length === 0) return "";
-  const parts = generics.map((g) =>
-    g.bound ? `${rid(g.name)}: ${rid(g.bound)}` : rid(g.name),
-  );
+  const parts = generics.map((g) => paramBoundStr(g, false));
   return `<${parts.join(", ")}>`;
+}
+
+/**
+ * Render one generic param's bound list (series 081 + 088): the interface `bound`
+ * (081), then the JS-operator trait bounds (`opBounds`, 088), then — on the
+ * inherent impl only (`withClone`) — the derive-driven `Clone`. `<T>` when the
+ * param is unbounded and `Clone` isn't forced; `<T: A + B + Clone>` when several
+ * apply. Order is stable so emission is deterministic.
+ */
+function paramBoundStr(g: GenericParam, withClone: boolean): string {
+  const bounds: string[] = [];
+  if (g.bound) bounds.push(rid(g.bound));
+  if (g.opBounds) bounds.push(...g.opBounds);
+  if (withClone) bounds.push("Clone");
+  return bounds.length === 0 ? rid(g.name) : `${rid(g.name)}: ${bounds.join(" + ")}`;
 }
 
 /**
@@ -767,9 +811,7 @@ function genericClause(generics: GenericParam[] | undefined): string {
  */
 function implGenericClause(generics: GenericParam[] | undefined): string {
   if (!generics || generics.length === 0) return "";
-  const parts = generics.map((g) =>
-    g.bound ? `${rid(g.name)}: ${rid(g.bound)} + Clone` : `${rid(g.name)}: Clone`,
-  );
+  const parts = generics.map((g) => paramBoundStr(g, true));
   return `<${parts.join(", ")}>`;
 }
 
@@ -1640,6 +1682,10 @@ function emitExpr(expr: HirExpr): string {
     }
     case "method":
       return `${emitExpr(expr.receiver)}.${rid(expr.name)}(${expr.args.map(emitExpr).join(", ")})`;
+    // A JS-operator trait-method call over a generic `T` (series 088):
+    // `left.js_add(&right)`. The arg is by-reference (`&Self`), ownership-safe.
+    case "jsOp":
+      return `${emitExpr(expr.receiver)}.${expr.method}(&${emitExpr(expr.arg)})`;
     case "len":
       return `${emitExpr(expr.object)}.len()`;
     case "field":

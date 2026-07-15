@@ -3665,6 +3665,13 @@ function lowerClass(
     generics.length > 0
       ? new Set([...prevTypeParams, ...generics.map((g) => g.name)])
       : prevTypeParams;
+  // Series 088: the class-level params are the ones an operator-on-`T` may bind an
+  // operator trait onto (a method's own `<U>` is not). Reset the per-class bound
+  // accumulator; both are restored after the class lowers (classes don't nest).
+  const prevClassTypeParams = analysis.classTypeParams;
+  const prevOpBounds = analysis.opBounds;
+  analysis.classTypeParams = new Set(generics.map((g) => g.name));
+  analysis.opBounds = new Map();
   try {
     return lowerClassBody(decl, analysis, {
       name,
@@ -3674,6 +3681,8 @@ function lowerClass(
     });
   } finally {
     analysis.typeParams = prevTypeParams;
+    analysis.classTypeParams = prevClassTypeParams;
+    analysis.opBounds = prevOpBounds;
   }
 }
 
@@ -3849,6 +3858,13 @@ function lowerClassBody(
     }
   }
   analysis.currentClass = prevClass;
+  // Series 088: merge the JS-operator trait bounds accumulated during body lowering
+  // onto each class-level `GenericParam` (demand-driven — a param gains only the
+  // bounds its operators used). Order-stable (declaration order of the map inserts).
+  for (const g of generics) {
+    const set = analysis.opBounds.get(g.name);
+    if (set && set.size > 0) g.opBounds = [...set];
+  }
   // Accessor methods live in the inherent impl alongside ordinary methods.
   methods.push(...accessorFns);
   // Series 070: a class with no explicit constructor synthesizes a zero-param
@@ -4818,6 +4834,58 @@ function tryHashMapInsert(
  * taken by value (method-param borrow inference is deferred). `this` lowers to
  * the `self` identifier (see `lowerExpr`), so `this.x` becomes `self.x`.
  */
+/**
+ * The (name → `RustType`) map of a method/fn's own **annotated identifier params**
+ * (series 088), resolved in the current generic scope (`analysis.typeParams`). Only
+ * plain `Identifier` params with a type annotation are seeded — destructured /
+ * untyped params are left to the global path. Silently drops a param whose type
+ * fails to resolve (the global map / a later fail-loud handles it).
+ */
+function seedMethodParamTypes(
+  fn: { params: unknown[] },
+  structs: Set<string>,
+  analysis: ModuleAnalysis,
+): Map<string, RustType> {
+  const seeded = new Map<string, RustType>();
+  for (const p of fn.params) {
+    if (!isAstNode(p) || p.type !== "Identifier") continue;
+    const ann = (p as { typeAnnotation?: { typeAnnotation?: TSType } })
+      .typeAnnotation?.typeAnnotation;
+    if (!ann) continue;
+    try {
+      seeded.set(p.name as string, lowerType(ann, structs, analysis.typeParams));
+    } catch {
+      // Unresolvable here — leave to the global `bindingTypes` / a later fail-loud.
+    }
+  }
+  return seeded;
+}
+
+/**
+ * Run `body` with `seeded` param types temporarily overriding `analysis.bindingTypes`
+ * (series 088), restoring the prior entries after. Scoped so nested method lowering
+ * sees its own params, not a sibling method's colliding same-named ones.
+ */
+function withSeededBindings<T>(
+  analysis: ModuleAnalysis,
+  seeded: Map<string, RustType>,
+  fn: () => T,
+): T {
+  const prior = new Map<string, RustType | undefined>();
+  for (const [name, ty] of seeded) {
+    prior.set(name, analysis.bindingTypes.get(name));
+    analysis.bindingTypes.set(name, ty);
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [name, ty] of prior) {
+      if (ty === undefined) analysis.bindingTypes.delete(name);
+      else analysis.bindingTypes.set(name, ty);
+    }
+  }
+}
+
 function lowerMethod(
   member: MethodDefinition,
   className: string,
@@ -4868,10 +4936,15 @@ function lowerMethodInner(
   }
   const ret = lowerType(fn.returnType.typeAnnotation, structs, analysis.typeParams);
   if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
-  const body = lowerStatements(
-    takeDirectives(fn.body.body),
-    analysis,
-    `${className}.${name}`,
+  // Series 088: seed *this method's* param types into `bindingTypes` for the body's
+  // duration, restored after. The global `collectBindingTypes` map is name-keyed, so
+  // two methods with same-named params carrying different generic type-params (e.g.
+  // `addA(o: A)` / `ltB(o: B)`) collide there — the operator-on-`T` decision needs the
+  // *local* type. Only a `param`-typed override matters for the operator layer, but
+  // seeding all annotated params keeps the local scope honest.
+  const seededParams = seedMethodParamTypes(fn, structs, analysis);
+  const body = withSeededBindings(analysis, seededParams, () =>
+    lowerStatements(takeDirectives(fn.body!.body), analysis, `${className}.${name}`),
   );
   // `&mut self` when the method mutates `self` — directly or transitively (it
   // calls another self-mutating method); `analysis.mutatingMethods` is the
@@ -5911,8 +5984,55 @@ function paramTypeOfOperand(
   if (e.type === "Identifier") {
     const t = analysis.bindingTypes.get((e as Identifier).name);
     if (t?.kind === "param") return t;
+    return null;
+  }
+  // A `this.<field>` (or `struct.<field>`) whose field is typed `T` (series 088):
+  // the emission case `this.v + o` has a `param`-typed member operand.
+  if (e.type === "MemberExpression") {
+    const t = memberFieldType(e as MemberExpression, analysis);
+    if (t?.kind === "param") return t;
   }
   return null;
+}
+
+/**
+ * The tslib JS-operator trait + method for a binary operator over a same-`T` pair
+ * (series 088), or null when the operator has no trait mapping (logical/bitwise/
+ * compound — stays fail-loud). Arithmetic → `Js*`/`js_*`; ordering → `JsOrd`;
+ * equality → `JsEq`. The trait path is fully-qualified (the emitted-Rust tslib
+ * convention, `tslib::<module>::<item>`).
+ */
+const JS_OP_TRAIT: Record<string, { trait: string; method: string } | undefined> =
+  {
+    "+": { trait: "tslib::ops::JsAdd", method: "js_add" },
+    "-": { trait: "tslib::ops::JsSub", method: "js_sub" },
+    "*": { trait: "tslib::ops::JsMul", method: "js_mul" },
+    "/": { trait: "tslib::ops::JsDiv", method: "js_div" },
+    "%": { trait: "tslib::ops::JsRem", method: "js_rem" },
+    "<": { trait: "tslib::ops::JsOrd", method: "js_lt" },
+    "<=": { trait: "tslib::ops::JsOrd", method: "js_le" },
+    ">": { trait: "tslib::ops::JsOrd", method: "js_gt" },
+    ">=": { trait: "tslib::ops::JsOrd", method: "js_ge" },
+    "===": { trait: "tslib::ops::JsEq", method: "js_eq" },
+    "!==": { trait: "tslib::ops::JsEq", method: "js_ne" },
+  };
+
+/**
+ * Register a JS-operator trait bound on a class-level generic param (series 088):
+ * `analysis.opBounds[name]` gains `trait`, merged onto the class's `GenericParam[]`
+ * in `lowerClassBody`. Only class-level params carry an operator-bound slot.
+ */
+function registerOpBound(
+  analysis: ModuleAnalysis,
+  name: string,
+  trait: string,
+): void {
+  let set = analysis.opBounds.get(name);
+  if (!set) {
+    set = new Set();
+    analysis.opBounds.set(name, set);
+  }
+  set.add(trait);
 }
 
 /**
@@ -7122,9 +7242,17 @@ function collectStructFields(
       // Series 070: the field-type table (read-narrowing) must match the emitted
       // struct — an un-assigned, un-initialized field is `Option<T>`. `planClassFields`
       // is lenient here (malformed members still fail loud in `lowerClass`).
+      // Series 088: resolve the class's own `<T, …>` params so a `param`-typed field
+      // (`v: T`) is recorded as `{kind:"param"}` (else `lowerType` fails loud on `T`
+      // here and the class is skipped, leaving `this.v` unresolvable). This mirrors
+      // the per-class `typeParams` push in `lowerClassBody`.
+      const classTP = (decl as { typeParameters?: TSTypeParamDecl }).typeParameters;
+      const tp = classTP
+        ? new Set(classTP.params.map((p) => p.name.name))
+        : EMPTY_TYPE_PARAMS;
       let plans: ClassFieldPlan[];
       try {
-        plans = planClassFields(decl, structs);
+        plans = planClassFields(decl, structs, tp);
       } catch {
         continue;
       }
@@ -7320,16 +7448,42 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
           }
         }
       }
-      // Fail-loud (series 081, the #44 wall): any operator on a bare generic `T`
-      // (`a + b`, `a < b`, `a === b` where `a,b: T`). JS `+`/`<`/`===` dispatch on
-      // the operands' *runtime* type, which a monomorphized generic definition
-      // fundamentally cannot know at the definition site — and the syntax-only
-      // front end has no TS type layer to resolve it. Compute over a generic value
-      // by calling methods on a **bounded** `T` (`<T extends I>`) instead.
-      for (const side of [b.left, b.right]) {
-        if (paramTypeOfOperand(side, analysis)) {
+      // Operators over a generic `T` (series 088, graduates the 081 #44 wall).
+      // A bare `T` is a JS value; when **both operands are the same `{kind:"param"}`
+      // T**, the operator lowers to a tslib `ops` trait method (`self.v.js_add(&o)`)
+      // and the operator's bound (`T: tslib::ops::JsAdd`) is unioned onto the scope's
+      // generic clause. The trait bound IS the constraint (only `f64` implements
+      // `JsSub`, so a `String`-`-` fails at the bound). Everything else stays loud.
+      {
+        const lp = paramTypeOfOperand(b.left, analysis);
+        const rp = paramTypeOfOperand(b.right, analysis);
+        const bothSameParam = lp && rp && lp.name === rp.name;
+        if (bothSameParam) {
+          const op = JS_OP_TRAIT[b.operator];
+          // A same-`T` operator with a trait mapping routes to the trait layer —
+          // but only when the param is **class-level** (a method's own `<U>` has no
+          // operator-bound slot). Otherwise it stays fail-loud.
+          if (op && analysis.classTypeParams.has(lp.name)) {
+            registerOpBound(analysis, lp.name, op.trait);
+            return {
+              kind: "jsOp",
+              method: op.method,
+              receiver: lowerExpr(b.left, analysis),
+              arg: lowerExpr(b.right, analysis),
+            };
+          }
+          // Same-`T` but an out-of-scope operator (bitwise, or a non-class param) —
+          // fail-loud (a later slice / the #44 wall for method-`<U>`).
           throw new UnsupportedError({
-            type: `operator '${b.operator}' on a generic type parameter 'T' — a monomorphized generic can't know T's runtime type at the definition site (the #44 type-layer wall). Compute over a bounded 'T' (\`<T extends I>\`) by calling its interface methods instead.`,
+            type: `operator '${b.operator}' on a generic type parameter '${lp.name}' — only arithmetic (\`+ - * / %\`), ordering (\`< <= > >=\`), and equality (\`=== !==\`) over two same-'${lp.name}' operands lower to the JS-operator trait layer (a class-level type parameter); this operator does not.`,
+          });
+        }
+        // Mixed operands — exactly one side is a bare `T` (`this.v + 1`, `t < 5`):
+        // the JS coercion case (`"a"+1`→`"a1"`), out of scope → fail-loud.
+        if (lp || rp) {
+          const pname = (lp ?? rp)!.name;
+          throw new UnsupportedError({
+            type: `operator '${b.operator}' on a generic type parameter '${pname}' and a non-'${pname}' operand (a mixed-operand JS coercion, e.g. \`this.v + 1\` / \`t < 5\`) — only two same-'${pname}' operands lower to the JS-operator trait layer.`,
           });
         }
       }
@@ -7364,6 +7518,16 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         throw new UnsupportedError({
           type: `logical operator '${l.operator}'`,
         });
+      }
+      // Logical `&&`/`||` over a bare generic `T` (series 088) stays fail-loud —
+      // truthiness of an opaque `T` isn't knowable at the definition site (a later
+      // slice). Guard before the truthy routing, which would else miscompile.
+      for (const side of [l.left, l.right]) {
+        if (paramTypeOfOperand(side, analysis)) {
+          throw new UnsupportedError({
+            type: `logical operator '${l.operator}' on a generic type parameter — truthiness of an opaque 'T' isn't knowable at the definition site (only arithmetic / ordering / equality over a same-'T' pair lower; logical is a later slice).`,
+          });
+        }
       }
       // JS `||`/`&&` return the operand *value* under full falsy semantics (series
       // 066, design E): `x || d` yields `d` for a present falsy `x` (`0`/`""`/…),

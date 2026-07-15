@@ -231,6 +231,14 @@ export type HirExpr =
   | { kind: "println"; args: HirExpr[] }
   /** `obj.method(args)` — receiver borrow is Rust's method-resolution problem. */
   | { kind: "method"; receiver: HirExpr; name: string; args: HirExpr[] }
+  /**
+   * A JS-operator trait-method call over a generic `T` (series 088):
+   * `left.js_add(&right)` etc. The `right` operand is passed **by reference**
+   * (`&`) — the tslib `ops` traits take `&Self` so dispatch composes with the
+   * ownership passes (never moves out of a field). Emitted only when both operands
+   * of an operator are the same `{kind:"param"}` T; concrete code uses native `binary`.
+   */
+  | { kind: "jsOp"; receiver: HirExpr; method: string; arg: HirExpr }
   /** `obj[index]` — Rust index, always `usize`. */
   | { kind: "index"; object: HirExpr; index: HirExpr }
   /** `obj.field` (non-method member access). */
@@ -1105,6 +1113,15 @@ export interface HirFn {
 export interface GenericParam {
   name: string;
   bound?: string;
+  /**
+   * JS-operator trait bounds unioned onto this param (series 088), each a
+   * fully-qualified tslib trait path (`tslib::ops::JsAdd`). Demand-driven: a body
+   * adds a bound only for the operators it actually uses over a same-`T` pair (`+`
+   * → `JsAdd`, `<` → `JsOrd`, `===` → `JsEq`). Deduplicated + order-stable.
+   * Rendered after the interface `bound` (and, on the inherent impl, before
+   * `Clone`). Absent for a param no operator touches.
+   */
+  opBounds?: string[];
 }
 
 /** A `struct` item lowered from an `interface` — a closed, named data shape. */

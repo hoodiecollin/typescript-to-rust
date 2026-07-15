@@ -261,3 +261,25 @@ export function structDeriveClause(
   }
   return traits.length > 0 ? `#[derive(${traits.join(", ")})]\n` : "";
 }
+
+/**
+ * Does this struct/class derive `PartialEq`? (series 088) — mirrors the
+ * `PartialEq` trigger in `structDeriveClause`: every field is `PartialEq`, or the
+ * struct is used as a `Map` key / `Set` element (`hashEq`). Drives the per-struct
+ * `impl tslib::ops::JsEq` emission (structural `===` over a struct-typed generic
+ * `T`), which delegates to the derived `PartialEq` — so it's emitted **only** when
+ * this returns true, and the impl always compiles.
+ */
+export function structDerivesPartialEq(
+  s: {
+    name: string;
+    fields: { name: string; ty: RustType }[];
+    hashEq?: boolean;
+  },
+  table: StructTable,
+): boolean {
+  return (
+    !!s.hashEq ||
+    s.fields.every((f) => isTypePartialEq(f.ty, table, new Set([s.name])))
+  );
+}

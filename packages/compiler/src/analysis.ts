@@ -427,6 +427,22 @@ export interface ModuleAnalysis {
    */
   typeParams: Set<string>;
   /**
+   * The **class-level** generic params of the class currently being lowered
+   * (series 088) — the subset of `typeParams` an operator-on-`T` may bind an
+   * operator trait onto. A method's own `<U>` is *not* here (its clause is a bare
+   * `<U: Clone>` with no operator-bound slot), so a same-`U` operator stays
+   * fail-loud. Empty outside a generic class scope.
+   */
+  classTypeParams: Set<string>;
+  /**
+   * JS-operator trait bounds accumulated during a generic class body's lowering
+   * (series 088), keyed by class-level param name → the set of fully-qualified
+   * tslib trait paths (`tslib::ops::JsAdd`) its operators demand. Merged onto the
+   * class's `GenericParam[]` in `lowerClassBody` after the method loop. Reset per
+   * class.
+   */
+  opBounds: Map<string, Set<string>>;
+  /**
    * Bindings whose value is a `&dyn IA` / `Box<dyn IA>` element (series 053c),
    * keyed by the binding/param name → the base (trait-owning) class name. A
    * field read on such a binding routes through a trait accessor (`a.x()`), and
@@ -1593,6 +1609,10 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // In-scope generic type-param names (series 081); pushed/popped by `lowerClass`
     // and generic methods. Empty outside a generic scope.
     typeParams: new Set(),
+    // Class-level generic params + accumulated JS-operator trait bounds (series 088);
+    // set/reset by `lowerClass`, filled during body lowering, merged in `lowerClassBody`.
+    classTypeParams: new Set(),
+    opBounds: new Map(),
     // Built by `lower()` only when source text is threaded in (series 082); null
     // otherwise, in which case `collectionOf` uses the `bindingTypes` path alone.
     typeOracle: null,
