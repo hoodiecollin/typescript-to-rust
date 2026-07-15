@@ -105,6 +105,20 @@ flip it.
   JS would silently yield `undefined`/`NaN`. The safe path is a `.isNumber()` /
   `.isArray()` / … guard first. Pinned by `packages/compiler/tests/json-value.test.ts`.
 
+- **`stringifyJson` omits `undefined`-only object keys, keeps `null` (series 091).**
+  JS `JSON.stringify` drops an `undefined`-valued object key but serializes a
+  `null`-valued one. The dialect collapses `T | null` and `T | undefined` to one
+  `Option<T>`, so provenance is recovered from the **declared field type**: an
+  `undefined`-only field (`x?: T` / `x: T | undefined`) emits
+  `#[serde(skip_serializing_if = "Option::is_none")]` (key omitted when `None`); a
+  `null`-bearing field (`x: T | null`, and — **"null wins"** — `x: T | null | undefined`)
+  keeps the key and serializes `null`. **Divergence:** a *both-nullable*
+  (`T | null | undefined`) field whose key is *omitted from the literal* (or set
+  `undefined`) serializes as `null` here but is *absent* in JS — the collapsed
+  `Option` can't tell an omitted/`undefined` both-nullable field from an explicit
+  `null`; "null wins" never silently drops data. Pinned by
+  `packages/compiler/tests/undefined-omission.test.ts`.
+
 ---
 
 ## Types & the accepted type surface
@@ -132,6 +146,9 @@ an in-scope type parameter stays fail-loud as an undeclared type name.)
 
 Nullability note: `T | undefined` and `T | null` lower to `Option<T>`. That is the
 *only* accepted union shape — see [Nullability & optional chaining](#nullability--optional-chaining).
+The runtime `Option` is flavourless (a `None` doesn't record `null` vs `undefined`);
+the one place the distinction is recovered — from the declared field type — is JSON
+key omission on `stringifyJson` (series 091, see the JSON-divergence bullet above).
 
 ---
 
@@ -751,9 +768,12 @@ differential oracle runs faithful behavior matching the emitted Rust.
 
 - **`stringifyJson(v): string`** → the `tslib::json::stringify` writer (JS number
   fidelity: integrals no `.0`, shortest-round-trip fractions, `Infinity`/`NaN` →
-  `null`). **Accepted divergence** (Collin, #57/#58): a `None`/optional field
-  renders `null` where JS omits the key (the 066 `null ≡ undefined` collapse) —
-  documented, not fixed (faithful omission via provenance is a future config knob).
+  `null`). **`undefined`-omission (series 091, epic #59):** an `undefined`-only
+  field (`x?: T` / `x: T | undefined`) omits its key when `None` (matching JS); a
+  `null`-bearing field keeps the key as `null` ("null wins" for `T | null | undefined`).
+  Provenance is recovered from the *declared* field type; the one residual (a
+  both-nullable field whose key is omitted from the literal) is noted in the
+  `JsonValue`/`stringifyJson` divergence bullet near the top of this doc.
 - **`parseJson<T>(s: string)`** → `tslib::json::ParseResult::<T>::parse(&s)`, a
   purpose-built std-shim result type (the dialect has no generic/payload-carrying
   enum to model a raw `{ ok, value } | { ok, error }` union). `T` must be an
