@@ -71,8 +71,13 @@ export type RustType =
    * (`NaN == NaN`, `-0.0`/`+0.0` collapse). Only ever a map key / set element.
    */
   | { kind: "orderedFloat" }
-  /** A named `struct` (from an `interface`); rendered as the bare name. */
-  | { kind: "struct"; name: string }
+  /**
+   * A named `struct` (from an `interface`/`class`); rendered as the bare name, or
+   * `Name<A, …>` when `args` is present — a **generic instantiation** (series 081),
+   * e.g. a generic class's constructor return type `Boxed<T>`. `args` is unset for
+   * an ordinary non-generic struct.
+   */
+  | { kind: "struct"; name: string; args?: RustType[] }
   /**
    * The synthesized SameValueZero **key newtype** `<name>Key(<name>)` for a struct
    * used as a `Map` key / `Set` element that carries a (direct) `f64` field
@@ -132,6 +137,16 @@ export type RustType =
    * fully qualified (no `use`).
    */
   | { kind: "arc"; inner: RustType; mutex: boolean }
+  /**
+   * A **type parameter** — a bare `T` in scope of a generic class/method/fn
+   * declaration (series 081, the first user type variable). Rendered as the bare
+   * name (`T`), and unchanged inside a wrapper (`Vec<T>`, `Option<T>`). Only ever
+   * produced by `lowerType` when the name is in the enclosing generic scope
+   * (`analysis.typeParams`); a name that is *not* in scope stays fail-loud (an
+   * undeclared type). Opaque to the ownership/`Rc` passes (a `param` field is
+   * move/clone by the derive bound).
+   */
+  | { kind: "param"; name: string }
   | { kind: "ref"; mut: boolean; inner: RustType };
 
 /**
@@ -1071,6 +1086,25 @@ export interface HirFn {
   body: HirStmt[];
   /** A `self` receiver when this is a class method; unset for free/associated fns. */
   recv?: SelfRecv;
+  /**
+   * The method's/function's own declared type parameters (series 081), e.g. the
+   * `U` of `first<U>(xs: U[]): U`. Rendered as `<U, …>` right after the fn name in
+   * the signature. Unset (or empty) for a non-generic fn. A generic class's own
+   * `<T>` is *not* repeated here — it lives on the enclosing `impl<T>` block.
+   */
+  generics?: string[];
+}
+
+/**
+ * A generic type parameter of a class/struct (series 081): its `name` (`T`) plus,
+ * for `<T extends I>`, the behavioral-interface trait `bound` (`IShape`, via
+ * 071 `traitNameOf`). A single behavioral-interface bound is in scope; a class
+ * bound / multi-bound is fail-loud in lowering. Rendered `<T>` / `<T: IShape>` on
+ * both the `struct` and the `impl` block.
+ */
+export interface GenericParam {
+  name: string;
+  bound?: string;
 }
 
 /** A `struct` item lowered from an `interface` — a closed, named data shape. */
@@ -1078,6 +1112,12 @@ export interface HirStruct {
   kind: "struct";
   name: string;
   fields: { name: string; ty: RustType }[];
+  /**
+   * Generic type parameters (series 081) — present for a `class Box<T>`'s emitted
+   * struct (`struct Box<T>` / `struct Box<T: IShape>`). Interface-lowered structs
+   * are non-generic (no `generics`). Rendered on the `struct` header.
+   */
+  generics?: GenericParam[];
   /**
    * Interface inheritance (series 059): when this struct's interface participates
    * in an `extends` relationship, it implements a getter trait `IA` for the
@@ -1138,6 +1178,14 @@ export interface HirClass {
   fields: { name: string; ty: RustType }[];
   ctor: HirFn | null;
   methods: HirFn[];
+  /**
+   * Generic type parameters (series 081): `class Box<T>` → `[{name:"T"}]`,
+   * `class Boxed<T extends Shape>` → `[{name:"T", bound:"IShape"}]`,
+   * `class Pair<A, B>` → `[{name:"A"},{name:"B"}]`. Drives `<T, …>` /
+   * `<T: IShape, …>` on the emitted `struct` and the inherent `impl` block.
+   * Unset/empty for a non-generic class (byte-for-byte unchanged emission).
+   */
+  generics?: GenericParam[];
   /**
    * The lowered body of a `[Symbol.dispose]()` method (series 025), emitted as
    * `impl Drop for Name { fn drop(&mut self) { … } }` — RAII for a `using` binding.

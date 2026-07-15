@@ -21,6 +21,7 @@ import {
 } from "./derives";
 import type {
   ElemMode,
+  GenericParam,
   HirArg,
   HirCatchArm,
   HirClass,
@@ -462,7 +463,7 @@ function emitFnSig(fn: HirFn): string {
   );
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
-  return `${asyncKw}fn ${rid(fn.name)}(${params})${ret}`;
+  return `${asyncKw}fn ${rid(fn.name)}${fnGenericClause(fn)}(${params})${ret}`;
 }
 
 /**
@@ -527,10 +528,22 @@ function emitClass(
   usesJson: boolean,
 ): string {
   const struct = emitStruct(
-    { kind: "struct", name: c.name, fields: c.fields },
+    { kind: "struct", name: c.name, fields: c.fields, generics: c.generics },
     structs,
     usesJson,
   );
+  // The inherent-impl generic clause (series 081): `impl<T: Clone> Box<T>` /
+  // `impl<T: IShape + Clone> Boxed<T>`. Each param carries a `Clone` bound because
+  // an inherent method returning a `T`/`param` field clones it (`self.v.clone()`),
+  // which needs `T: Clone` on the *inherent* impl (the struct's `#[derive(Clone)]`
+  // only bounds the derive-generated impl). This is the derive-driven cost of
+  // decision 2 — a `Box<NonClone>` fails at this bound (accepted). The `for`-target
+  // uses only the param names (`Box<T>`, no bound). `""` for a non-generic class.
+  const implGen = implGenericClause(c.generics);
+  const selfTy =
+    c.generics && c.generics.length > 0
+      ? `${rid(c.name)}<${c.generics.map((g) => rid(g.name)).join(", ")}>`
+      : rid(c.name);
   // Class inheritance (series 053): trait methods (an override or a forwarder,
   // named in `overrides`) go in the `impl IA for Name` block, *not* the inherent
   // `impl` — else a duplicate definition. The inherent impl keeps `new` + any
@@ -545,7 +558,7 @@ function emitClass(
     (f): f is HirFn => f !== null,
   );
   const body = [...consts, ...fns.map((f) => indent(emitFn(f)))].join("\n");
-  const parts = [`${struct}\n\nimpl ${rid(c.name)} {\n${body}\n}`];
+  const parts = [`${struct}\n\nimpl${implGen} ${selfTy} {\n${body}\n}`];
   // The `impl IA for Name` block carries the trait methods this class *provides*
   // (its overrides + forwarders for non-overridden methods) plus any on-demand
   // field accessors. A class that uses every trait default and reads no field
@@ -612,10 +625,11 @@ function emitStruct(
   usesJson = false,
 ): string {
   const derive = structDeriveClause(s, structs, usesJson);
+  const gen = genericClause(s.generics);
   const decl =
     s.fields.length === 0
-      ? `${derive}struct ${rid(s.name)} {}`
-      : `${derive}struct ${rid(s.name)} {\n${s.fields
+      ? `${derive}struct ${rid(s.name)}${gen} {}`
+      : `${derive}struct ${rid(s.name)}${gen} {\n${s.fields
           .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
           .join("\n")}\n}`;
   // Interface inheritance (series 059): a getter-trait impl per extended base. Each
@@ -728,7 +742,44 @@ function emitFn(fn: HirFn): string {
   );
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
-  return `${asyncKw}fn ${rid(fn.name)}(${params})${ret} ${block(fn.body)}`;
+  return `${asyncKw}fn ${rid(fn.name)}${fnGenericClause(fn)}(${params})${ret} ${block(fn.body)}`;
+}
+
+/**
+ * A generic clause for a class/struct — `<T>` / `<T: IShape>` / `<A, B>` (series
+ * 081), or `""` when there are none. Rendered on the `struct` header and the
+ * `impl` block (the impl repeats the same params). A bound joins with `: <trait>`.
+ */
+function genericClause(generics: GenericParam[] | undefined): string {
+  if (!generics || generics.length === 0) return "";
+  const parts = generics.map((g) =>
+    g.bound ? `${rid(g.name)}: ${rid(g.bound)}` : rid(g.name),
+  );
+  return `<${parts.join(", ")}>`;
+}
+
+/**
+ * The **inherent-impl** generic clause (series 081): like `genericClause` but each
+ * param also carries a `Clone` bound (`<T: Clone>` / `<T: IShape + Clone>`), needed
+ * because an inherent method's `return self.field` of a `param` field clones it.
+ * The struct header keeps the bare `genericClause` (its `#[derive]`s add the
+ * per-derive bound); only the inherent impl needs the explicit `Clone`.
+ */
+function implGenericClause(generics: GenericParam[] | undefined): string {
+  if (!generics || generics.length === 0) return "";
+  const parts = generics.map((g) =>
+    g.bound ? `${rid(g.name)}: ${rid(g.bound)} + Clone` : `${rid(g.name)}: Clone`,
+  );
+  return `<${parts.join(", ")}>`;
+}
+
+/** A **method/fn's own** generic clause `<U: Clone, …>` (series 081), rendered
+ * after the fn name; `""` for a non-generic fn. Each param carries a `Clone` bound
+ * (derive-driven) so a body that returns/moves a `U` element clones it
+ * (`xs[0].clone()`), which needs `U: Clone` on the fn. */
+function fnGenericClause(fn: HirFn): string {
+  if (!fn.generics || fn.generics.length === 0) return "";
+  return `<${fn.generics.map((g) => `${rid(g)}: Clone`).join(", ")}>`;
 }
 
 /** Render a braced, indented statement block (`{\n …\n}`, or `{\n}` if empty). */
@@ -1854,7 +1905,9 @@ function emitType(ty: RustType): string {
     case "orderedFloat":
       return "OrderedFloat<f64>";
     case "struct":
-      return rid(ty.name);
+      return ty.args && ty.args.length > 0
+        ? `${rid(ty.name)}<${ty.args.map(emitType).join(", ")}>`
+        : rid(ty.name);
     case "structKey":
       return structKeyRustName(ty.name);
     case "result":
@@ -1882,5 +1935,7 @@ function emitType(ty: RustType): string {
       return ty.mutex
         ? `std::sync::Arc<std::sync::Mutex<${emitType(ty.inner)}>>`
         : `std::sync::Arc<${emitType(ty.inner)}>`;
+    case "param":
+      return rid(ty.name);
   }
 }
