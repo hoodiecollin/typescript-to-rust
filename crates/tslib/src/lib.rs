@@ -19,5 +19,40 @@
 pub mod array;
 pub mod gen;
 pub mod json;
+pub mod number;
 pub mod string;
 pub mod truthy;
+
+/// JS `Math.min(...)` — the minimum of a variadic `f64` list, **NaN-propagating**
+/// (any `NaN` argument makes the whole result `NaN`, unlike `f64::min` which
+/// ignores `NaN`). The sanctioned variadic macro (029 Tm route), not a coercion
+/// macro. `Math.min()` with no args is JS `Infinity`.
+#[macro_export]
+macro_rules! min {
+    () => { f64::INFINITY };
+    ($($x:expr),+ $(,)?) => {{
+        let mut __acc = f64::INFINITY;
+        $(
+            let __v: f64 = $x;
+            if __v.is_nan() { __acc = f64::NAN; }
+            else if !__acc.is_nan() && __v < __acc { __acc = __v; }
+        )+
+        __acc
+    }};
+}
+
+/// JS `Math.max(...)` — the maximum of a variadic `f64` list, **NaN-propagating**.
+/// `Math.max()` with no args is JS `-Infinity`.
+#[macro_export]
+macro_rules! max {
+    () => { f64::NEG_INFINITY };
+    ($($x:expr),+ $(,)?) => {{
+        let mut __acc = f64::NEG_INFINITY;
+        $(
+            let __v: f64 = $x;
+            if __v.is_nan() { __acc = f64::NAN; }
+            else if !__acc.is_nan() && __v > __acc { __acc = __v; }
+        )+
+        __acc
+    }};
+}

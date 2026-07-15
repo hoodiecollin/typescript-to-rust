@@ -69,3 +69,36 @@ pub fn slice_from<T: Clone>(xs: &[T], start: f64) -> Vec<T> {
     let s = slice_index(start, xs.len());
     xs[s..].to_vec()
 }
+
+/// `Array.prototype.join(sep)` — JS coerces each element to its string form and
+/// joins with `sep`. `[T]::join` needs `T: Borrow<str>` (string-only); this joins
+/// **any** `ToString` element (so a number array yields `"1-2-3"`), matching JS.
+/// A number element uses `tslib::number::to_js_string` fidelity via a `f64`
+/// specialization would be ideal, but `ToString` on `f64` already renders `1`
+/// (not `1.0`) for integrals through `Display`… except it does not — so callers
+/// pass string/number arrays whose `Display` matches JS for the common integral
+/// and fractional cases (documented divergence at magnitude edges, per 083).
+pub fn join<T: ToString>(xs: &[T], sep: &str) -> String {
+    xs.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(sep)
+}
+
+/// `Array.prototype.concat(ys)` — a **new** array with `ys` appended (the JS
+/// receiver is unchanged; concat returns a fresh array). Both are cloned in.
+pub fn concat<T: Clone>(xs: &[T], ys: &[T]) -> Vec<T> {
+    let mut out = xs.to_vec();
+    out.extend_from_slice(ys);
+    out
+}
+
+/// `Array.prototype.flat()` (default depth 1) — flatten one level of an
+/// array-of-arrays into a new `Vec`. Deep `flat(n)` is a later slice.
+pub fn flat<T: Clone>(xss: &[Vec<T>]) -> Vec<T> {
+    let mut out = Vec::new();
+    for inner in xss {
+        out.extend_from_slice(inner);
+    }
+    out
+}
