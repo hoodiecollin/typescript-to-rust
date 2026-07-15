@@ -20,6 +20,7 @@ pub mod array;
 pub mod gen;
 pub mod json;
 pub mod number;
+pub mod ops;
 pub mod string;
 pub mod truthy;
 
