@@ -190,6 +190,13 @@ export type HirExpr =
    * (e.g. a number) via `Display`, matching JS's string coercion.
    */
   | { kind: "strConcat"; parts: HirExpr[] }
+  /**
+   * Variadic `Math.min(...)` / `Math.max(...)` (series 083) → a `min!`/`max!`
+   * **macro** (the sanctioned Tm variadic route). Binary min/max lowers to native
+   * `a.min(b)` instead; this node only carries the 1-or-3+-arg variadic form.
+   * NaN-propagating like JS.
+   */
+  | { kind: "jsMinMax"; op: "min" | "max"; args: HirExpr[] }
   /** A prefix unary: `-x` (negation), `!x` (logical not), or bitwise-NOT `!x`
    * (series 056, `~` in TS → `!` in Rust; `bitwise` set). */
   | { kind: "unary"; op: string; operand: HirExpr; bitwise?: boolean }
@@ -279,12 +286,23 @@ export type HirExpr =
    * member access). Deeper chains stay fail-loud.
    */
   | { kind: "optMember"; receiver: HirExpr; field: string }
-  /** `JSON.stringify(v)` → `tslib::json::stringify(&v)` → `String` (series 045). */
+  /**
+   * `stringifyJson(v)` (the `@t2r/std` shim, series 084) → `tslib::json::stringify(&v)`
+   * → `String`. Reuses the shipped 045 writer (JS number fidelity). The bare
+   * `JSON.stringify` recognition was retired — this HIR now comes only from the shim.
+   */
   | { kind: "jsonStringify"; value: HirExpr }
   /**
-   * `JSON.parse(s)` → `serde_json::from_str::<target>(&s).expect(...)` (series
-   * 045). `target` is the annotated type (`Vec<f64>`, a struct, …), or `null` for
-   * the untyped `serde_json::Value` fallback.
+   * `parseJson<T>(s)` (the `@t2r/std` shim, series 084) →
+   * `tslib::json::ParseResult::<T>::parse(&s)` → a `ParseResult<T>` carrying
+   * `.ok`/`.value()`/`.error()`. `target` is the required modeled `T`. Replaces
+   * the retired 045 `jsonParse` (bare `JSON.parse` is now fail-loud + redirected).
+   */
+  | { kind: "parseJson"; source: HirExpr; target: RustType }
+  /**
+   * The retired 045 `JSON.parse` node — no longer produced (bare `JSON.parse`
+   * redirects to `parseJson<T>`). Kept as a variant only so the `usesJson` scan
+   * and the exhaustive HIR switches stay total until a cleanup series removes it.
    */
   | { kind: "jsonParse"; source: HirExpr; target: RustType | null }
   /** `Some(value)` — a present optional (series 042). */

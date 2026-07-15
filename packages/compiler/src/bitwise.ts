@@ -276,6 +276,7 @@ function mapChildren(e: HirExpr, f: (c: HirExpr) => HirExpr): void {
       e.value = f(e.value);
       break;
     case "jsonParse":
+    case "parseJson":
       e.source = f(e.source);
       break;
     case "tupleField":

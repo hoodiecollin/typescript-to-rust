@@ -106,14 +106,19 @@ for (const a of zoo) {
     ).toThrow(UnsupportedError);
   });
 
-  test("INH16 `implements` / interface conformance stays fail-loud", () => {
-    expect(() =>
-      compile(`interface Speaker { speak(): string; }
+  // INH16 was a 053c fail-loud residual: `implements` conformance on a
+  // constructor-less class. Both halves have since graduated — behavioral-interface
+  // trait synthesis (071) and implicit constructors (070) — so this now compiles
+  // to a valid `impl ISpeaker for Robot` + synthesized `new()` and runs.
+  test("INH16 `implements` on an implicit-ctor class behaves (071 + 070)", async () => {
+    await behaves(
+      `interface Speaker { speak(): string; }
 class Robot implements Speaker {
   speak(): string { return "beep"; }
 }
 const r: Robot = new Robot();
-console.log(r.speak());`),
-    ).toThrow(UnsupportedError);
+console.log(r.speak());`,
+      "beep",
+    );
   });
 });

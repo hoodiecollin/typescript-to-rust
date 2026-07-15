@@ -17,6 +17,7 @@ import {
 } from "./analysis";
 import { refineArena } from "./arena";
 import { isTypePartialEq } from "./derives";
+import type { StdShimName } from "./std-shim";
 import type {
   ArrayExpression,
   ArrowFunctionExpression,
@@ -278,6 +279,12 @@ export function lower(program: Program, source?: string): HirModule {
   if (errorEnum) items.push(errorEnum);
 
   for (const stmt of normalized.body) {
+    if (stmt.type === "ImportDeclaration") {
+      // The `@t2r/std` import (series 084) is recognition-only — its bindings
+      // were collected into `analysis.stdShim`; it lowers to no Rust. The
+      // validator already rejected every other import specifier.
+      continue;
+    }
     if (stmt.type === "FunctionDeclaration") {
       // A sync generator (`function* g()`, series 025d) lowers to a
       // `fn -> impl Iterator`; a plain function to a normal `fn`.
@@ -405,24 +412,98 @@ export function lower(program: Program, source?: string): HirModule {
   // struct, so the `return self.field` move-out drops the 038 clone. Runs after
   // `computeAutoRc` (which decides consuming vs demoted).
   applyOwnedSelf(module, autoRc.consumingMethods);
-  return fixStringScrutinees(
-    refineOwnership(
-    refineTaskEscape(
-      refineArena(
-        refineRc(
-          refineStrings(refineNumerics(refineBitwise(module))),
-          {
-            rcScopes: analysis.rcScopes,
-            autoRc,
-            classes: analysis.classes,
-            mutatingMethods: analysis.mutatingMethods,
-          },
+  return fixKeyBorrows(
+    fixStringScrutinees(
+      refineOwnership(
+        refineTaskEscape(
+          refineArena(
+            refineRc(
+              refineStrings(refineNumerics(refineBitwise(module))),
+              {
+                rcScopes: analysis.rcScopes,
+                autoRc,
+                classes: analysis.classes,
+                mutatingMethods: analysis.mutatingMethods,
+              },
+            ),
+            analysis.arenaScopes,
+          ),
         ),
-        analysis.arenaScopes,
       ),
     ),
-    ),
   );
+}
+
+/**
+ * `&str`-key borrow fix (series 083). A `Map`/`Set` lookup wraps its key with
+ * `refExpr(..)`, so a **`string` param** key (`refineStrings` made it `&str`)
+ * becomes `m.get(&k)` → `&(&str)` = `&&str`, which `IndexMap::get` (`&Q where
+ * String: Borrow<Q>`) rejects (E0277: `String: Borrow<&str>` doesn't hold). Runs
+ * **after** `refineStrings` so param types are final: for `.get`/`.contains_key`/
+ * `.contains`/`.shift_remove` whose single arg is `&<ident>` and `<ident>` is a
+ * `&str`/`str` param, drop the borrow → bare `k` (relies on `String: Borrow<str>`,
+ * no allocation). An owned `String`/literal/`OrderedFloat`/`structKey` key keeps
+ * its `&`-wrapped path exactly.
+ */
+function fixKeyBorrows(module: HirModule): HirModule {
+  const LOOKUP = new Set(["get", "contains_key", "contains", "shift_remove"]);
+  const doBody = (params: HirParam[], stmts: HirStmt[]): void => {
+    const strRefParams = new Set<string>();
+    for (const p of params) {
+      if (
+        p.ty.kind === "str" ||
+        (p.ty.kind === "ref" && p.ty.inner.kind === "str")
+      ) {
+        strRefParams.add(p.name);
+      }
+    }
+    walkKeyBorrows(stmts as unknown, strRefParams, LOOKUP);
+  };
+  for (const item of module.items) {
+    if (item.kind === "fn") doBody(item.params, item.body);
+    else if (item.kind === "class") {
+      if (item.ctor) doBody(item.ctor.params, item.ctor.body);
+      for (const m of item.methods) doBody(m.params, m.body);
+    }
+  }
+  doBody([], module.main);
+  return module;
+}
+
+/** Recursively unborrow `<lookup>(&k)` → `<lookup>(k)` for a `&str` param `k`. */
+function walkKeyBorrows(
+  node: unknown,
+  strRefParams: Set<string>,
+  lookup: Set<string>,
+): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { kind?: string; name?: string; args?: HirExpr[] };
+  if (
+    n.kind === "method" &&
+    typeof n.name === "string" &&
+    lookup.has(n.name) &&
+    Array.isArray(n.args) &&
+    n.args.length === 1
+  ) {
+    const arg = n.args[0] as
+      | { kind?: string; mut?: boolean; expr?: HirExpr }
+      | undefined;
+    if (
+      arg &&
+      arg.kind === "ref" &&
+      arg.mut === false &&
+      arg.expr &&
+      (arg.expr as { kind?: string }).kind === "ident" &&
+      strRefParams.has((arg.expr as { name: string }).name)
+    ) {
+      n.args[0] = arg.expr;
+    }
+  }
+  for (const v of Object.values(node as Record<string, unknown>)) {
+    if (Array.isArray(v)) for (const c of v) walkKeyBorrows(c, strRefParams, lookup);
+    else if (v && typeof v === "object")
+      walkKeyBorrows(v, strRefParams, lookup);
+  }
 }
 
 /**
@@ -3466,50 +3547,31 @@ function lowerClass(
   const propDefs = decl.body.body.filter(
     (m): m is PropertyDefinition => m.type === "PropertyDefinition",
   );
-  const fields = propDefs
-    .filter((f) => {
-      rejectProtected(f as { accessibility?: string }, `class field '${f.key.name}'`);
+  for (const f of propDefs) {
+    rejectProtected(f as { accessibility?: string }, `class field '${f.key.name}'`);
+    if (f.computed && !f.static) {
+      throw new UnsupportedError({ type: "computed class field" });
+    }
+    if (f.static) {
       if (f.computed) {
         throw new UnsupportedError({ type: "computed class field" });
       }
-      if (f.static) {
-        staticConsts.push(lowerStaticConst(f, structs, analysis));
-        return false;
-      }
-      return true;
-    })
-    .map((f) => {
-      if (!f.typeAnnotation) {
-        throw new UnsupportedError({
-          type: `class field '${f.key.name}' without a type`,
-        });
-      }
-      return {
-        name: f.key.name,
-        ty: lowerType(f.typeAnnotation.typeAnnotation, structs),
-      };
-    });
-
-  // Parameter properties (`constructor(public x: T)`) each contribute a field,
-  // appended after the explicit ones (declaration order within the ctor params).
+      staticConsts.push(lowerStaticConst(f, structs, analysis));
+    }
+  }
   const ctorMember = decl.body.body.find(
     (m): m is MethodDefinition =>
       m.type === "MethodDefinition" && m.kind === "constructor",
   );
-  if (ctorMember) {
-    for (const p of ctorMember.value.params as unknown as Param[]) {
-      if (p.type !== "TSParameterProperty") continue;
-      const inner = p.parameter;
-      if (!inner.typeAnnotation) {
-        throw new UnsupportedError({
-          type: `parameter property '${inner.name}' without a type`,
-        });
-      }
-      fields.push({
-        name: inner.name,
-        ty: lowerType(inner.typeAnnotation.typeAnnotation, structs),
-      });
-    }
+  // Series 070: resolve each instance field's construction source (ctor-assigned /
+  // field initializer / `None`) and its Rust type in one pass. Parameter
+  // properties are folded in (marked ctor-assigned) in declaration order.
+  const fieldPlans = planClassFields(decl, structs);
+  const fields = fieldPlans.map((p) => ({ name: p.name, ty: p.ty }));
+  // A field initializer must be a construction constant — reject a `this`-/
+  // cross-field-referencing one (design §Open sub-details: fail-loud).
+  for (const p of fieldPlans) {
+    if (p.source === "initializer" && p.init) rejectImpureInitializer(p.name, p.init);
   }
 
   // Class inheritance (series 053): the synthetic `base: A` embed is *prepended*
@@ -3556,7 +3618,14 @@ function lowerClass(
       continue;
     }
     if (member.kind === "constructor") {
-      ctor = lowerConstructor(member.value, name, fields, analysis, baseName);
+      ctor = lowerConstructor(
+        member.value,
+        name,
+        fields,
+        analysis,
+        baseName,
+        fieldPlans,
+      );
     } else if (member.kind === "method") {
       methods.push(lowerMethod(member, name, analysis));
     } else if (member.kind === "get" || member.kind === "set") {
@@ -3570,10 +3639,22 @@ function lowerClass(
   analysis.currentClass = prevClass;
   // Accessor methods live in the inherent impl alongside ordinary methods.
   methods.push(...accessorFns);
+  // Series 070: a class with no explicit constructor synthesizes a zero-param
+  // `new()` from its field plans (initializer defaults, `None` for the rest). A
+  // user-declared `static new` would collide with it — fail loud rather than
+  // silently shadow.
   if (!ctor) {
-    throw new UnsupportedError({
-      type: "class without an explicit constructor",
-    });
+    if (statics.some((s) => s.name === "new")) {
+      throw new UnsupportedError({
+        type: "class has a `static new` that collides with the synthesized zero-arg constructor",
+      });
+    }
+    if (baseName) {
+      throw new UnsupportedError({
+        type: "subclass without an explicit constructor (a `super(...)` call is required)",
+      });
+    }
+    ctor = synthesizeConstructor(name, fields, fieldPlans, analysis);
   }
   // Throwing / `?`-propagation inside methods and constructors is supported
   // (series 023): the fallibility fixpoint types the method/ctor as `Result` and
@@ -4063,6 +4144,7 @@ function lowerConstructor(
   fields: { name: string; ty: RustType }[],
   analysis: ModuleAnalysis,
   baseName?: string,
+  fieldPlans: ClassFieldPlan[] = [],
 ): HirFn {
   const structs = analysis.structs;
   // A parameter property (`public x: T`) both declares a field (added in
@@ -4125,19 +4207,20 @@ function lowerConstructor(
       type: "subclass constructor without a `super(...)` call (base field uninitialized)",
     });
   }
-  if (assigned.size !== fields.length) {
-    throw new UnsupportedError({
-      type: "constructor must initialize exactly the declared fields",
-    });
-  }
+  // Series 070: a partial constructor — one that leaves fields unassigned — fills
+  // each gap from its field plan (initializer default, else `None`). The synthetic
+  // `base` embed (053) has no plan and must be assigned via `super(...)`.
+  const planByName = new Map(fieldPlans.map((p) => [p.name, p]));
   const litFields = fields.map((f) => {
     const value = assigned.get(f.name);
-    if (!value) {
+    if (value) return { name: f.name, value };
+    const plan = planByName.get(f.name);
+    if (!plan) {
       throw new UnsupportedError({
         type: `constructor does not initialize field '${f.name}'`,
       });
     }
-    return { name: f.name, value };
+    return { name: f.name, value: constructionValue(plan, analysis) };
   });
   const structLit: HirExpr = {
     kind: "structLit",
@@ -4165,6 +4248,62 @@ function lowerConstructor(
     name: "new",
     isAsync: false,
     params,
+    ret: { kind: "struct", name: className },
+    body: [{ kind: "return", value: structLit }],
+  };
+}
+
+/**
+ * The construction value for a field the constructor doesn't directly assign
+ * (series 070): an `initializer`-source field lowers its default *against its own
+ * type* (so an `Option`-typed default is `Some`-wrapped); a `none`-source field
+ * is `None`. A `ctor`-source field never reaches here (it's assigned in the body).
+ */
+function constructionValue(
+  plan: ClassFieldPlan,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  if (plan.source === "none") return { kind: "none" };
+  if (plan.source === "initializer" && plan.init) {
+    return lowerTyped(plan.init, plan.ty, analysis);
+  }
+  throw new UnsupportedError({
+    type: `field '${plan.name}' has no construction value`,
+  });
+}
+
+/**
+ * Synthesize a zero-parameter `new()` for a class with no explicit constructor
+ * (series 070): every field is filled from its plan — an initializer default or
+ * `None`. (A ctor-source field cannot occur without a constructor, so only
+ * `initializer`/`none` sources appear here.)
+ */
+function synthesizeConstructor(
+  className: string,
+  fields: { name: string; ty: RustType }[],
+  fieldPlans: ClassFieldPlan[],
+  analysis: ModuleAnalysis,
+): HirFn {
+  const planByName = new Map(fieldPlans.map((p) => [p.name, p]));
+  const litFields = fields.map((f) => {
+    const plan = planByName.get(f.name);
+    if (!plan) {
+      throw new UnsupportedError({
+        type: `synthesized constructor cannot initialize field '${f.name}'`,
+      });
+    }
+    return { name: f.name, value: constructionValue(plan, analysis) };
+  });
+  const structLit: HirExpr = {
+    kind: "structLit",
+    name: className,
+    fields: litFields,
+  };
+  return {
+    kind: "fn",
+    name: "new",
+    isAsync: false,
+    params: [],
     ret: { kind: "struct", name: className },
     body: [{ kind: "return", value: structLit }],
   };
@@ -4217,23 +4356,15 @@ function collectionOf(
   obj: Expression,
   analysis: ModuleAnalysis,
 ): RustType | null {
-  // Fast path (pre-082): a bare-identifier receiver resolved via the hand-rolled
-  // `bindingTypes` table. Kept primary so every receiver it already handles is
-  // byte-for-byte unchanged — the oracle never overrides a positive answer here.
-  if (obj.type === "Identifier") {
-    const bound = analysis.bindingTypes.get((obj as Identifier).name);
-    if (bound) return bound;
-  }
-  // Fallback (series 082, spike #44): any other receiver shape — `this.field`,
-  // `local.field`, a `getX()` call — that `bindingTypes` can't key on. The tsc
-  // oracle answers `getTypeAtLocation` for it and maps a `Map`/`Set` type to our
-  // `RustType`. Null (no oracle, or an unmodeled type) leaves the caller's
-  // fail-loud intact. Uses the oxc node's UTF-16 span (aligns with tsc natively).
-  const span = obj as unknown as { start?: number; end?: number };
-  if (analysis.typeOracle && span.start !== undefined && span.end !== undefined) {
-    return analysis.typeOracle.collectionAtSpan(span.start, span.end);
-  }
-  return null;
+  // A thin filter over the unified `receiverTypeOf` (series 083): return the type
+  // only when it is a Map/Set. `receiverTypeOf`'s tiers are identical to the
+  // pre-083 `collectionOf` body (identifier→bindingTypes, member→structFields,
+  // else→oracle), so every receiver this already resolved is byte-for-byte
+  // unchanged. NOTE: Tier-2 (structFields) now also resolves a `this.field`
+  // Map/Set — previously only the oracle did; both yield the same `RustType`, so
+  // no behavior change (and the oracle stays the fallback when structFields miss).
+  const t = receiverTypeOf(obj, analysis);
+  return t && (t.kind === "hashmap" || t.kind === "set") ? t : null;
 }
 
 /** `&expr` — an explicit shared borrow at a call site (series 061). */
@@ -5586,27 +5717,66 @@ function truthyCond(e: Expression, analysis: ModuleAnalysis): HirExpr {
  * misclassified. `string + anything` concatenates in JS, so one provable-string
  * operand is sufficient to classify the whole `+`.
  */
+/**
+ * The `RustType` of a `this.field` / `local.field` non-computed member access via
+ * `structFields`, or null (series 083, factored out of `isStringExpr`'s member
+ * case). No oracle — that is `receiverTypeOf`'s Tier-3.
+ */
+function memberFieldType(
+  m: MemberExpression,
+  analysis: ModuleAnalysis,
+): RustType | null {
+  if (m.computed || m.property.type !== "Identifier") return null;
+  const field = (m.property as Identifier).name;
+  const owner = memberOwnerStruct(m.object, analysis);
+  if (!owner) return null;
+  return (
+    analysis.structFields.get(owner)?.find((f) => f.name === field)?.ty ?? null
+  );
+}
+
+/**
+ * The `RustType` of an arbitrary receiver expression, or null — the **single**
+ * receiver-type resolver (series 083, unifying the scattered lookups). Three
+ * tiers, cheapest first; the oracle is consulted only when the hand-rolled tables
+ * miss, so every receiver they already resolve keeps its exact current path
+ * (byte-for-byte, no oracle drift) and the oracle only ever turns a
+ * previously-null answer into a resolution.
+ */
+function receiverTypeOf(
+  expr: Expression,
+  analysis: ModuleAnalysis,
+): RustType | null {
+  // Tier 1 — bare identifier → bindingTypes (the fast, pre-082 path).
+  if (expr.type === "Identifier") {
+    const t = analysis.bindingTypes.get((expr as Identifier).name);
+    if (t) return t;
+  }
+  // Tier 2 — `this.field` / `local.field` → structFields (no oracle needed).
+  if (expr.type === "MemberExpression") {
+    const t = memberFieldType(expr as MemberExpression, analysis);
+    if (t) return t;
+  }
+  // Tier 3 — any shape (getX(), a.b.c, index chains) → the 082 oracle. Slice 3
+  // lifts the annotation-only restriction here: the classifier still maps only to
+  // modeled types, so an unmodeled receiver stays null → fail-loud.
+  const span = expr as unknown as { start?: number; end?: number };
+  if (
+    analysis.typeOracle &&
+    span.start !== undefined &&
+    span.end !== undefined
+  ) {
+    return analysis.typeOracle.typeAtSpan_rustType(span.start, span.end);
+  }
+  return null;
+}
+
 function isStringExpr(e: Expression, analysis: ModuleAnalysis): boolean {
   switch (e.type) {
     case "Literal":
       return typeof (e as Literal).value === "string";
     case "TemplateLiteral":
       return true;
-    case "Identifier":
-      return (
-        analysis.bindingTypes.get((e as Identifier).name)?.kind === "String"
-      );
-    case "MemberExpression": {
-      const m = e as MemberExpression;
-      if (m.computed) return false;
-      const field = (m.property as Identifier).name;
-      const owner = memberOwnerStruct(m.object, analysis);
-      if (!owner) return false;
-      const fty = analysis.structFields
-        .get(owner)
-        ?.find((f) => f.name === field)?.ty;
-      return fty?.kind === "String";
-    }
     case "BinaryExpression": {
       const b = e as { operator: string; left: Expression; right: Expression };
       return (
@@ -5614,10 +5784,63 @@ function isStringExpr(e: Expression, analysis: ModuleAnalysis): boolean {
         (isStringExpr(b.left, analysis) || isStringExpr(b.right, analysis))
       );
     }
+    // A call to a modeled String-returning method on a String receiver (series
+    // 083) — `s.toUpperCase()`, `s.trim()`, `s.slice(..)` — is a string, so
+    // `a.toUpperCase() + b.toUpperCase()` is detected as concat (#48). The oracle
+    // is `noLib` and can't type a built-in method's *return*, so this is resolved
+    // structurally here rather than via Tier-3.
+    case "CallExpression": {
+      const call = e as CallExpression;
+      const callee = call.callee;
+      if (callee.type === "MemberExpression" && !(callee as MemberExpression).computed) {
+        const cm = callee as MemberExpression;
+        if (cm.property.type === "Identifier") {
+          const method = (cm.property as Identifier).name;
+          if (
+            STRING_RETURNING_STRING_METHODS.has(method) &&
+            receiverTypeOf(cm.object as Expression, analysis)?.kind === "String"
+          ) {
+            return true;
+          }
+          // `n.toString()` / `n.toFixed(..)` on a number → a String too.
+          if (
+            NUMBER_RETURNING_STRING_METHODS.has(method) &&
+            receiverTypeOf(cm.object as Expression, analysis)?.kind === "f64"
+          ) {
+            return true;
+          }
+        }
+      }
+      return receiverTypeOf(e, analysis)?.kind === "String";
+    }
+    // Identifier + member cases delegate to the unified `receiverTypeOf`, which
+    // adds the oracle tier for free (so `getName().toUpperCase()` sees a string).
     default:
-      return false;
+      return receiverTypeOf(e, analysis)?.kind === "String";
   }
 }
+
+/** String methods (series 083) whose Rust target returns a `String`. */
+const STRING_RETURNING_STRING_METHODS = new Set([
+  "toString",
+  "toUpperCase",
+  "toLowerCase",
+  "trim",
+  "trimStart",
+  "trimEnd",
+  "repeat",
+  "replace",
+  "replaceAll",
+  "slice",
+  "substring",
+  "charAt",
+]);
+
+/** Number methods (series 083) whose Rust target returns a `String`. */
+const NUMBER_RETURNING_STRING_METHODS = new Set([
+  "toString",
+  "toFixed",
+]);
 
 /** The struct name owning a member receiver: `this` → current class; a named binding → its struct type (series 080). */
 function memberOwnerStruct(
@@ -5935,11 +6158,15 @@ function lowerVarDecl(
     // Rust inference, so it fails loud pointing at the fix: annotate it.
     //
     // Exceptions — builtin forms the lowerer already types *by construction*,
-    // so no annotation is needed (and, for JSON.parse, none can express the
-    // type): a stored `Object.entries(…)` (→ `Vec<(String, V)>`, 043b), an
-    // untyped `JSON.parse(…)` (→ `serde_json::Value`, the 045c fallback), and
-    // an `<array>.find(…)` (→ `Option<T>`, 042d). `using`/`await using`
+    // so no annotation is needed (and none can express the type): a stored
+    // `Object.entries(…)` (→ `Vec<(String, V)>`, 043b), a `parseJson<T>(…)`
+    // std-shim result (→ `ParseResult<T>`, series 084 — the `<T>` carries the
+    // type), and an `<array>.find(…)` (→ `Option<T>`, 042d). `using`/`await using`
     // resources are also skipped — their acquisition is typed by construction.
+    // Bare `JSON.parse(...)` in a binding (annotated or not) is fail-loud and
+    // redirects to `parseJson<T>` (series 084) — run before the annotation gate
+    // so the message is the redirect, not "binding without a type annotation".
+    if (d.init) redirectBareJson(d.init);
     const declKind = (decl as { kind: string }).kind;
     const gated = declKind === "const" || declKind === "let" || declKind === "var";
     if (
@@ -5947,7 +6174,7 @@ function lowerVarDecl(
       ty === null &&
       !isObviousLiteralInit(d.init) &&
       !isObjectEntriesCall(d.init) &&
-      !isJsonParseCall(d.init) &&
+      !isParseJsonShimCall(d.init, analysis) &&
       !isArrayFindCall(d.init) &&
       !isAllSettledAwait(d.init) &&
       !isSpawnInit(d.init, analysis) &&
@@ -5978,6 +6205,16 @@ function lowerVarDecl(
     // (`h.await.unwrap()`). Statements lower top-to-bottom, so this is recorded
     // before the `await`.
     if (init.kind === "spawn") analysis.joinHandleBindings.add(d.id.name);
+    // Track a `parseJson<T>` result binding (series 084): the value is a
+    // `ParseResult<T>`, so a later `.ok`/`.value`/`.error` read routes to the
+    // `ParseResult` surface. Recorded before those reads (statements lower
+    // top-to-bottom). `d.id.name` is a plain identifier binding.
+    if (init.kind === "parseJson" && d.id.type === "Identifier") {
+      analysis.parseResultBindings.set(
+        (d.id as Identifier).name,
+        init.target,
+      );
+    }
     // Class inheritance (series 053c): a heterogeneous base-typed array binding
     // is `Vec<Box<dyn IA>>`. Rewrite its declared type and record it as a `dyn`
     // binding so a later `.field` read routes through a trait accessor and a
@@ -6089,14 +6326,10 @@ function lowerTyped(
   ty: RustType | null,
   analysis: ModuleAnalysis,
 ): HirExpr {
-  // `const x: T = JSON.parse(s)` deserializes into the annotated target type
-  // (series 045); without an annotation it falls to the `Value` form in lowerCall.
-  if (ty && isJsonParseCall(expr)) {
-    const src = (expr as CallExpression).arguments[0];
-    if (src) {
-      return { kind: "jsonParse", source: lowerExpr(src, analysis), target: ty };
-    }
-  }
+  // The old 045 annotation-driven `const x: T = JSON.parse(s)` is gone (series
+  // 084): bare `JSON.parse` is fail-loud and redirects to `parseJson<T>` from
+  // `@t2r/std`. We deliberately no longer special-case it here — the binding-init
+  // gate (`redirectBareJson`) throws the redirect before this runs.
   // Option coercion (series 042): a plain value flowing into an `Option<T>` slot
   // is `Some`-wrapped (recursing against the inner type); `undefined`/`null`
   // becomes `None`. Centralized here so `let`-init, struct fields, and array
@@ -6187,6 +6420,138 @@ function fieldRustType(
     : base;
 }
 
+/**
+ * How a class field gets its value at construction (series 070). Every non-error
+ * class field resolves to exactly one source: `ctor` (assigned `this.f = …` or a
+ * `public/private f` parameter property — the existing 060 path), `initializer`
+ * (a `f = <expr>` field default), or `none` (neither — an implicitly-absent field
+ * that becomes `Option<T>` / `None`, per the design's Decision via series 066).
+ */
+type ClassFieldSource = "ctor" | "initializer" | "none";
+
+interface ClassFieldPlan {
+  name: string;
+  /** The field's Rust type — Option-wrapped when the source is `none`. */
+  ty: RustType;
+  source: ClassFieldSource;
+  /** The initializer AST node (present iff `source === "initializer"`). */
+  init?: Expression;
+}
+
+/**
+ * The set of field names a constructor directly initializes (series 070): each
+ * `this.<field> = …` assignment plus every `public/private/readonly` parameter
+ * property. Drives per-field construction-source resolution — a field the ctor
+ * doesn't assign falls back to its initializer, else to `None`.
+ */
+function ctorAssignedFields(ctor: MethodDefinition | undefined): Set<string> {
+  const assigned = new Set<string>();
+  if (!ctor) return assigned;
+  for (const p of (ctor.value.params ?? []) as unknown as Param[]) {
+    if (p.type === "TSParameterProperty") assigned.add(p.parameter.name);
+  }
+  for (const stmt of ctor.value.body?.body ?? []) {
+    if (stmt.type !== "ExpressionStatement") continue;
+    const e = (stmt as ExpressionStatement).expression;
+    if (e.type !== "AssignmentExpression") continue;
+    const a = e as AssignmentExpression;
+    if (a.operator !== "=" || a.left.type !== "MemberExpression") continue;
+    const m = a.left as MemberExpression;
+    if (m.computed || m.object.type !== "ThisExpression") continue;
+    if (m.property.type === "Identifier") assigned.add((m.property as Identifier).name);
+  }
+  return assigned;
+}
+
+/**
+ * A field initializer must be a self-contained construction constant (series
+ * 070): it may not reference `this` or another field — a cross-field / ordered
+ * initializer is fail-loud (design §Open sub-details). A bare `Identifier` is
+ * rejected too (it could name a field or an out-of-scope binding); only closed
+ * literal-shaped expressions are accepted as construction defaults.
+ */
+function rejectImpureInitializer(field: string, expr: Expression): void {
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n);
+      return;
+    }
+    if (!node || typeof node !== "object") return;
+    const t = (node as { type?: string }).type;
+    if (t === "ThisExpression") {
+      throw new UnsupportedError({
+        type: `field initializer for '${field}' references \`this\` (cross-field init is not a construction constant)`,
+      });
+    }
+    for (const key in node as Record<string, unknown>) {
+      if (key === "type") continue;
+      walk((node as Record<string, unknown>)[key]);
+    }
+  };
+  walk(expr);
+}
+
+/**
+ * Resolve every instance field of a non-error class to its construction plan
+ * (series 070): declared `field: T` properties and field initializers first (in
+ * declaration order), then `public/private` parameter properties. A field the
+ * constructor assigns keeps its declared type; an *un-assigned, un-initialized*
+ * field with a non-`Option` type is wrapped `Option<T>` (source `none`, filled
+ * `None` at construction). Shared by `collectStructFields` (the read-narrowing
+ * table) and `lowerClass` (the emitted struct + `new`) so both agree.
+ */
+function planClassFields(
+  decl: ClassDeclaration,
+  structs: Set<string>,
+): ClassFieldPlan[] {
+  const ctor = decl.body.body.find(
+    (m): m is MethodDefinition =>
+      m.type === "MethodDefinition" && m.kind === "constructor",
+  );
+  const assigned = ctorAssignedFields(ctor);
+  const plans: ClassFieldPlan[] = [];
+  for (const m of decl.body.body) {
+    if (m.type !== "PropertyDefinition" || m.static || m.computed) continue;
+    const f = m as PropertyDefinition;
+    const name = f.key.name;
+    const init = (f.value as Expression | undefined) ?? undefined;
+    // A declared type (may already be `Option` via `?`/`T | undefined`), or the
+    // literal type inferred from the initializer (`x = 5` → `f64`) via the shared
+    // numeric literal pass (`inferInitType`) — never a parallel path.
+    let declared: RustType | null = f.typeAnnotation
+      ? fieldRustType(f.typeAnnotation.typeAnnotation, f.optional === true, structs)
+      : init
+        ? inferInitType(init, structs)
+        : null;
+    if (!declared) {
+      throw new UnsupportedError({
+        type: `class field '${name}' without a type (nor an inferable initializer)`,
+      });
+    }
+    if (assigned.has(name)) {
+      plans.push({ name, ty: declared, source: "ctor" });
+    } else if (init) {
+      plans.push({ name, ty: declared, source: "initializer", init });
+    } else {
+      // Neither ctor-assigned nor initialized → implicitly absent: `Option<T>`,
+      // `None` at construction (design Decision, via series 066).
+      const ty: RustType =
+        declared.kind === "option" ? declared : { kind: "option", inner: declared };
+      plans.push({ name, ty, source: "none" });
+    }
+  }
+  // `public/private` parameter properties are always ctor-assigned fields.
+  for (const p of (ctor?.value.params ?? []) as unknown as Param[]) {
+    if (p.type !== "TSParameterProperty" || !p.parameter.typeAnnotation) continue;
+    plans.push({
+      name: p.parameter.name,
+      ty: lowerType(p.parameter.typeAnnotation.typeAnnotation, structs),
+      source: "ctor",
+    });
+  }
+  return plans;
+}
+
 function collectStructFields(
   program: Program,
   structs: Set<string>,
@@ -6224,33 +6589,19 @@ function collectStructFields(
     } else if (stmt.type === "ClassDeclaration" && !isErrorSubclass(stmt)) {
       const decl = stmt as ClassDeclaration;
       if (!decl.id) continue;
-      const fields: { name: string; ty: RustType }[] = [];
-      for (const m of decl.body.body) {
-        if (
-          m.type === "PropertyDefinition" &&
-          !m.static &&
-          !m.computed &&
-          m.typeAnnotation
-        ) {
-          fields.push({
-            name: m.key.name,
-            ty: lowerType(m.typeAnnotation.typeAnnotation, structs),
-          });
-        }
+      // Series 070: the field-type table (read-narrowing) must match the emitted
+      // struct — an un-assigned, un-initialized field is `Option<T>`. `planClassFields`
+      // is lenient here (malformed members still fail loud in `lowerClass`).
+      let plans: ClassFieldPlan[];
+      try {
+        plans = planClassFields(decl, structs);
+      } catch {
+        continue;
       }
-      const ctor = decl.body.body.find(
-        (m): m is MethodDefinition =>
-          m.type === "MethodDefinition" && m.kind === "constructor",
+      map.set(
+        decl.id.name,
+        plans.map((p) => ({ name: p.name, ty: p.ty })),
       );
-      for (const p of (ctor?.value.params ?? []) as unknown as Param[]) {
-        if (p.type === "TSParameterProperty" && p.parameter.typeAnnotation) {
-          fields.push({
-            name: p.parameter.name,
-            ty: lowerType(p.parameter.typeAnnotation.typeAnnotation, structs),
-          });
-        }
-      }
-      map.set(decl.id.name, fields);
     }
   }
   return map;
@@ -7342,6 +7693,16 @@ function lowerCall(
     };
   }
 
+  // `@t2r/std` std-shim intrinsics (series 084) — recognized by the reserved
+  // import specifier (the local alias is a key in `analysis.stdShim`). Routed
+  // *before* the generic user-fn path so a shim call never falls through to a
+  // plain `call`. A user's own `parseJson`/`stringifyJson` from elsewhere is not
+  // in the map, so it is untouched.
+  if (call.callee.type === "Identifier") {
+    const shim = analysis.stdShim.get((call.callee as Identifier).name);
+    if (shim) return lowerStdShimCall(shim, call, analysis);
+  }
+
   // Direct call to a known function: adapt each argument to the callee's
   // inferred parameter ownership (move → `x`, ref → `&x`, refMut → `&mut x`).
   if (call.callee.type === "Identifier") {
@@ -7463,6 +7824,23 @@ function lowerCall(
         args: call.arguments.map((a) => lowerExpr(a, analysis)),
       };
     }
+    // `Math.*` / `Number.parseInt|parseFloat` global statics (series 083). Native
+    // where `f64` matches JS; `tslib` for the parse quirks; a `min!`/`max!` macro
+    // for the variadic Math.min/max. Handled before value-method routing since the
+    // receiver is the global object, not a value.
+    if (
+      m.object.type === "Identifier" &&
+      ((m.object as Identifier).name === "Math" ||
+        (m.object as Identifier).name === "Number")
+    ) {
+      const routed = lowerNumberStatic(
+        (m.object as Identifier).name,
+        methodName,
+        call,
+        analysis,
+      );
+      if (routed) return routed;
+    }
     // `Object.keys(m)` / `Object.values(m)` are static calls on the global
     // `Object` (series 041), not a method on a value — handle before the
     // value-method routing. `Object.<anything else>` is fail-loud.
@@ -7566,23 +7944,24 @@ function lowerCall(
         type: "manual generator `.next()` (impl Iterator is pull-only — use for-of / spread / Array.from)",
       });
     }
-    // `JSON.stringify(v)` / `JSON.parse(s)` — static calls on the global `JSON`
-    // (series 045). `parse` here has no type context → the untyped `Value`
-    // fallback; a `const x: T = JSON.parse(s)` gets its `T` in `lowerTyped`.
+    // Bare `JSON.stringify(v)` / `JSON.parse(s)` are fail-loud and **redirect** to
+    // the `@t2r/std` shim (series 084). The type/fidelity policy moved to the
+    // blessed call-site API: `parseJson<T>` gives the emitter a concrete
+    // `from_str::<T>` target (no `any`); `stringifyJson` carries the JS number
+    // fidelity. Recognition of the shim is by the reserved import specifier.
     if (
       m.object.type === "Identifier" &&
       (m.object as Identifier).name === "JSON"
     ) {
-      const arg = call.arguments[0];
-      if (methodName === "stringify" && arg) {
-        return { kind: "jsonStringify", value: lowerExpr(arg, analysis) };
+      if (methodName === "stringify") {
+        throw new UnsupportedError({
+          type: '`JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)`',
+        });
       }
-      if (methodName === "parse" && arg) {
-        return {
-          kind: "jsonParse",
-          source: lowerExpr(arg, analysis),
-          target: null,
-        };
+      if (methodName === "parse") {
+        throw new UnsupportedError({
+          type: '`JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)`',
+        });
       }
       throw new UnsupportedError({ type: `JSON.${methodName}` });
     }
@@ -7783,6 +8162,15 @@ function lowerCall(
     if (!isUserMethod) {
       const mapSet = tryMapSetMethod(methodName, m, call, analysis);
       if (mapSet) return mapSet;
+    }
+    // Primitive (`string`/`number`) receiver methods (series 083) — routed
+    // through the unified `receiverTypeOf` gate. Runs **before** `tryTslibMethod`
+    // so a *string* `.slice`/`.at` (UTF-16 semantics) is claimed here rather than
+    // by the array-intended `tslib::array::slice`. Only claims when the receiver
+    // is a modeled `String`/`f64`; an unmodeled receiver → null → fall through.
+    if (!isUserMethod) {
+      const prim = tryPrimitiveMethod(methodName, m, call, analysis);
+      if (prim) return prim;
     }
     // Quirk-heavy library methods route to the `tslib` fidelity crate (027);
     // clean-mapping methods fall through to the native `method` call below.
@@ -8357,9 +8745,13 @@ function classifyElementUse(
  * type. Anything else (a chained call, an unknown binding) is fail-loud.
  */
 function elementTypeOf(objExpr: Expression, analysis: ModuleAnalysis): RustType {
+  // Unified backbone (series 083): any receiver shape the `receiverTypeOf` tiers
+  // resolve to a `Vec<E>` yields `E` — so `getRows().map(f)` / `this.items
+  // .filter(g)` now work, not just identifier arrays. The identifier fast path is
+  // subsumed by Tier-1 (bindingTypes), byte-for-byte unchanged.
+  const rt = receiverTypeOf(objExpr, analysis);
+  if (rt && rt.kind === "vec") return rt.elem;
   if (objExpr.type === "Identifier") {
-    const t = analysis.bindingTypes.get((objExpr as Identifier).name);
-    if (t && t.kind === "vec") return t.elem;
     throw new UnsupportedError({
       type: `cannot lift callback: receiver '${(objExpr as Identifier).name}' is not a known array`,
     });
@@ -8670,23 +9062,511 @@ function tryTslibMethod(
   return null;
 }
 
+// ── Primitive-method dispatch (series 083) ────────────────────────────────────
+
+/**
+ * A `string`/`number` receiver method (series 083), routed through the unified
+ * `receiverTypeOf` gate and the 029 catalog. Sibling to `tryMapSetMethod`/
+ * `tryTslibMethod`, called from `lowerCall` **before** the generic fallthrough.
+ * Returns null for a receiver we don't model as a primitive (→ fall through →
+ * today's fail-loud), never a wrong emit.
+ */
+function tryPrimitiveMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const recv = receiverTypeOf(m.object, analysis);
+  if (recv?.kind === "String")
+    return stringMethod(methodName, m, call, analysis);
+  if (recv?.kind === "f64") return numberMethod(methodName, m, call, analysis);
+  if (recv?.kind === "vec")
+    return arrayTailMethod(methodName, m, call, recv.elem, analysis);
+  return null;
+}
+
+/**
+ * Array-access tail methods (series 083 slice 8) — `join`, `concat`, `splice`.
+ * `reverse` already lowers natively (`Vec::reverse`, in place) so it is not
+ * routed here. Gated on a `vec` receiver via `receiverTypeOf`. `null` → fall
+ * through.
+ */
+function arrayTailMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  _elem: RustType,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const args = call.arguments;
+  const recvRef: HirArg = { borrow: "ref", expr: lowerExpr(m.object, analysis) };
+  // `xs.join(sep)` → tslib: JS coerces each element to its string form then joins
+  // (so a number array joins as `"1-2-3"`), which `[T]::join` cannot do (no
+  // `Display`-join in std). Confined to tslib for the string-coercion fidelity.
+  if (methodName === "join" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::array::join",
+      args: [recvRef, { borrow: "owned", expr: strPatternArg(args[0], analysis) }],
+    };
+  }
+  if (methodName === "join" && args.length === 0) {
+    // Default separator is "," in JS.
+    return {
+      kind: "call",
+      callee: "tslib::array::join",
+      args: [recvRef, { borrow: "owned", expr: { kind: "raw", text: '","' } }],
+    };
+  }
+  // `xs.concat(ys)` → a new `Vec` (JS returns a fresh array; the receiver is
+  // unchanged). `tslib::array::concat` clones both into one.
+  if (methodName === "concat" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::array::concat",
+      args: [
+        recvRef,
+        { borrow: "ref", expr: lowerExpr(args[0], analysis) },
+      ],
+    };
+  }
+  // `xss.flat()` (depth 1) — flatten one level of an array-of-arrays → a new
+  // `Vec`. Only the default depth-1 form is modeled (deep `flat(n)` is a later
+  // slice); gated on a `Vec<Vec<T>>` receiver so a flat array's `.flat()` stays
+  // fail-loud rather than mis-flattening.
+  if (methodName === "flat" && args.length === 0 && _elem.kind === "vec") {
+    return {
+      kind: "call",
+      callee: "tslib::array::flat",
+      args: [recvRef],
+    };
+  }
+  return null;
+}
+
+/** A `&self` shared-borrow arg of the primitive receiver (for a tslib fn). */
+function primRecvRef(m: MemberExpression, analysis: ModuleAnalysis): HirArg {
+  return { borrow: "ref", expr: lowerExpr(m.object, analysis) };
+}
+
+/** An owned `f64` arg (floored in tslib, the `at`/`slice` precedent). */
+function ownedArg(e: Expression, analysis: ModuleAnalysis): HirArg {
+  return { borrow: "owned", expr: lowerExpr(e, analysis) };
+}
+
+/** A `&`-borrowed arg (a `&str` for a tslib string fn). */
+function refArg(e: Expression, analysis: ModuleAnalysis): HirArg {
+  return { borrow: "ref", expr: lowerExpr(e, analysis) };
+}
+
+/**
+ * A `&str`-pattern arg (series 083). `str::contains`/`starts_with`/`ends_with`
+ * take an `impl Pattern` (a `&str`, **not** a `&String`), so a `String`/`&String`/
+ * `&str` operand is uniformly coerced via `AsRef::<str>::as_ref(&(expr))`. Wrapped
+ * `raw` so the emitter renders the coercion verbatim around the inner expr.
+ */
+function strPatternArg(e: Expression, analysis: ModuleAnalysis): HirExpr {
+  return {
+    kind: "call",
+    callee: "AsRef::<str>::as_ref",
+    args: [{ borrow: "ref", expr: lowerExpr(e, analysis) }],
+  };
+}
+
+/**
+ * String receiver methods (029 String rows). Native where Rust matches JS;
+ * `tslib::string::*` only for a JS quirk (`replace`-first, empty-sep split, the
+ * UTF-16 slice family). `null` → not modeled → fall through.
+ */
+function stringMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const recv = (): HirExpr => lowerExpr(m.object, analysis);
+  const args = call.arguments;
+  const method = (name: string, methodArgs: HirExpr[] = []): HirExpr => ({
+    kind: "method",
+    receiver: recv(),
+    name,
+    args: methodArgs,
+  });
+
+  // `.toString()` — identity on `String`. Native.
+  if (methodName === "toString" && args.length === 0) return method("clone");
+  // Case + trim — native, Rust Unicode casing ≈ JS (documented divergence).
+  if (methodName === "toUpperCase" && args.length === 0)
+    return method("to_uppercase");
+  if (methodName === "toLowerCase" && args.length === 0)
+    return method("to_lowercase");
+  if (methodName === "trim" && args.length === 0) return method("trim");
+  if (methodName === "trimStart" && args.length === 0)
+    return method("trim_start");
+  if (methodName === "trimEnd" && args.length === 0) return method("trim_end");
+  // Predicates — native (arg is `&str`; `.contains`/`.starts_with`/`.ends_with`
+  // take `&str`, and a `String` derefs so a bare arg works via `&`).
+  if (
+    (methodName === "includes" ||
+      methodName === "startsWith" ||
+      methodName === "endsWith") &&
+    args.length === 1 &&
+    args[0]
+  ) {
+    const rustName =
+      methodName === "includes"
+        ? "contains"
+        : methodName === "startsWith"
+          ? "starts_with"
+          : "ends_with";
+    return {
+      kind: "method",
+      receiver: recv(),
+      name: rustName,
+      args: [strPatternArg(args[0], analysis)],
+    };
+  }
+  // `.repeat(n)` — native; `n` is `f64` → `as usize`.
+  if (methodName === "repeat" && args.length === 1 && args[0]) {
+    return {
+      kind: "method",
+      receiver: recv(),
+      name: "repeat",
+      args: [{ kind: "cast", expr: lowerExpr(args[0], analysis), ty: { kind: "usize" } }],
+    };
+  }
+  // `.replace(a, b)` — first match only (JS quirk) → tslib. Args are `&str`.
+  if (methodName === "replace" && args.length === 2 && args[0] && args[1]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::replace_first",
+      args: [
+        primRecvRef(m, analysis),
+        { borrow: "owned", expr: strPatternArg(args[0], analysis) },
+        { borrow: "owned", expr: strPatternArg(args[1], analysis) },
+      ],
+    };
+  }
+  // `.replaceAll(a, b)` — all matches → native `.replace` (`&str` pattern + repl).
+  if (methodName === "replaceAll" && args.length === 2 && args[0] && args[1]) {
+    return {
+      kind: "method",
+      receiver: recv(),
+      name: "replace",
+      args: [strPatternArg(args[0], analysis), strPatternArg(args[1], analysis)],
+    };
+  }
+  // `.split(sep)` — native for a non-empty literal sep; empty sep → tslib
+  // (JS splits into code units, quirk). A non-literal sep routes to tslib too so
+  // the empty-string case is handled at runtime.
+  if (methodName === "split" && args.length === 1 && args[0]) {
+    const sep = args[0];
+    if (sep.type === "Literal" && (sep as Literal).value === "") {
+      return {
+        kind: "call",
+        callee: "tslib::string::split_chars",
+        args: [primRecvRef(m, analysis)],
+      };
+    }
+    return {
+      kind: "call",
+      callee: "tslib::string::split",
+      args: [
+        primRecvRef(m, analysis),
+        { borrow: "owned", expr: strPatternArg(sep, analysis) },
+      ],
+    };
+  }
+  // `.slice`/`.substring`/`.charAt` — UTF-16 vs char/byte quirk → tslib.
+  if (methodName === "slice" && (args.length === 1 || args.length === 2)) {
+    const a1 = args[0];
+    if (!a1) return null;
+    const callArgs: HirArg[] = [primRecvRef(m, analysis), ownedArg(a1, analysis)];
+    if (args.length === 2 && args[1])
+      callArgs.push(ownedArg(args[1], analysis));
+    return {
+      kind: "call",
+      callee:
+        args.length === 2 ? "tslib::string::str_slice" : "tslib::string::str_slice_from",
+      args: callArgs,
+    };
+  }
+  if (methodName === "substring" && args.length === 2 && args[0] && args[1]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::substring",
+      args: [
+        primRecvRef(m, analysis),
+        ownedArg(args[0], analysis),
+        ownedArg(args[1], analysis),
+      ],
+    };
+  }
+  if (methodName === "charAt" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::char_at",
+      args: [primRecvRef(m, analysis), ownedArg(args[0], analysis)],
+    };
+  }
+  return null;
+}
+
+/**
+ * Number receiver methods (029 Number/Math rows). `.toString()` routes through
+ * `tslib::number::to_js_string` for JS number→string fidelity (`-0`, magnitudes);
+ * `.toFixed`/`.toString(radix)` are tslib. `Math.*` statics are handled in the
+ * static-call path, not here (their receiver is the `Math` object).
+ */
+function numberMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const args = call.arguments;
+  // `n.toString()` (no radix) → tslib::number::to_js_string (JS fidelity).
+  if (methodName === "toString" && args.length === 0) {
+    return {
+      kind: "call",
+      callee: "tslib::number::to_js_string",
+      args: [ownedArg(m.object as Expression, analysis)],
+    };
+  }
+  // `n.toString(radix)` → tslib::number::to_radix.
+  if (methodName === "toString" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::number::to_radix",
+      args: [
+        ownedArg(m.object as Expression, analysis),
+        ownedArg(args[0], analysis),
+      ],
+    };
+  }
+  // `n.toFixed(d)` → tslib::number::to_fixed.
+  if (methodName === "toFixed" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::number::to_fixed",
+      args: [
+        ownedArg(m.object as Expression, analysis),
+        ownedArg(args[0], analysis),
+      ],
+    };
+  }
+  return null;
+}
+
+/**
+ * `Math.*` / `Number.parseInt|parseFloat` global statics (series 083). Native
+ * `f64` methods where the semantics match JS; `tslib` for the parse quirks; a
+ * `min!`/`max!` macro (the sanctioned variadic Tm route) for `Math.min`/`max`.
+ * Returns null for an unmodeled static (→ fall through → fail-loud).
+ */
+function lowerNumberStatic(
+  global: string,
+  methodName: string,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const args = call.arguments as Expression[];
+  // A method receiver that is a bare number literal (`3.7`) is an ambiguous
+  // `{float}` in Rust (`3.7.floor()` fails E0689) — cast a literal receiver to
+  // `f64` (`(3.7 as f64).floor()`). A non-literal `f64` receiver is unambiguous.
+  const f64Recv = (e: Expression): HirExpr => {
+    const lowered = lowerExpr(e, analysis);
+    const isLiteralNum =
+      lowered.kind === "number" ||
+      (lowered.kind === "unary" &&
+        lowered.op === "-" &&
+        lowered.operand.kind === "number");
+    return isLiteralNum
+      ? { kind: "cast", expr: lowered, ty: { kind: "f64" } }
+      : lowered;
+  };
+  if (global === "Math") {
+    // `Math.floor/ceil/round/abs/trunc/sign/sqrt` — unary native `f64` methods.
+    const unary: Record<string, string> = {
+      floor: "floor",
+      ceil: "ceil",
+      round: "round",
+      abs: "abs",
+      trunc: "trunc",
+      sqrt: "sqrt",
+    };
+    if (unary[methodName] && args.length === 1 && args[0]) {
+      return {
+        kind: "method",
+        receiver: f64Recv(args[0]),
+        name: unary[methodName] as string,
+        args: [],
+      };
+    }
+    // `Math.min`/`Math.max` — binary → native `f64::min`/`max`; variadic →
+    // `min!`/`max!` macro (029 Tm). NaN-propagating like JS.
+    if (
+      (methodName === "min" || methodName === "max") &&
+      args.length >= 1 &&
+      args.every((a) => a)
+    ) {
+      if (args.length === 2 && args[0] && args[1]) {
+        return {
+          kind: "method",
+          receiver: f64Recv(args[0]),
+          name: methodName,
+          args: [lowerExpr(args[1], analysis)],
+        };
+      }
+      return {
+        kind: "jsMinMax",
+        op: methodName,
+        args: args.map((a) => lowerExpr(a, analysis)),
+      };
+    }
+    return null;
+  }
+  // `Number.parseInt(s[, radix])` / `Number.parseFloat(s)` → tslib (radix +
+  // trailing-garbage tolerance quirks).
+  if (methodName === "parseInt" && (args.length === 1 || args.length === 2)) {
+    const a0 = args[0];
+    if (!a0) return null;
+    const callArgs: HirArg[] = [refArg(a0, analysis)];
+    callArgs.push(
+      args.length === 2 && args[1]
+        ? ownedArg(args[1], analysis)
+        : { borrow: "owned", expr: { kind: "number", value: 10 } },
+    );
+    return { kind: "call", callee: "tslib::number::parse_int", args: callArgs };
+  }
+  if (methodName === "parseFloat" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::number::parse_float",
+      args: [refArg(args[0], analysis)],
+    };
+  }
+  return null;
+}
+
 /**
  * Lower a static call on the global `Object` (series 041). `keys`/`values` map
  * to a native iteration of the `IndexMap`-backed record (insertion order matches
  * JS); everything else — `entries` (needs pair-array access) and `assign` (merge
  * + variadic sources) included — is fail-loud, a tracked residual.
  */
-/** Is `e` a call to `JSON.parse(...)` (series 045)? */
-function isJsonParseCall(e: Expression): boolean {
+/**
+ * Lower a recognized `@t2r/std` std-shim call (series 084).
+ *
+ * - `stringifyJson(v)` → the shipped 045 `tslib::json::stringify` writer (JS
+ *   number fidelity, insertion-ordered keys). Reuses the `jsonStringify` HIR.
+ * - `parseJson<T>(s)` → `tslib::json::ParseResult::<T>::parse(&s)`. `T` is the
+ *   explicit call type argument (`parseJson<Point>(s)`) and must be a modeled
+ *   struct/enum (or a primitive / `Array` / `Record` of them). A bare/unmodeled
+ *   `T` is fail-loud. The result binding's inner `T` is recorded in
+ *   `parseResultBindings` by `lowerVarDecl` so `.ok`/`.value`/`.error` resolve.
+ */
+function lowerStdShimCall(
+  shim: StdShimName,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const arg = call.arguments[0];
+  if (!arg) {
+    throw new UnsupportedError({
+      type: `\`${shim}\` from "@t2r/std" takes exactly one argument`,
+    });
+  }
+  if (shim === "stringifyJson") {
+    return { kind: "jsonStringify", value: lowerExpr(arg, analysis) };
+  }
+  // parseJson<T>(s): the type argument is required and must be modeled.
+  const targs = (call as { typeArguments?: { params?: TSType[] } })
+    .typeArguments?.params;
+  const tArg = targs?.[0];
+  if (!tArg) {
+    throw new UnsupportedError({
+      type: '`parseJson<T>` needs an explicit modeled type argument (`parseJson<Point>(s)`) — an unconstrained `T` cannot be deserialized',
+    });
+  }
+  const target = lowerType(tArg, analysis.structs);
+  assertModeledParseTarget(target, analysis);
+  return { kind: "parseJson", source: lowerExpr(arg, analysis), target };
+}
+
+/**
+ * `parseJson<T>` requires a *modeled* target: a struct/enum, a primitive, or an
+ * `Array`/`Record`/`Option` recursively of one. An unresolved nominal type (a
+ * `T` the module never declared) is fail-loud — serde has no shape to validate
+ * against. Mirrors the "T must be a modeled struct/enum" dialect rule.
+ */
+function assertModeledParseTarget(ty: RustType, analysis: ModuleAnalysis): void {
+  switch (ty.kind) {
+    case "f64":
+    case "i64":
+    case "usize":
+    case "String":
+    case "bool":
+      return;
+    case "vec":
+      return assertModeledParseTarget(ty.elem, analysis);
+    case "option":
+      return assertModeledParseTarget(ty.inner, analysis);
+    case "hashmap":
+      return assertModeledParseTarget(ty.value, analysis);
+    case "struct":
+      if (analysis.structs.has(ty.name)) return;
+      throw new UnsupportedError({
+        type: `\`parseJson<${ty.name}>\` — '${ty.name}' is not a modeled struct/enum (declare it as an \`interface\`/\`class\`/\`enum\`)`,
+      });
+    default:
+      throw new UnsupportedError({
+        type: "`parseJson<T>` needs a modeled struct/enum type argument (`parseJson<Point>(s)`)",
+      });
+  }
+}
+
+/**
+ * Fail loud on a bare `JSON.parse(...)` / `JSON.stringify(...)`, redirecting to
+ * the `@t2r/std` shim (series 084). Bare-JSON calls in expression position are
+ * already caught by `lowerCall`; this covers the *binding-init* gate, which runs
+ * before the init is lowered (so a `const v = JSON.parse(s)` gets the redirect
+ * message, not "binding without a type annotation").
+ */
+function redirectBareJson(e: Expression): void {
+  if (e.type !== "CallExpression") return;
+  const callee = (e as CallExpression).callee;
+  if (callee.type !== "MemberExpression") return;
+  const m = callee as MemberExpression;
+  if (
+    m.object.type !== "Identifier" ||
+    (m.object as Identifier).name !== "JSON" ||
+    m.property.type !== "Identifier"
+  ) {
+    return;
+  }
+  const method = (m.property as Identifier).name;
+  if (method === "parse") {
+    throw new UnsupportedError({
+      type: '`JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)`',
+    });
+  }
+  if (method === "stringify") {
+    throw new UnsupportedError({
+      type: '`JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)`',
+    });
+  }
+}
+
+/** Is `e` a call to the `@t2r/std` `parseJson<T>` intrinsic (series 084)? Keyed
+ * off the local alias recorded from the reserved-specifier import. */
+function isParseJsonShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
   if (e.type !== "CallExpression") return false;
   const callee = (e as CallExpression).callee;
-  if (callee.type !== "MemberExpression") return false;
-  const m = callee as MemberExpression;
   return (
-    m.object.type === "Identifier" &&
-    (m.object as Identifier).name === "JSON" &&
-    m.property.type === "Identifier" &&
-    (m.property as Identifier).name === "parse"
+    callee.type === "Identifier" &&
+    analysis.stdShim.get((callee as Identifier).name) === "parseJson"
   );
 }
 
@@ -9299,6 +10179,33 @@ function lowerMember(
   }
   if (member.property.type === "Identifier") {
     const prop = (member.property as Identifier).name;
+    // `@t2r/std` `parseJson<T>` result (series 084): `.ok` is the `ParseResult`
+    // discriminant field; `.value`/`.error` are the borrowing accessors
+    // `.value()`/`.error()` (usable under a proven-`ok`/`!ok` branch). Routed by
+    // the binding being a recorded `parseResultBindings` name.
+    if (
+      member.object.type === "Identifier" &&
+      analysis.parseResultBindings.has((member.object as Identifier).name)
+    ) {
+      if (prop === "ok") {
+        return {
+          kind: "field",
+          object: lowerExpr(member.object, analysis),
+          name: "ok",
+        };
+      }
+      if (prop === "value" || prop === "error") {
+        return {
+          kind: "method",
+          receiver: lowerExpr(member.object, analysis),
+          name: prop,
+          args: [],
+        };
+      }
+      throw new UnsupportedError({
+        type: `\`.${prop}\` on a parseJson result — only \`.ok\`, \`.value\`, \`.error\` are available`,
+      });
+    }
     // `.length` is a property in TS but a method in Rust.
     if (prop === "length")
       return { kind: "len", object: lowerExpr(member.object, analysis) };

@@ -24,6 +24,7 @@
 
 import type { Program } from "./ast";
 import { DialectError, UnsupportedError } from "./errors";
+import { STD_SHIM_EXPORTS, STD_SHIM_SPECIFIER } from "./std-shim";
 
 export { DialectError };
 
@@ -76,6 +77,12 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "TSEnumDeclaration",
   "TSEnumBody",
   "TSEnumMember",
+  // The `@t2r/std` std-shim import (series 084). ONLY an
+  // `import { … } from "@t2r/std"` is modeled — a `checkStdShimImport` guard
+  // below rejects any other specifier (general module imports are 050, unshipped)
+  // and any unknown imported name. The import lowers to nothing (recognition only).
+  "ImportDeclaration",
+  "ImportSpecifier",
   // Expressions
   "Identifier",
   "Literal",
@@ -217,5 +224,36 @@ export function validate(program: Program): void {
     checkForbiddenFlags(n);
     // 3. Default-deny: an unmodeled node type is not implemented yet.
     if (!MODELED.has(n.type)) throw new UnsupportedError(n);
+    // 4. The only modeled import is `@t2r/std` (series 084). Any other specifier,
+    //    or an unknown `@t2r/std` name, is fail-loud — general module imports
+    //    (050) are unshipped.
+    if (n.type === "ImportDeclaration") checkStdShimImport(n);
   });
+}
+
+/**
+ * Guard the sole modeled import: `import { … } from "@t2r/std"`. Rejects a
+ * bare/other specifier and an unknown imported name. `@throws {UnsupportedError}`.
+ */
+function checkStdShimImport(n: AnyNode): void {
+  const source = (n.source as { value?: unknown } | undefined)?.value;
+  if (source !== STD_SHIM_SPECIFIER) {
+    throw new UnsupportedError({
+      type: `import from '${String(source)}' — only "${STD_SHIM_SPECIFIER}" is a recognized module (bare/relative module imports are not yet supported)`,
+    });
+  }
+  const specifiers = (n.specifiers as AnyNode[] | undefined) ?? [];
+  for (const spec of specifiers) {
+    if (spec.type !== "ImportSpecifier") {
+      throw new UnsupportedError({
+        type: `unsupported import form from "${STD_SHIM_SPECIFIER}" (only named imports are recognized)`,
+      });
+    }
+    const name = (spec.imported as { name?: unknown } | undefined)?.name;
+    if (typeof name !== "string" || !STD_SHIM_EXPORTS.has(name)) {
+      throw new UnsupportedError({
+        type: `'${String(name)}' is not exported by "${STD_SHIM_SPECIFIER}" (Tier A exports: ${[...STD_SHIM_EXPORTS].join(", ")})`,
+      });
+    }
+  }
 }

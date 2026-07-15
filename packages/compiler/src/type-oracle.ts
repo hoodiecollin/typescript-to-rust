@@ -43,6 +43,15 @@ export interface TypeOracle {
    * `collectionOf` falls back to when `bindingTypes` can't resolve a receiver.
    */
   collectionAtSpan(start: number, end: number): RustType | null;
+  /**
+   * The **general** `RustType` at an oxc span (series 083) — not just the
+   * Map/Set filter. Powers `receiverTypeOf`'s Tier-3 so a primitive-method
+   * dispatch (`getName().toUpperCase()`, `this.count.toString()`) can classify a
+   * receiver of any shape. A `number` here is a **value** position (`f64`, never
+   * `orderedFloat`) — a method receiver is never a hash key. Returns null for
+   * anything unmodeled (fail-loud fallback preserved).
+   */
+  typeAtSpan_rustType(start: number, end: number): RustType | null;
 }
 
 /**
@@ -129,6 +138,15 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
       const elem = rustTypeOf(e, true);
       return elem ? { kind: "set", elem } : null;
     }
+    // `Array<T>` / `ReadonlyArray<T>` → `{kind:"vec", elem}` (series 083), so
+    // `elementTypeOf`'s oracle tier resolves a non-identifier array receiver.
+    // An array element is a value position (`number` → `f64`).
+    if (name === "Array" || name === "ReadonlyArray") {
+      const [e] = argsOf(t);
+      if (!e) return null;
+      const elem = rustTypeOf(e, false);
+      return elem ? { kind: "vec", elem } : null;
+    }
     if (name && structs.has(name)) return { kind: "struct", name };
     return null;
   }
@@ -140,5 +158,11 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
     return rt && (rt.kind === "hashmap" || rt.kind === "set") ? rt : null;
   }
 
-  return { typeAtSpan, collectionAtSpan };
+  function typeAtSpan_rustType(start: number, end: number): RustType | null {
+    const t = typeAtSpan(start, end);
+    if (!t) return null;
+    return rustTypeOf(t, false);
+  }
+
+  return { typeAtSpan, collectionAtSpan, typeAtSpan_rustType };
 }

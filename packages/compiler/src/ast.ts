@@ -274,6 +274,8 @@ export interface PropertyDefinition extends Span {
   value: Expression | null;
   computed: boolean;
   static: boolean;
+  /** `field?: T` — an optional class field (`Option<T>`, series 042b/070). */
+  optional?: boolean;
 }
 
 /**
@@ -401,4 +403,18 @@ export type Statement =
 export interface Program extends Span {
   type: "Program";
   body: Statement[];
+}
+
+/** `import { a, b as c } from "src"` (series 084 — only `@t2r/std` is modeled). */
+export interface ImportDeclaration extends Span {
+  type: "ImportDeclaration";
+  source: { type: "Literal"; value: string };
+  specifiers: ImportSpecifier[];
+}
+
+/** One `{ imported as local }` clause of an `ImportDeclaration`. */
+export interface ImportSpecifier extends Span {
+  type: "ImportSpecifier";
+  imported: Identifier;
+  local: Identifier;
 }

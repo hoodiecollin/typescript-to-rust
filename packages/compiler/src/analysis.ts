@@ -25,6 +25,7 @@
 
 import type { FunctionDeclaration, Program, Statement, TSType } from "./ast";
 import type { HirFn, RustType } from "./hir";
+import { type StdShimName, collectStdShimBindings } from "./std-shim";
 import type { TypeOracle } from "./type-oracle";
 
 /** JS array/collection methods that mutate the receiver in place. */
@@ -406,6 +407,20 @@ export interface ModuleAnalysis {
    * a method call dispatches virtually. Populated during lowering.
    */
   dynBindings: Map<string, string>;
+  /**
+   * `@t2r/std` std-shim (series 084): local-alias → intrinsic-name map, from
+   * `import { parseJson as pj, stringifyJson } from "@t2r/std"`. A call whose
+   * identifier callee is a key here routes to the intrinsic lowering (never the
+   * generic user-fn path). Recognition is by the reserved specifier, not a name.
+   */
+  stdShim: Map<string, StdShimName>;
+  /**
+   * Bindings whose value is a `parseJson<T>` result (series 084) → their inner
+   * `T` (the deserialized `RustType`). A member access `.ok`/`.value`/`.error`
+   * on such a binding lowers to the `ParseResult<T>` surface. Populated during
+   * lowering as `const r = parseJson<T>(…)` bindings are seen.
+   */
+  parseResultBindings: Map<string, RustType>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -1488,6 +1503,10 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     fns,
     mut,
     structs,
+    // `@t2r/std` std-shim bindings (series 084) — recognized by the reserved
+    // import specifier. `parseResultBindings` fills during lowering.
+    stdShim: collectStdShimBindings(program),
+    parseResultBindings: new Map(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
     structFields: new Map(),
     // Filled by `lower()` after `bindingTypes` (needs the resolved map/set types).

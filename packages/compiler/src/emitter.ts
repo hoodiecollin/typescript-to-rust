@@ -152,7 +152,10 @@ export function emitModule(mod: HirModule): string {
   // derivation (`derives.ts`); threaded through item emission.
   const structs = buildStructTable(mod.items);
   // Generated structs derive serde traits only when the module uses JSON (045).
-  const usesJson = usesKind(mod, "jsonStringify") || usesKind(mod, "jsonParse");
+  const usesJson =
+    usesKind(mod, "jsonStringify") ||
+    usesKind(mod, "jsonParse") ||
+    usesKind(mod, "parseJson");
   const parts = mod.items.map((item) => emitItem(item, structs, usesJson));
   if (mod.main.length > 0) {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
@@ -1437,6 +1440,10 @@ function emitExpr(expr: HirExpr): string {
       );
       return `format!(${JSON.stringify(fmt)}, ${args.join(", ")})`;
     }
+    case "jsMinMax":
+      // Variadic `Math.min`/`Math.max` (series 083) → the `tslib` `min!`/`max!`
+      // macro (the sanctioned Tm variadic route; NaN-propagating like JS).
+      return `tslib::${expr.op}!(${expr.args.map(emitExpr).join(", ")})`;
     case "ushr":
       // JS `>>>` — logical (zero-fill) shift via an unsigned round-trip, count
       // masked to the `i128` width (series 056).
@@ -1572,6 +1579,8 @@ function emitExpr(expr: HirExpr): string {
       return `${emitExpr(expr.receiver)}.map(|v| v.${rid(expr.field)})`;
     case "jsonStringify":
       return `tslib::json::stringify(&${emitExpr(expr.value)})`;
+    case "parseJson":
+      return `tslib::json::ParseResult::<${emitType(expr.target)}>::parse(&${emitExpr(expr.source)})`;
     case "jsonParse": {
       const ty = expr.target ? emitType(expr.target) : "serde_json::Value";
       return `serde_json::from_str::<${ty}>(&${emitExpr(expr.source)}).expect("JSON.parse")`;
