@@ -65,12 +65,16 @@ console.log(flat.length);`,
 ]);
 
 // NOTE: the uniform `flatMap(U[])` callback and literal-constant `flat(k)` forms
-// shipped in series 085 (see flatmap-flat.test.ts). The fail-loud boundary here
-// moved to the residuals that need the recursive/dynamic value model (→ #59): a
-// `U | U[]` union callback and a dynamic-depth `flat(n)`.
-test("ARR-FL1 flatMap with a U | U[] union callback stays fail-loud (→ #59)", () => {
+// shipped in series 085; the `flatMap` ternary `cond ? U : U[]`, `flat(Infinity)`,
+// and over-deep `flat(k)` graduated **statically** in series 092 (see
+// flatmap-flat.test.ts). The fail-loud boundary here is now the genuinely-dynamic
+// residual deferred to the JsonValue increment (→ #59): a heterogeneous
+// `(U | U[])[]` return and a runtime-variable-depth `flat(n)`.
+test("ARR-FL1 flatMap returning a heterogeneous `(U | U[])[]` stays fail-loud (→ #59)", () => {
+  // A typed binding so the failure is the callback's dynamic return, not the
+  // binding — `[x, [x]]` is a scalar next to an array (genuinely jagged).
   const src = `const xs: Array<number> = [1, 2, 3];
-const ys = xs.flatMap((x: number) => (x % 2 === 0 ? [x, x] : x));
+const ys: Array<number> = xs.flatMap((x: number) => [x, [x]]);
 console.log(ys.length);`;
   expect(() => compile(src)).toThrow();
 });
