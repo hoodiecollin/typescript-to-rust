@@ -1,13 +1,17 @@
 # 082 — TypeOracle: tsc-checker-backed type resolution, coupled with oxc
 
-> **Status: SLICE 1 IMPLEMENTED & GREEN (2026-07-13). Issue #49. Graduates spike
+> **Status: COMPLETE & ARCHIVED (2026-07-14). Issue #49 closed. Graduates spike
 > #44.** Direction settled with Collin 2026-07-13 after the `044-type-layer-spike`
 > findings: **adopt, coupled + incremental, on TypeScript v5.9.3; first cut-over
 > `collectionOf`; `noLib`.** Slice 1 shipped: `type-oracle.ts`, source threading
 > through `emit`/`lower`, `collectionOf` bindingTypes-first-then-oracle fallback,
 > and the `mutatesThis` extension — 7/7 `ORAC` specs green, full suite no
-> regressions. Adjacent receiver-shape gaps surfaced → **#50**. Later tiers (lib
-> for inferred returns → #48; broaden cut-overs → #50) remain.
+> regressions. The later tiers all subsequently shipped: **lib tier for inferred
+> returns → #48** and **broaden cut-overs (`this.field` beyond collections) → #50**,
+> both landed via series 083 (`receiver-oracle`, `receiverTypeOf` 3-tier resolver).
+> The sole remaining #44 thread — swap v5.9.3 → the tsgo **v7 native** checker
+> behind the same `typeAtSpan` boundary — is externally blocked (no v7 compiler
+> API yet) and tracked as its own issue.
 > Spec-first: this `design.md` → RED `specs.md` → impl → archive.
 
 ## Problem
