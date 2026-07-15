@@ -323,6 +323,14 @@ export type HirExpr =
    */
   | { kind: "parseJson"; source: HirExpr; target: RustType }
   /**
+   * `rng(seed)` (the `@t2r/std` shim, series 089) → `tslib::rng::Rng::new(<seed>)`
+   * → a stateful `Rng` handle. The binding is emitted `let mut` (methods take
+   * `&mut self`); `.next()`/`.int()`/`.pick()`/`.shuffle()` route through the
+   * generic `method` HIR. Hand-rolled SplitMix64, mirrored in the TS shim so the
+   * two streams match bit-for-bit.
+   */
+  | { kind: "rngNew"; seed: HirExpr }
+  /**
    * The retired 045 `JSON.parse` node — no longer produced (bare `JSON.parse`
    * redirects to `parseJson<T>`). Kept as a variant only so the `usesJson` scan
    * and the exhaustive HIR switches stay total until a cleanup series removes it.

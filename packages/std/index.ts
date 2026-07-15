@@ -57,3 +57,53 @@ export function parseJson<T>(s: string): ParseResult<T> {
 export function stringifyJson<T>(v: T): string {
   return JSON.stringify(v);
 }
+
+/**
+ * `rng(seed)` — a seeded, differential-stable PRNG (series 089, #54), the
+ * explicit-determinism replacement for `Math.random`. The compiler lowers a
+ * `rng(seed)` call to `tslib::rng::Rng::new(seed)` and its methods to the Rust
+ * `Rng` surface; this TS body exists only so the differential oracle (which runs
+ * the input TS under Bun) executes the **identical** SplitMix64 stream the
+ * emitted Rust produces — bit-for-bit, from the same seed.
+ *
+ * State is a single `u64` (here a `bigint` masked to 64 bits). All arithmetic is
+ * modulo 2^64. The Rust side uses `u64` `wrapping_*`; the masks below reproduce
+ * that exactly. `next()` yields a float in `[0, 1)` via `(x >> 11) / 2^53`, an
+ * exact f64 op on both sides. Seeds are non-negative safe integers `[0, 2^53)`.
+ */
+const RNG_MASK = (1n << 64n) - 1n;
+
+export class Rng {
+  private state: bigint;
+  constructor(seed: number) {
+    this.state = BigInt(Math.trunc(seed)) & RNG_MASK;
+  }
+  next(): number {
+    this.state = (this.state + 0x9e3779b97f4a7c15n) & RNG_MASK;
+    let z = this.state;
+    z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & RNG_MASK;
+    z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & RNG_MASK;
+    z = (z ^ (z >> 31n)) & RNG_MASK;
+    return Number(z >> 11n) / 9007199254740992;
+  }
+  int(min: number, max: number): number {
+    return min + Math.floor(this.next() * (max - min));
+  }
+  pick<T>(arr: T[]): T {
+    return arr[Math.floor(this.next() * arr.length)] as T;
+  }
+  shuffle<T>(arr: T[]): T[] {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(this.next() * (i + 1));
+      const tmp = a[i] as T;
+      a[i] = a[j] as T;
+      a[j] = tmp;
+    }
+    return a;
+  }
+}
+
+export function rng(seed: number): Rng {
+  return new Rng(seed);
+}

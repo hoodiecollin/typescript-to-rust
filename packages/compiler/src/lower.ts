@@ -6158,6 +6158,27 @@ function receiverTypeOf(
   expr: Expression,
   analysis: ModuleAnalysis,
 ): RustType | null {
+  // An rng handle `.shuffle(arr)` (series 089) returns a fresh `Vec<T>` whose `T`
+  // is the source array's element type — so a chained `.join(",")` routes through
+  // the `vec` gate (the `noLib` oracle can't type a built-in method's return, so
+  // this is resolved structurally, like the String-returning-method cases below).
+  if (
+    expr.type === "CallExpression" &&
+    (expr as CallExpression).callee.type === "MemberExpression"
+  ) {
+    const cm = (expr as CallExpression).callee as MemberExpression;
+    if (
+      cm.object.type === "Identifier" &&
+      analysis.rngBindings.has((cm.object as Identifier).name) &&
+      cm.property.type === "Identifier" &&
+      (cm.property as Identifier).name === "shuffle"
+    ) {
+      const arg = (expr as CallExpression).arguments[0];
+      if (arg) {
+        return { kind: "vec", elem: elementTypeOf(arg as Expression, analysis) };
+      }
+    }
+  }
   // Tier 1 — bare identifier → bindingTypes (the fast, pre-082 path).
   if (expr.type === "Identifier") {
     const t = analysis.bindingTypes.get((expr as Identifier).name);
@@ -6578,6 +6599,7 @@ function lowerVarDecl(
     // redirects to `parseJson<T>` (series 084) — run before the annotation gate
     // so the message is the redirect, not "binding without a type annotation".
     if (d.init) redirectBareJson(d.init);
+    if (d.init) redirectBareMathRandom(d.init);
     const declKind = (decl as { kind: string }).kind;
     const gated = declKind === "const" || declKind === "let" || declKind === "var";
     if (
@@ -6586,6 +6608,13 @@ function lowerVarDecl(
       !isObviousLiteralInit(d.init) &&
       !isObjectEntriesCall(d.init) &&
       !isParseJsonShimCall(d.init, analysis) &&
+      // A `const r = rng(seed)` handle (089) is typed by construction (the
+      // `tslib::rng::Rng` struct); Rust infers it, so no annotation is required.
+      !isRngShimCall(d.init, analysis) &&
+      // A `const p = r.pick(arr)` / `const b = r.shuffle(arr)` off an rng handle
+      // (089) is typed by the method's return (`T` / `Vec<T>`); Rust infers it, so
+      // no annotation is required (like a `.map(...)` binding).
+      !isRngMethodInit(d.init, analysis) &&
       !isArrayFindCall(d.init) &&
       !isAllSettledAwait(d.init) &&
       !isSpawnInit(d.init, analysis) &&
@@ -6626,6 +6655,38 @@ function lowerVarDecl(
         init.target,
       );
     }
+    // Track an `rng(seed)` handle binding (series 089): a `const r = rng(seed)`
+    // binds a `tslib::rng::Rng`, so a later `r.next()/.int()/.pick()/.shuffle()`
+    // routes to the handle surface (checked before the generator `.next()`
+    // protocol). Recorded before those reads (statements lower top-to-bottom).
+    if (init.kind === "rngNew" && d.id.type === "Identifier") {
+      analysis.rngBindings.add((d.id as Identifier).name);
+    }
+    // A `const b = r.shuffle(arr)` binding (089) holds a fresh `Vec<T>` — record
+    // its `bindingTypes` entry (element type from the source array) so a later
+    // `b.join(",")` / `b.map(...)` resolves via the `vec` gate. The `noLib` oracle
+    // can't type the method's return, so record it structurally here.
+    if (
+      init.kind === "method" &&
+      init.name === "shuffle" &&
+      d.id.type === "Identifier" &&
+      d.init?.type === "CallExpression" &&
+      (d.init as CallExpression).callee.type === "MemberExpression" &&
+      ((d.init as CallExpression).callee as MemberExpression).object.type ===
+        "Identifier" &&
+      analysis.rngBindings.has(
+        (((d.init as CallExpression).callee as MemberExpression)
+          .object as Identifier).name,
+      )
+    ) {
+      const arg = (d.init as CallExpression).arguments[0];
+      if (arg) {
+        analysis.bindingTypes.set((d.id as Identifier).name, {
+          kind: "vec",
+          elem: elementTypeOf(arg as Expression, analysis),
+        });
+      }
+    }
     // Class inheritance (series 053c): a heterogeneous base-typed array binding
     // is `Vec<Box<dyn IA>>`. Rewrite its declared type and record it as a `dyn`
     // binding so a later `.field` read routes through a trait accessor and a
@@ -6665,10 +6726,14 @@ function lowerVarDecl(
       analysis.steppedGenerators.has(
         ((d.init as CallExpression).callee as Identifier).name,
       );
+    // An rng handle binding (089) is always `let mut` — its methods take
+    // `&mut self` (they advance the internal state), so the handle is only useful
+    // mutably even without a TS reassignment.
+    const rngHandle = init.kind === "rngNew";
     return {
       kind: "let",
       name: d.id.name,
-      mut: (mutable?.has(d.id.name) ?? false) || steppedInstance,
+      mut: (mutable?.has(d.id.name) ?? false) || steppedInstance || rngHandle,
       ty: letTy,
       init,
     };
@@ -8515,6 +8580,33 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // `rng` handle methods (series 089) — `r.next()/.int()/.pick()/.shuffle()`
+    // where `r ∈ rngBindings`. Checked FIRST so `.next()` on an rng handle wins
+    // over the 052 generator `.next()` protocol. `pick`/`shuffle` pass the array
+    // by reference (`&arr`); all four reuse the generic `method` emit. An unknown
+    // method on an rng handle is fail-loud (only next/int/pick/shuffle exist).
+    if (
+      m.object.type === "Identifier" &&
+      analysis.rngBindings.has((m.object as Identifier).name)
+    ) {
+      const RNG_METHODS = new Set(["next", "int", "pick", "shuffle"]);
+      if (!RNG_METHODS.has(methodName)) {
+        throw new UnsupportedError({
+          type: `\`.${methodName}\` on an rng handle — only \`next\`, \`int\`, \`pick\`, \`shuffle\` are available`,
+        });
+      }
+      const args = call.arguments.map((a) =>
+        methodName === "pick" || methodName === "shuffle"
+          ? refExpr(lowerExpr(a as Expression, analysis))
+          : lowerExpr(a as Expression, analysis),
+      );
+      return {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name: methodName,
+        args,
+      };
+    }
     // A static method call `Type.m(args)` off a class name (series 060) → the
     // associated-fn call `Type::m(args)`. Static-fallible `new`/method propagation
     // rides the same `fallibleMethods` path as instance methods below.
@@ -10237,6 +10329,14 @@ function lowerNumberStatic(
       : lowered;
   };
   if (global === "Math") {
+    // `Math.random()` is fail-loud (series 089) — a hidden global PRNG cannot be
+    // differential-stable against JS. Redirect to the explicit-seed `rng(seed)`
+    // shim from "@t2r/std" (mirrors the bare-`JSON.parse` redirect precedent).
+    if (methodName === "random") {
+      throw new UnsupportedError({
+        type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+      });
+    }
     // `Math.floor/ceil/round/abs/trunc/sign/sqrt` — unary native `f64` methods.
     const unary: Record<string, string> = {
       floor: "floor",
@@ -10331,6 +10431,13 @@ function lowerStdShimCall(
   if (shim === "stringifyJson") {
     return { kind: "jsonStringify", value: lowerExpr(arg, analysis) };
   }
+  // `rng(seed)` (series 089) → a `tslib::rng::Rng` handle. Exactly one argument
+  // (a `number` seed); no type argument. The binding-recording in `lowerVarDecl`
+  // marks `const r = rng(…)` in `rngBindings` so `.next()/.int()/.pick()/.shuffle()`
+  // route to the handle surface (before the generator `.next()` protocol).
+  if (shim === "rng") {
+    return { kind: "rngNew", seed: lowerExpr(arg, analysis) };
+  }
   // parseJson<T>(s): the type argument is required and must be modeled.
   const targs = (call as { typeArguments?: { params?: TSType[] } })
     .typeArguments?.params;
@@ -10409,6 +10516,38 @@ function redirectBareJson(e: Expression): void {
   }
 }
 
+/**
+ * Fail loud on a bare `Math.random` (called `Math.random()` or uncalled as a
+ * value), redirecting to the `@t2r/std` `rng(seed)` shim (series 089). Covers the
+ * binding-init gate, which runs before the init is lowered — so a
+ * `const f = Math.random` / `const x = Math.random()` gets the redirect message,
+ * not "binding without a type annotation". The expression-position forms are also
+ * caught by `lowerNumberStatic` / `lowerMember`.
+ */
+function redirectBareMathRandom(e: Expression): void {
+  let member: Expression | null = null;
+  if (e.type === "MemberExpression") {
+    member = e;
+  } else if (
+    e.type === "CallExpression" &&
+    (e as CallExpression).callee.type === "MemberExpression"
+  ) {
+    member = (e as CallExpression).callee as Expression;
+  }
+  if (!member || member.type !== "MemberExpression") return;
+  const m = member as MemberExpression;
+  if (
+    m.object.type === "Identifier" &&
+    (m.object as Identifier).name === "Math" &&
+    m.property.type === "Identifier" &&
+    (m.property as Identifier).name === "random"
+  ) {
+    throw new UnsupportedError({
+      type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+    });
+  }
+}
+
 /** Is `e` a call to the `@t2r/std` `parseJson<T>` intrinsic (series 084)? Keyed
  * off the local alias recorded from the reserved-specifier import. */
 function isParseJsonShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
@@ -10417,6 +10556,32 @@ function isParseJsonShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
   return (
     callee.type === "Identifier" &&
     analysis.stdShim.get((callee as Identifier).name) === "parseJson"
+  );
+}
+
+/** Is `e` a call to the `@t2r/std` `rng(seed)` intrinsic (series 089)? Keyed off
+ * the local alias recorded from the reserved-specifier import. */
+function isRngShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
+  if (e.type !== "CallExpression") return false;
+  const callee = (e as CallExpression).callee;
+  return (
+    callee.type === "Identifier" &&
+    analysis.stdShim.get((callee as Identifier).name) === "rng"
+  );
+}
+
+/** Is `e` a method call on a recorded rng handle (`r.next/int/pick/shuffle(...)`,
+ * series 089)? Such an init is typed by construction (Rust infers the method's
+ * return), so it is exempt from the binding-annotation gate. */
+function isRngMethodInit(e: Expression, analysis: ModuleAnalysis): boolean {
+  if (e.type !== "CallExpression") return false;
+  const callee = (e as CallExpression).callee;
+  return (
+    callee.type === "MemberExpression" &&
+    (callee as MemberExpression).object.type === "Identifier" &&
+    analysis.rngBindings.has(
+      ((callee as MemberExpression).object as Identifier).name,
+    )
   );
 }
 
@@ -11042,6 +11207,18 @@ function lowerMember(
   }
   if (member.property.type === "Identifier") {
     const prop = (member.property as Identifier).name;
+    // Bare `Math.random` as a *value* (uncalled, e.g. assigned or passed) is
+    // fail-loud (series 089) — redirect to `rng(seed)` from "@t2r/std". The
+    // *called* form `Math.random()` is caught earlier in `lowerNumberStatic`.
+    if (
+      member.object.type === "Identifier" &&
+      (member.object as Identifier).name === "Math" &&
+      prop === "random"
+    ) {
+      throw new UnsupportedError({
+        type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+      });
+    }
     // `@t2r/std` `parseJson<T>` result (series 084): `.ok` is the `ParseResult`
     // discriminant field; `.value`/`.error` are the borrowing accessors
     // `.value()`/`.error()` (usable under a proven-`ok`/`!ok` branch). Routed by

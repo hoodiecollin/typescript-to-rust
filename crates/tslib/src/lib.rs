@@ -21,6 +21,7 @@ pub mod gen;
 pub mod json;
 pub mod number;
 pub mod ops;
+pub mod rng;
 pub mod string;
 pub mod truthy;
 

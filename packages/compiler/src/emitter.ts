@@ -1698,6 +1698,8 @@ function emitExpr(expr: HirExpr): string {
       return `tslib::json::stringify(&${emitExpr(expr.value)})`;
     case "parseJson":
       return `tslib::json::ParseResult::<${emitType(expr.target)}>::parse(&${emitExpr(expr.source)})`;
+    case "rngNew":
+      return `tslib::rng::Rng::new(${emitExpr(expr.seed)})`;
     case "jsonParse": {
       const ty = expr.target ? emitType(expr.target) : "serde_json::Value";
       return `serde_json::from_str::<${ty}>(&${emitExpr(expr.source)}).expect("JSON.parse")`;

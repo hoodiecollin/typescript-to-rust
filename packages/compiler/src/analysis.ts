@@ -463,6 +463,15 @@ export interface ModuleAnalysis {
    * lowering as `const r = parseJson<T>(…)` bindings are seen.
    */
   parseResultBindings: Map<string, RustType>;
+  /**
+   * Bindings whose value is an `rng(seed)` handle (series 089) — a
+   * `tslib::rng::Rng`. A member/method access `.next()`/`.int()`/`.pick()`/
+   * `.shuffle()` on such a binding routes to the handle surface, and is checked
+   * **before** the generator `.next()` protocol so the rng handle wins. Populated
+   * during lowering as `const r = rng(seed)` bindings are seen; the binding is
+   * emitted `let mut` (the methods take `&mut self`).
+   */
+  rngBindings: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -1559,6 +1568,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // import specifier. `parseResultBindings` fills during lowering.
     stdShim: collectStdShimBindings(program),
     parseResultBindings: new Map(),
+    // Populated during lowering as `const r = rng(seed)` handle bindings are seen (089).
+    rngBindings: new Set(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
     structFields: new Map(),
     // Filled by `lower()` after `bindingTypes` (needs the resolved map/set types).

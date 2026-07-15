@@ -15,12 +15,13 @@ import type { ImportDeclaration, ImportSpecifier, Program } from "./ast";
 export const STD_SHIM_SPECIFIER = "@t2r/std";
 
 /** The intrinsic names `@t2r/std` exports (the Tier-A surface). */
-export type StdShimName = "parseJson" | "stringifyJson";
+export type StdShimName = "parseJson" | "stringifyJson" | "rng";
 
 /** The set of exported intrinsic names, for membership + "not exported" errors. */
 export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
   "parseJson",
   "stringifyJson",
+  "rng",
 ]);
 
 /**
