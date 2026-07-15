@@ -258,6 +258,13 @@ function isNonCopyMovable(ty: RustType, _classes: ReadonlySet<string>): boolean 
     case "bool":
     case "unit":
       return false;
+    case "param":
+      // A generic type parameter `T` (series 081) is opaque to the consuming-method
+      // (068) optimization: a `return this.field` of a `param` field stays `&self` +
+      // `.clone()` (derive-driven `T: Clone`) rather than a consuming owned-`self`
+      // move-out — which would prevent any later reuse of the receiver and force a
+      // spurious `Rc<RefCell<T>>` promotion (design §Open sub-details: opaque).
+      return false;
     default:
       return true;
   }

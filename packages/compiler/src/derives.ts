@@ -81,6 +81,12 @@ export function isTypeCloneable(
       return isStructCloneable(ty.name, table, seen);
     case "struct":
       return isStructCloneable(ty.name, table, seen);
+    case "param":
+      // A generic type parameter `T` (series 081): derive-driven bounds. The
+      // `#[derive(Clone)]` macro emits `impl<T: Clone> Clone for Box<T>`, and rustc
+      // adds the `T: Clone` bound per instantiation. So a `param` field is treated
+      // as cloneable here; a `Box<NonClone>` fails at that bound (accepted, design 2).
+      return true;
     default:
       return false;
   }
@@ -138,6 +144,10 @@ function isTypeDebug(
       const next = new Set(seen).add(ty.name);
       return fields.every((f) => isTypeDebug(f.ty, table, next));
     }
+    case "param":
+      // A generic `T` (series 081): `#[derive(Debug)]` bounds `T: Debug` per
+      // instantiation (derive-driven). Treated as `Debug` here.
+      return true;
     default:
       return false;
   }
@@ -193,6 +203,10 @@ export function isTypePartialEq(
       const next = new Set(seen).add(ty.name);
       return fields.every((f) => isTypePartialEq(f.ty, table, next));
     }
+    case "param":
+      // A generic `T` (series 081): `#[derive(PartialEq)]` bounds `T: PartialEq`
+      // per instantiation (derive-driven). Treated as `PartialEq` here.
+      return true;
     default:
       return false;
   }

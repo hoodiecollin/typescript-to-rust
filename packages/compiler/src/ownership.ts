@@ -100,6 +100,12 @@ function isCloneableMovable(
       return true;
     case "struct":
       return isStructCloneable(ty.name, structs);
+    case "param":
+      // A generic type parameter `T` (series 081) is non-Copy and derive-`Clone`
+      // (rustc bounds `T: Clone` per instantiation), so a `return self.field` of a
+      // `param` field clones — move/clone by the derive bound (design §Open
+      // sub-details). Opaque to the ownership pass otherwise.
+      return true;
     default:
       return false;
   }
