@@ -55,7 +55,7 @@ governs 027):
 | `reduce` | ★4 | ★3 | N/Tf | **✓ landed (039)** `.iter().fold(init, …)` (explicit init); no-init/index → later |
 | `find` | ★4 | ★2 | N | **✓ landed (048/066)** `.iter().find().cloned()` → `Option<T>` (066 undefined model) |
 | `some` / `every` | ★3 | ★1 | N | **✓ landed (039)** `.iter().any()` / `.all()` |
-| `flatMap` / `flat` | ★2 | ★3 | N/Tf | **✓ `flat()` depth-1 landed (083)** `tslib::array::flat`; `flatMap` + deep `flat(n)` stay fail-loud (array-returning callback lift deferred) |
+| `flatMap` / `flat` | ★2 | ★3 | N/Tf | **✓ `flat()` depth-1 (083), `flatMap(U[])` + literal `flat(k)` (085)** `iter().flat_map(f).collect()` (one-level callback-return unwrap) + `k` chained `tslib::array::flat`. Residual → **#59**: `U\|U[]` union callback, dynamic `flat(n)`, `flat(Infinity)`, jagged |
 | `sort` | ★4 | ★4 | **Tf** | **✓ landed (040)** default lexicographic **string** compare + comparator → `sort_by` |
 | `map` w/ index | ★3 | ★3 | **Tf** | `.enumerate()` under the hood |
 

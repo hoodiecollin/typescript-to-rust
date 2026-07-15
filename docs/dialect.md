@@ -470,8 +470,19 @@ Supported: `Object.keys`, `Object.values`, `Object.entries`, `Object.assign`.
 ## Calls, methods & array/string library
 
 Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
-`reduce`, `sort`, `find`, `some`, `every`, `at`, `slice`, `forEach`; string
-`padStart`, `padEnd`; `Object.*` (above); `JSON.*` (below).
+`reduce`, `sort`, `find`, `some`, `every`, `flatMap`, `flat`, `at`, `slice`,
+`join`, `concat`, `forEach`; string `padStart`, `padEnd`; `Object.*` (above);
+`JSON.*` (below).
+
+**`flatMap` / `flat` (series 085).** `xs.flatMap(f)` with a uniform
+`U[]`-returning callback → `xs.iter().flat_map(f).collect::<Vec<_>>()` — the
+lifted callback returns `Vec<U>` (one-level element unwrap), so `flat_map`
+flattens exactly one level to `Vec<U>`. `xs.flat(k)` for a **literal-constant**
+integer `k ≥ 1` on a uniformly `k`-deep-nested array → `k` chained depth-1
+`tslib::array::flat` calls; `xs.flat()` is depth 1. The k-level walk requires the
+receiver be nested that deep. Residuals stay fail-loud → **epic #59**: a
+`U | U[]` union callback, a dynamic (non-literal) `flat(n)`, `flat(Infinity)`,
+and jagged / under-nested arrays.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
@@ -479,11 +490,14 @@ Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
 | Call whose callee is neither identifier nor member (`(f1 \|\| f2)()`, `(arr[0])()`) | Not yet | generic `Unsupported <node>` |
 | `reduce` with no explicit initial value | Not yet | `reduce without an explicit initial value (Option-typed, a later slice)` |
 | `sort` with a non-arrow comparator | Not yet | `sort with a non-arrow comparator (pass `(a, b) => …` or no argument)` |
+| `flatMap` with a `U \| U[]` union callback (→ #59) | Not yet | `cannot lift flatMap callback: heterogeneous array-literal return (a `U \| U[]` union stays fail-loud → #59)` (or the conditional-body reject) |
+| `flat(n)` with a non-literal / `Infinity` depth (→ #59) | Not yet | generic `Unsupported <node>` (cargo-loud: `Vec` has no `.flat`) |
+| `flat(k)` on an array not nested `k` deep (jagged/under-nested → #59) | Not yet | `flat(<k>) on an array not nested <k> deep (walk hit a non-array level …; jagged/under-nested stays fail-loud → #59)` |
 | Any receiver/method combination not in the supported set | Not yet | generic `Unsupported <node>` (`lowerCall` fallback) |
 
 ### Closures & callbacks
 
-Callback arrows (to `map`/`filter`/`reduce`/`sort`/`find`/`some`/`every`/`forEach`)
+Callback arrows (to `map`/`filter`/`reduce`/`sort`/`find`/`some`/`every`/`flatMap`/`forEach`)
 must have the exact arity the method expects, take plain-identifier parameters, and
 have an expression body or a single `return`. An **`async`** adapter callback is
 rejected in-dialect (the lift is async-aware, but driving the resulting `Vec<Future>`
