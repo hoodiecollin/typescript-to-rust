@@ -93,6 +93,18 @@ flip it.
   **struct-instantiated generic `T`** (series 088), via the per-struct
   `impl tslib::ops::JsEq` — see the *Generics* section.
 
+- **`JsonValue` navigation: absent → `Null`, mismatch → fail-loud (series 090).**
+  The opt-in dynamic `JsonValue` (reached only via `@t2r/std`'s `parseJsonValue` /
+  `fromJsonValue` / `toJsonValue`, and **not** a reopening of `any`) navigates by
+  explicit accessors. An **absent object key** (`v.get("nope")`) or an
+  **out-of-bounds index** (`v.at(99)`) yields a `Null` `JsonValue` — so `.isNull()`
+  distinguishes it and `v.get("a").get("b")` chains safely — where JS would produce
+  `undefined`. But a **coercion mismatch** (`.asNumber()` on a string) or
+  **navigating into a non-container** (`.get` on a number, `.at` on an object) is
+  **fail-loud** (`panic!` in Rust / `throw` under Bun, differential-matched), where
+  JS would silently yield `undefined`/`NaN`. The safe path is a `.isNumber()` /
+  `.isArray()` / … guard first. Pinned by `packages/compiler/tests/json-value.test.ts`.
+
 ---
 
 ## Types & the accepted type surface
