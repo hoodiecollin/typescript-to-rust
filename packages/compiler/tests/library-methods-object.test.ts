@@ -68,13 +68,13 @@ console.log(merged.x);`,
   },
 ]);
 
-describe("083 catalog rows — documented divergence", () => {
-  test("JSON-UNDEF stringifyJson of an undefined field diverges (066 collapse)", async () => {
-    // ACCEPTED DIVERGENCE (series 084, resolving #57): JS OMITS an `undefined`
-    // property (`{"a":1}`), but the 066 model collapses `null ≡ undefined` to
-    // `Option::None`, which serde serializes as `null` → `{"a":1,"b":null}`.
-    // Collin's decision: accept + document (no provenance/omission now). This spec
-    // PINS the accepted behavior behind the shim.
+describe("083 catalog rows — undefined-omission (resolved in series 091)", () => {
+  test("JSON-UNDEF stringifyJson OMITS an undefined-only field (Rust === JS)", async () => {
+    // RESOLVED (series 091, epic #59 increment 2): what series 084 pinned as an
+    // accepted divergence — `b: number | undefined` serializing as `null` — is now
+    // fixed. An `undefined`-only field emits `#[serde(skip_serializing_if]` so serde
+    // OMITS the key, matching JS. (A `null`-bearing field still keeps `null`; see
+    // `undefined-omission.test.ts` for the full matrix.)
     const src = `import { stringifyJson } from "@t2r/std";
 interface P { a: number; b: number | undefined; }
 const p: P = { a: 1, b: undefined };
@@ -82,8 +82,8 @@ console.log(stringifyJson(p));`;
     const rust = compile(src);
     const rr = await runRust(rust);
     expect(rr.ok).toBe(true);
-    // Rust renders the None as `null`; JS would omit `b`. Divergence pinned.
-    expect(rr.stdout.trim()).toBe('{"a":1,"b":null}');
+    // Both sides now omit the undefined key — no divergence.
+    expect(rr.stdout.trim()).toBe('{"a":1}');
     expect(await runTs(src)).toBe('{"a":1}');
   });
 });
