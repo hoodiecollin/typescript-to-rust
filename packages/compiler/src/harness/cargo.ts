@@ -10,6 +10,8 @@
  * Rust masquerade as a passing oracle.
  */
 
+import { join } from "node:path";
+
 /** A single source span attached to a rustc diagnostic. */
 export interface DiagnosticSpan {
   file_name: string;
@@ -188,13 +190,19 @@ export async function cargoCheck(cwd: string): Promise<CargoResult> {
 }
 
 /**
- * `cargo run`, returning the program's stdout. Checks the *binary* target first
- * so compile errors surface as structured diagnostics rather than opaque build
- * failure, then runs the binary for its output. The check step warms/fetches
- * dependencies, so the run itself can stay offline.
+ * Build the binary target and run it, returning the program's stdout.
+ *
+ * A single `cargo build --bins` (with structured JSON diagnostics) does the
+ * codegen+link, then we exec the produced binary **directly**. This replaces the
+ * old two-invocation path (`cargo check --bins` *then* `cargo run`), which paid
+ * for a second cargo process that re-fingerprinted the whole dependency graph
+ * and re-ran codegen. Compile errors still surface as structured diagnostics
+ * (build emits the same JSON as check); a clean build guarantees the binary
+ * exists. Exec-ing the binary directly also yields pure program stdout, with no
+ * cargo status noise to strip.
  */
 export async function cargoRun(cwd: string): Promise<CargoResult> {
-  const build = await runCargo(["check", "--bins"], cwd);
+  const build = await runCargo(["build", "--bins"], cwd);
   const diagnostics = parseDiagnostics(build.stdout);
   const checked = classify(
     build.exitCode,
@@ -204,11 +212,108 @@ export async function cargoRun(cwd: string): Promise<CargoResult> {
   );
   if (!checked.ok) return checked;
 
-  const { exitCode, stdout, stderr } = await spawn(
-    ["cargo", "run", "--offline", "--quiet", "--color=never"],
-    cwd,
-  );
+  const bin = join(cwd, "target", "debug", "ttr_scratch");
+  const { exitCode, stdout, stderr } = await spawn([bin], cwd);
   return classify(exitCode, diagnostics, stdout, stderr);
+}
+
+/** Run `fn`s over `items` with at most `limit` in flight; preserves order. */
+export async function mapBounded<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i] as T, i);
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
+  return out;
+}
+
+/** One `compiler-message` / `compiler-artifact` line, with its owning target. */
+interface TargetedMessage extends CargoMessage {
+  target?: { name?: string; kind?: string[] };
+  executable?: string | null;
+}
+
+/**
+ * Batch-build many example programs in a single cargo invocation and run the
+ * ones that compiled.
+ *
+ * All programs are `examples/<id>.rs` in the shared scratch crate, so the heavy
+ * dependency rlibs are compiled **once** and reused across every example (and the
+ * carve-out programs that are *expected* to fail). `--keep-going` builds every
+ * example that can compile even when others fail; `--message-format=json`
+ * attributes each compile error to its example target, and each produced binary
+ * to its `executable` path. Programs that build are executed (bounded
+ * concurrency) for their stdout; programs that fail to build — or that build but
+ * exit non-zero at runtime — come back as `ok: false`, which is exactly what the
+ * fail-loud carve-out specs assert. Returns a map keyed by `id`.
+ */
+export async function cargoBuildExamples(
+  cwd: string,
+  ids: string[],
+): Promise<Map<string, CargoResult>> {
+  const build = await runCargo(["build", "--examples", "--keep-going"], cwd);
+
+  const execById = new Map<string, string>();
+  const errsById = new Map<string, RustDiagnostic[]>();
+  for (const line of build.stdout.split("\n")) {
+    const t = line.trim();
+    if (!t || t[0] !== "{") continue;
+    let m: TargetedMessage;
+    try {
+      m = JSON.parse(t) as TargetedMessage;
+    } catch {
+      continue;
+    }
+    const name = m.target?.name;
+    if (!name) continue;
+    if (
+      m.reason === "compiler-artifact" &&
+      m.target?.kind?.includes("example") &&
+      m.executable
+    ) {
+      execById.set(name, m.executable);
+    } else if (
+      m.reason === "compiler-message" &&
+      m.message?.level === "error"
+    ) {
+      const [d] = parseDiagnostics(t);
+      if (d) (errsById.get(name) ?? errsById.set(name, []).get(name)!).push(d);
+    }
+  }
+
+  const out = new Map<string, CargoResult>();
+  await mapBounded(ids, 8, async (id) => {
+    const exe = execById.get(id);
+    if (exe) {
+      const { exitCode, stdout, stderr } = await spawn([exe], cwd);
+      out.set(id, classify(exitCode, [], stdout, stderr));
+      return;
+    }
+    const errors = errsById.get(id) ?? [];
+    out.set(id, {
+      ok: false,
+      exitCode: 1,
+      diagnostics: errors,
+      errors,
+      warnings: [],
+      stdout: "",
+      stderr: "",
+    });
+  });
+  return out;
 }
 
 /** Format a Rust source string via `rustfmt` (stdin → stdout). */

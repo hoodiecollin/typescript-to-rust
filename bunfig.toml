@@ -1,0 +1,7 @@
+# Bun configuration (repo root).
+#
+# The test preload raises the per-test timeout globally — the cargo-backed
+# verification harness can take several seconds per unbatched test on a cold
+# `.scratch` target, and bun's 5s default produced spurious timeout flakes.
+[test]
+preload = ["./packages/compiler/tests/_support/setup.ts"]

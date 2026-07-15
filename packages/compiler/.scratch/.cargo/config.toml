@@ -1,0 +1,10 @@
+# Perf (series-089 harness work): the emitted binaries are compiled once, run
+# once, and diffed — Cranelift codegen is wired via the pinned nightly toolchain
+# (rust-toolchain.toml). rust-lld was evaluated and dropped: it aborts linking on
+# aarch64-apple-darwin. On this hardware Cranelift measured ~even with LLVM for the
+# tiny programs the suite emits; it is kept for potential wins on larger output.
+[unstable]
+codegen-backend = true
+
+[profile.dev]
+codegen-backend = "cranelift"

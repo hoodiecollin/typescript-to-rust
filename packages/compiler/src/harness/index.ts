@@ -15,9 +15,15 @@
  * clobber each other.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type CargoResult, cargoCheck, cargoRun, rustfmt } from "./cargo";
+import {
+  type CargoResult,
+  cargoBuildExamples,
+  cargoCheck,
+  cargoRun,
+  rustfmt,
+} from "./cargo";
 
 const SCRATCH_DIR = join(import.meta.dir, "..", "..", ".scratch");
 
@@ -84,6 +90,38 @@ export class RustProject {
       this.write("lib.rs", "");
       this.write("main.rs", source);
       return cargoRun(this.dir);
+    });
+  }
+
+  /**
+   * Compile many programs as `examples/<id>.rs` in ONE cargo invocation and run
+   * the ones that compiled. The heavy dependency rlibs are built once and shared
+   * across the whole batch, and cargo parallelizes the per-example codegen across
+   * cores — far cheaper than N separate `run()` calls. Returns a map keyed by the
+   * program `id` (each result's `.ok`/`.stdout`/`.errors` mirror `run()`).
+   */
+  runBatch(
+    programs: { id: string; src: string }[],
+  ): Promise<Map<string, CargoResult>> {
+    return this.lock(async () => {
+      // Reset the shared bin/lib so a program left by a prior run() can't break
+      // the example build, and rewrite the examples dir from scratch so only
+      // this batch's programs are present.
+      this.write("lib.rs", "");
+      this.write("main.rs", "fn main() {}");
+      const exDir = join(this.dir, "examples");
+      rmSync(exDir, { recursive: true, force: true });
+      mkdirSync(exDir, { recursive: true });
+      for (const p of programs) {
+        writeFileSync(
+          join(exDir, `${p.id}.rs`),
+          p.src.endsWith("\n") ? p.src : `${p.src}\n`,
+        );
+      }
+      return cargoBuildExamples(
+        this.dir,
+        programs.map((p) => p.id),
+      );
     });
   }
 }

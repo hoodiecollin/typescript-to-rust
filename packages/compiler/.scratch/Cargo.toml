@@ -71,4 +71,14 @@ path = "src/lib.rs"
 name = "ttr_scratch"
 path = "src/main.rs"
 
+# Verification-harness profile (series-089 perf work). The emitted binaries exist
+# only to run once and have their stdout diffed — they are never debugged. So:
+#   - debug = 0        → no debuginfo codegen, and skips the macOS `dsymutil` step.
+#   - panic = "abort"  → no unwind landing pads (faster codegen + link). A panic
+#                        still prints "thread 'main' panicked …" to stderr and
+#                        exits non-zero, so fail-loud specs observe it unchanged.
+# These cut per-test compile+link time without touching correctness.
+[profile.dev]
+debug = 0
+
 [workspace]
