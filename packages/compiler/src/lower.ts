@@ -63,6 +63,7 @@ import { DialectError, UnsupportedError } from "./errors";
 import type {
   Borrow,
   ElemMode,
+  GenericParam,
   HirArg,
   HirCatchArm,
   HirClass,
@@ -100,6 +101,18 @@ export { DialectError, UnsupportedError };
 const UNIT: RustType = { kind: "unit" };
 /** The default fallible error type: the `Error` message as a `String`. */
 const ERR_STRING: RustType = { kind: "String" };
+
+/**
+ * A `<T, U extends I>` type-parameter declaration on a class/method/fn (series
+ * 081) — the oxc `TSTypeParameterDeclaration` shape we read: each param's name and
+ * its (optional) `extends` constraint.
+ */
+interface TSTypeParamDecl {
+  params: {
+    name: { name: string };
+    constraint?: TSType | null;
+  }[];
+}
 
 /** Wrap an ok-type in `Result<ok, err>`. */
 function resultType(ok: RustType, err: RustType): RustType {
@@ -1435,16 +1448,70 @@ function takeDirectives(
 
 // ── Items ────────────────────────────────────────────────────────────────────
 
+/**
+ * Collect a **method/function's own** generic type params (series 081): the `<U>`
+ * of `first<U>(xs: U[]): U`. Unbounded only in slice 1 — a bound on a fn/method
+ * type param is fail-loud (deferred; class-level `<T extends I>` is where bounds
+ * land). Returns the bare names, and pushes them onto `analysis.typeParams` (the
+ * caller pops via `withFnGenerics`).
+ */
+function fnGenericNames(
+  fn: { typeParameters?: TSTypeParamDecl | null },
+): string[] {
+  const tp = fn.typeParameters;
+  if (!tp) return [];
+  return tp.params.map((param) => {
+    if (param.constraint) {
+      throw new UnsupportedError({
+        type: `a bound on the method/function type parameter '${param.name.name}' (a bounded generic is only supported on a class type parameter '<T extends I>')`,
+      });
+    }
+    return param.name.name;
+  });
+}
+
+/**
+ * Run `body` with `names` added to the in-scope generic type-param set (series
+ * 081), restoring the prior set after. Used for a generic method/fn's signature +
+ * body; the class's own `<T>` is already in scope (pushed by `lowerClass`).
+ */
+function withFnGenerics<T>(
+  analysis: ModuleAnalysis,
+  names: string[],
+  body: () => T,
+): T {
+  if (names.length === 0) return body();
+  const prev = analysis.typeParams;
+  analysis.typeParams = new Set([...prev, ...names]);
+  try {
+    return body();
+  } finally {
+    analysis.typeParams = prev;
+  }
+}
+
 function lowerFunction(
   func: FunctionDeclaration,
   analysis: ModuleAnalysis,
 ): HirFn {
   if (!func.id) throw new UnsupportedError(func);
-  const name = func.id.name;
+  const generics = fnGenericNames(func as { typeParameters?: TSTypeParamDecl | null });
+  return withFnGenerics(analysis, generics, () =>
+    lowerFunctionInner(func, analysis, generics),
+  );
+}
+
+function lowerFunctionInner(
+  func: FunctionDeclaration,
+  analysis: ModuleAnalysis,
+  generics: string[],
+): HirFn {
+  const name = (func.id as Identifier).name;
   const info = analysis.fns.get(name);
+  const genericsOpt = generics.length > 0 ? generics : undefined;
 
   const params = func.params.map((p, i) =>
-    lowerParam(p, info?.params[i], analysis.structs),
+    lowerParam(p, info?.params[i], analysis.structs, analysis.typeParams),
   );
   // Class inheritance (series 053b, INH10): a base-typed param is monomorphic —
   // `impl IA` (static dispatch, zero-cost). Rewrites the param type and records
@@ -1457,10 +1524,14 @@ function lowerFunction(
   if (!func.returnType) {
     throw new UnsupportedError({
       type: `function '${name}' without a return type annotation`,
-      start: func.id.start,
+      start: func.id?.start,
     });
   }
-  const ret = lowerType(func.returnType.typeAnnotation, analysis.structs);
+  const ret = lowerType(
+    func.returnType.typeAnnotation,
+    analysis.structs,
+    analysis.typeParams,
+  );
 
   if (!func.body)
     throw new UnsupportedError({ type: "function without a body" });
@@ -1491,10 +1562,11 @@ function lowerFunction(
       params,
       ret: resultType(ret, programErrType(analysis)),
       body: makeFallible(body, ret),
+      generics: genericsOpt,
     };
   }
 
-  return { kind: "fn", name, isAsync: func.async, params, ret, body };
+  return { kind: "fn", name, isAsync: func.async, params, ret, body, generics: genericsOpt };
 }
 
 /**
@@ -3583,6 +3655,88 @@ function lowerClass(
   const interfaceImplsOpt =
     interfaceImpls.length > 0 ? interfaceImpls : undefined;
   const name = decl.id.name;
+  // Generic type parameters (series 081): `class Box<T>` / `<T extends I>` /
+  // `<A, B>`. Collect the params + their (behavioral-interface) bounds, and push
+  // the names into `analysis.typeParams` for the duration of this class's lowering
+  // so field/method/ctor `lowerType` resolves a bare `T` to a `{kind:"param"}`.
+  const generics = collectClassGenerics(decl, analysis);
+  const prevTypeParams = analysis.typeParams;
+  analysis.typeParams =
+    generics.length > 0
+      ? new Set([...prevTypeParams, ...generics.map((g) => g.name)])
+      : prevTypeParams;
+  try {
+    return lowerClassBody(decl, analysis, {
+      name,
+      generics,
+      interfaceImpls,
+      interfaceImplsOpt,
+    });
+  } finally {
+    analysis.typeParams = prevTypeParams;
+  }
+}
+
+/**
+ * Collect a class's declared generic type params + bounds (series 081). Each
+ * `<T>` → `{name}`; `<T extends I>` where `I` is a **behavioral interface** →
+ * `{name, bound: traitNameOf(I)}` (reuses 071). Fail-loud residuals (slice 3):
+ * a **class** as a bound, a **multi-bound** (`A & B`), and any non-behavioral
+ * (data-only / unknown) interface bound — none has a Rust trait to bind.
+ */
+function collectClassGenerics(
+  decl: ClassDeclaration,
+  analysis: ModuleAnalysis,
+): GenericParam[] {
+  const tp = (decl as { typeParameters?: TSTypeParamDecl }).typeParameters;
+  if (!tp) return [];
+  return tp.params.map((param) => {
+    const pname = param.name.name;
+    const constraint = param.constraint;
+    if (!constraint) return { name: pname };
+    // A multi-bound `<T extends A & B>` — no single Rust trait. Fail-loud (slice 3).
+    if ((constraint as { type?: string }).type === "TSIntersectionType") {
+      throw new UnsupportedError({
+        type: `multi-bound generic '<${pname} extends A & B>' (only a single behavioral-interface bound is supported)`,
+      });
+    }
+    if ((constraint as { type?: string }).type !== "TSTypeReference") {
+      throw new UnsupportedError({
+        type: `generic bound on '${pname}' that is not a behavioral interface`,
+      });
+    }
+    const bname = (constraint as { typeName: { name: string } }).typeName.name;
+    // A **class** as a bound isn't a trait (a class isn't a trait unless it is an
+    // inheritance base with a synthesized trait) — fail-loud (slice 3 / #40 tail).
+    if (analysis.classes.has(bname)) {
+      throw new UnsupportedError({
+        type: `class '${bname}' used as a generic bound '<${pname} extends ${bname}>' (a class isn't a trait bound)`,
+      });
+    }
+    // Only a **behavioral** interface has a synthesized trait to bind (071). A
+    // data-only / unknown interface bound has no trait → fail-loud.
+    if (!analysis.behavioralInterfaces.has(bname)) {
+      throw new UnsupportedError({
+        type: `generic bound '<${pname} extends ${bname}>' where '${bname}' is not a behavioral interface (no trait to bind)`,
+      });
+    }
+    return { name: pname, bound: traitNameOf(bname) };
+  });
+}
+
+/** The class-body lowering, split from `lowerClass` so the generic-scope push/pop
+ * wraps it (series 081). `pre` carries the already-computed `implements` data. */
+function lowerClassBody(
+  decl: ClassDeclaration,
+  analysis: ModuleAnalysis,
+  pre: {
+    name: string;
+    generics: GenericParam[];
+    interfaceImpls: NonNullable<HirClass["interfaceImpls"]>;
+    interfaceImplsOpt: NonNullable<HirClass["interfaceImpls"]> | undefined;
+  },
+): HirClass {
+  const { name, generics, interfaceImplsOpt } = pre;
   const structs = analysis.structs;
   // Class inheritance (series 053). A subclass `class B extends A` gains a
   // synthetic `base: A` embed (prepended so `super(...)` reads first, like Rust
@@ -3624,7 +3778,7 @@ function lowerClass(
   // Series 070: resolve each instance field's construction source (ctor-assigned /
   // field initializer / `None`) and its Rust type in one pass. Parameter
   // properties are folded in (marked ctor-assigned) in declaration order.
-  const fieldPlans = planClassFields(decl, structs);
+  const fieldPlans = planClassFields(decl, structs, analysis.typeParams);
   const fields = fieldPlans.map((p) => ({ name: p.name, ty: p.ty }));
   // A field initializer must be a construction constant — reject a `this`-/
   // cross-field-referencing one (design §Open sub-details: fail-loud).
@@ -3714,6 +3868,22 @@ function lowerClass(
     }
     ctor = synthesizeConstructor(name, fields, fieldPlans, analysis);
   }
+  // Series 081: a generic class's constructor returns the *parameterized* type
+  // `Boxed<T>` (inside `impl<T> Boxed<T>`), not the bare `Boxed`. The ctor return
+  // type is the class struct type (`Result`-wrapped when fallible); attach the
+  // generic args to it so `emitType` renders `Boxed<T>` / `Result<Boxed<T>, E>`.
+  if (generics.length > 0 && ctor) {
+    const args: RustType[] = generics.map((g) => ({ kind: "param", name: g.name }));
+    const withArgs = (ty: RustType): RustType =>
+      ty.kind === "struct" && ty.name === name ? { ...ty, args } : ty;
+    ctor = {
+      ...ctor,
+      ret:
+        ctor.ret.kind === "result"
+          ? { ...ctor.ret, ok: withArgs(ctor.ret.ok) }
+          : withArgs(ctor.ret),
+    };
+  }
   // Throwing / `?`-propagation inside methods and constructors is supported
   // (series 023): the fallibility fixpoint types the method/ctor as `Result` and
   // `?`-propagates fallible method/`new` calls.
@@ -3728,7 +3898,16 @@ function lowerClass(
   // module's `dynFieldReads` are known.
   const staticsOpt = statics.length > 0 ? statics : undefined;
   const staticConstsOpt = staticConsts.length > 0 ? staticConsts : undefined;
+  const genericsOpt = generics.length > 0 ? generics : undefined;
   const inChain = !!baseName || analysis.baseClasses.has(name);
+  // A generic class combined with inheritance or `implements` is out of scope for
+  // slices 1+2 (the `impl IA for Name` blocks don't carry generic clauses yet) —
+  // fail loud rather than emit a mis-parameterized trait impl (a later slice).
+  if (genericsOpt && (inChain || interfaceImplsOpt)) {
+    throw new UnsupportedError({
+      type: `generic class '${name}' that also participates in inheritance / \`implements\` (a generic + trait-impl combination is not yet supported)`,
+    });
+  }
   if (!inChain) {
     return {
       kind: "class",
@@ -3737,6 +3916,7 @@ function lowerClass(
       ctor,
       methods,
       dispose,
+      generics: genericsOpt,
       interfaceImpls: interfaceImplsOpt,
       statics: staticsOpt,
       staticConsts: staticConstsOpt,
@@ -4215,9 +4395,9 @@ function lowerConstructor(
         kind: "ident",
         name: p.parameter.name,
       });
-      return lowerParam(p.parameter, undefined, structs);
+      return lowerParam(p.parameter, undefined, structs, analysis.typeParams);
     }
-    return lowerParam(p, undefined, structs);
+    return lowerParam(p, undefined, structs, analysis.typeParams);
   });
   if (!fn.body) {
     throw new UnsupportedError({ type: "constructor without a body" });
@@ -4643,6 +4823,23 @@ function lowerMethod(
   className: string,
   analysis: ModuleAnalysis,
 ): HirFn {
+  // A generic method's own `<U>` (series 081) is in scope for its signature/body
+  // only — pushed onto `analysis.typeParams` (which already carries the class's
+  // `<T>`), popped after. Unbounded only (a fn-type-param bound is fail-loud).
+  const generics = fnGenericNames(
+    member.value as { typeParameters?: TSTypeParamDecl | null },
+  );
+  return withFnGenerics(analysis, generics, () =>
+    lowerMethodInner(member, className, analysis, generics),
+  );
+}
+
+function lowerMethodInner(
+  member: MethodDefinition,
+  className: string,
+  analysis: ModuleAnalysis,
+  generics: string[],
+): HirFn {
   const fn = member.value;
   const name = member.key.name;
   // async methods (series 054a): `analysis.asyncMethods` records the method name
@@ -4652,10 +4849,13 @@ function lowerMethod(
   // exactly like a free async fn. A bare un-awaited async method call stays
   // fail-loud in `lowerCall` (un-polled future → spawn is 051c).
   const structs = analysis.structs;
+  const genericsOpt = generics.length > 0 ? generics : undefined;
   // Method-parameter borrow inference (series 060): each param resolves to
   // `&T`/`&mut T`/owned via the same analysis free fns use (`analysis.methodParams`).
   const info = analysis.methodParams.get(name);
-  const params = fn.params.map((p, i) => lowerParam(p, info?.[i], structs));
+  const params = fn.params.map((p, i) =>
+    lowerParam(p, info?.[i], structs, analysis.typeParams),
+  );
   // Class inheritance (series 053b, INH10): a base-typed method param → `impl IA`.
   applyBaseParamTraits(params, analysis);
   // A missing return type fails loud (series 046c); an explicit `: void` still
@@ -4666,7 +4866,7 @@ function lowerMethod(
       start: (member.key as { start?: number }).start,
     });
   }
-  const ret = lowerType(fn.returnType.typeAnnotation, structs);
+  const ret = lowerType(fn.returnType.typeAnnotation, structs, analysis.typeParams);
   if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
   const body = lowerStatements(
     takeDirectives(fn.body.body),
@@ -4686,15 +4886,26 @@ function lowerMethod(
       ret: resultType(ret, programErrType(analysis)),
       body: makeFallible(body, ret),
       recv,
+      generics: genericsOpt,
     };
   }
-  return { kind: "fn", name, isAsync: fn.async, params, ret, body, recv };
+  return {
+    kind: "fn",
+    name,
+    isAsync: fn.async,
+    params,
+    ret,
+    body,
+    recv,
+    generics: genericsOpt,
+  };
 }
 
 function lowerParam(
   p: Identifier,
   info: { ownership: "move" | "ref" | "refMut" } | undefined,
   structs: Set<string>,
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
 ): HirParam {
   // A default param `(x: T = d)` is an `AssignmentPattern` (series 066): type the
   // param as `Option<T>` (a present arg is `Some`-wrapped at the call, an omitted
@@ -4711,6 +4922,7 @@ function lowerParam(
     const inner = lowerType(
       (left.typeAnnotation as TSTypeAnnotation).typeAnnotation,
       structs,
+      typeParams,
     );
     const ty: RustType = inner.kind === "option" ? inner : { kind: "option", inner };
     return { name: left.name, ty };
@@ -4719,7 +4931,7 @@ function lowerParam(
   // param `Point { x, y }: Point`. Requires a *named struct* type to pattern
   // against; taken owned (the borrow inference is name-based and can't see it).
   if ((p as { type?: string }).type === "ObjectPattern") {
-    return lowerDestructuringParam(p as unknown as ObjectPattern, structs);
+    return lowerDestructuringParam(p as unknown as ObjectPattern, structs, typeParams);
   }
   if (!p.typeAnnotation) {
     throw new UnsupportedError({
@@ -4727,7 +4939,7 @@ function lowerParam(
       start: p.start,
     });
   }
-  return lowerScalarParam(p, info, structs);
+  return lowerScalarParam(p, info, structs, typeParams);
 }
 
 /**
@@ -4739,13 +4951,14 @@ function lowerParam(
 function lowerDestructuringParam(
   p: ObjectPattern,
   structs: Set<string>,
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
 ): HirParam {
   if (!p.typeAnnotation) {
     throw new UnsupportedError({
       type: "a destructuring param without a (named-struct) type annotation",
     });
   }
-  const ty = lowerType(p.typeAnnotation.typeAnnotation, structs);
+  const ty = lowerType(p.typeAnnotation.typeAnnotation, structs, typeParams);
   if (ty.kind !== "struct") {
     throw new UnsupportedError({
       type: "a destructuring param whose type is not a named struct",
@@ -4801,6 +5014,7 @@ function lowerScalarParam(
   p: Identifier,
   info: { ownership: "move" | "ref" | "refMut" } | undefined,
   structs: Set<string>,
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
 ): HirParam {
   // An optional param `(x?: T)` is `Option<T>` (series 042); `(x: T | undefined)`
   // already lowers to `option` via the union in `lowerType`. (`typeAnnotation` is
@@ -4808,6 +5022,7 @@ function lowerScalarParam(
   const annotated = lowerType(
     (p.typeAnnotation as TSTypeAnnotation).typeAnnotation,
     structs,
+    typeParams,
   );
   const optional =
     (p as { optional?: boolean }).optional === true ||
@@ -5678,6 +5893,24 @@ function optionExprType(
       .get(owner)
       ?.find((f) => f.name === field)?.ty;
     return fty?.kind === "option" ? fty : null;
+  }
+  return null;
+}
+
+/**
+ * The generic-type-parameter type of an operand expression when it is provably a
+ * bare `T` (series 081), else null. An identifier resolves through `bindingTypes`
+ * (a method/fn param typed `T`, recorded `{kind:"param"}` by the scope-aware
+ * `collectBindingTypes`). Drives the operator-on-`T` fail-loud guard. A non-`param`
+ * operand returns null (the caller's default path), never a guess.
+ */
+function paramTypeOfOperand(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): Extract<RustType, { kind: "param" }> | null {
+  if (e.type === "Identifier") {
+    const t = analysis.bindingTypes.get((e as Identifier).name);
+    if (t?.kind === "param") return t;
   }
   return null;
 }
@@ -6703,8 +6936,9 @@ function fieldRustType(
   annotation: TSType,
   optional: boolean,
   structs: Set<string>,
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
 ): RustType {
-  const base = lowerType(annotation, structs);
+  const base = lowerType(annotation, structs, typeParams);
   return optional && base.kind !== "option"
     ? { kind: "option", inner: base }
     : base;
@@ -6793,6 +7027,7 @@ function rejectImpureInitializer(field: string, expr: Expression): void {
 function planClassFields(
   decl: ClassDeclaration,
   structs: Set<string>,
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
 ): ClassFieldPlan[] {
   const ctor = decl.body.body.find(
     (m): m is MethodDefinition =>
@@ -6809,7 +7044,12 @@ function planClassFields(
     // literal type inferred from the initializer (`x = 5` → `f64`) via the shared
     // numeric literal pass (`inferInitType`) — never a parallel path.
     let declared: RustType | null = f.typeAnnotation
-      ? fieldRustType(f.typeAnnotation.typeAnnotation, f.optional === true, structs)
+      ? fieldRustType(
+          f.typeAnnotation.typeAnnotation,
+          f.optional === true,
+          structs,
+          typeParams,
+        )
       : init
         ? inferInitType(init, structs)
         : null;
@@ -6835,7 +7075,7 @@ function planClassFields(
     if (p.type !== "TSParameterProperty" || !p.parameter.typeAnnotation) continue;
     plans.push({
       name: p.parameter.name,
-      ty: lowerType(p.parameter.typeAnnotation.typeAnnotation, structs),
+      ty: lowerType(p.parameter.typeAnnotation.typeAnnotation, structs, typeParams),
       source: "ctor",
     });
   }
@@ -7078,6 +7318,19 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
               type: `arithmetic on an un-narrowed optional — narrow it (\`if (x !== undefined)\`) or coerce (\`x ?? d\` / \`x!\`) first`,
             });
           }
+        }
+      }
+      // Fail-loud (series 081, the #44 wall): any operator on a bare generic `T`
+      // (`a + b`, `a < b`, `a === b` where `a,b: T`). JS `+`/`<`/`===` dispatch on
+      // the operands' *runtime* type, which a monomorphized generic definition
+      // fundamentally cannot know at the definition site — and the syntax-only
+      // front end has no TS type layer to resolve it. Compute over a generic value
+      // by calling methods on a **bounded** `T` (`<T extends I>`) instead.
+      for (const side of [b.left, b.right]) {
+        if (paramTypeOfOperand(side, analysis)) {
+          throw new UnsupportedError({
+            type: `operator '${b.operator}' on a generic type parameter 'T' — a monomorphized generic can't know T's runtime type at the definition site (the #44 type-layer wall). Compute over a bounded 'T' (\`<T extends I>\`) by calling its interface methods instead.`,
+          });
         }
       }
       return {
@@ -7956,6 +8209,15 @@ function lowerCall(
   analysis: ModuleAnalysis,
   awaited = false,
 ): HirExpr {
+  // Explicit call-site type arguments `identity<number>(5)` (series 081) — the
+  // dialect infers a generic fn's type params from its arguments (rustc does the
+  // same), so an explicit source-level `<…>` on a call is fail-loud. Checked before
+  // any routing so the guard is uniform across free-fn / method calls.
+  if ((call as { typeArguments?: unknown }).typeArguments) {
+    throw new UnsupportedError({
+      type: "explicit type arguments on a generic call `f<…>(…)` (calls are inference-only — drop the `<…>`; rustc infers the type parameter from the arguments)",
+    });
+  }
   // `setTimeout(fn, ms)` — a fire-and-forget delayed task (series 051c
   // increment 1) → `tokio::spawn(async move { sleep(ms).await; <fn body>; })`.
   // `fn` is an inline non-async arrow (its body is inlined) or a bare
@@ -9195,12 +9457,16 @@ function collectBindingTypes(
   const typeFrom = (
     annotation: unknown,
     init: Expression | null,
+    scopeParams: Set<string>,
   ): RustType | null => {
     if (isAstNode(annotation)) {
       const inner = (annotation as { typeAnnotation?: unknown }).typeAnnotation;
       if (isAstNode(inner)) {
         try {
-          return lowerType(inner as unknown as TSType, structs);
+          // Series 081: pass the enclosing generic scope so a `T`-typed param
+          // records `{kind:"param"}` (drives the operator-on-`T` fail-loud guard),
+          // instead of being dropped (a bare `T` would otherwise throw → null).
+          return lowerType(inner as unknown as TSType, structs, scopeParams);
         } catch {
           return null;
         }
@@ -9208,18 +9474,40 @@ function collectBindingTypes(
     }
     return init ? inferInitType(init, structs) : null;
   };
-  const visit = (node: unknown): void => {
+  // Read a `<T, U extends I>` declaration's param names (series 081) for the
+  // in-scope generic set; a bound is ignored here (name-collection only).
+  const declNames = (tp: unknown): string[] =>
+    isAstNode(tp)
+      ? ((tp as { params?: { name?: { name?: string } }[] }).params ?? [])
+          .map((p) => p.name?.name)
+          .filter((n): n is string => typeof n === "string")
+      : [];
+  // `scopeParams` accumulates the generic type-param names in scope as the walk
+  // descends into a generic class/method/fn (series 081).
+  const visit = (node: unknown, scopeParams: Set<string>): void => {
     if (Array.isArray(node)) {
-      node.forEach(visit);
+      node.forEach((n) => visit(n, scopeParams));
       return;
     }
     if (!isAstNode(node)) return;
+    // Extend the generic scope for a class / generic fn / generic method body.
+    let scope = scopeParams;
+    if (
+      node.type === "ClassDeclaration" ||
+      node.type === "FunctionDeclaration" ||
+      node.type === "FunctionExpression" ||
+      node.type === "ArrowFunctionExpression"
+    ) {
+      const names = declNames((node as { typeParameters?: unknown }).typeParameters);
+      if (names.length > 0) scope = new Set([...scopeParams, ...names]);
+    }
     if (node.type === "VariableDeclarator") {
       const id = node.id;
       if (isAstNode(id) && id.type === "Identifier") {
         const ty = typeFrom(
           (id as { typeAnnotation?: unknown }).typeAnnotation,
           (node.init as Expression | null) ?? null,
+          scope,
         );
         if (ty) out.set(id.name as string, ty);
       }
@@ -9234,6 +9522,7 @@ function collectBindingTypes(
           const ty = typeFrom(
             (p as { typeAnnotation?: unknown }).typeAnnotation,
             null,
+            scope,
           );
           if (ty) out.set(p.name as string, ty);
         }
@@ -9241,10 +9530,10 @@ function collectBindingTypes(
     }
     for (const key in node) {
       if (key === "type") continue;
-      visit(node[key]);
+      visit(node[key], scope);
     }
   };
-  visit(program.body);
+  visit(program.body, EMPTY_TYPE_PARAMS);
   return out;
 }
 
@@ -10499,6 +10788,19 @@ function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
     throw new UnsupportedError({ type: "new with a non-identifier callee" });
   }
   const className = (expr.callee as Identifier).name;
+  // Explicit call-site type arguments `new Box<string>(x)` (series 081) — the
+  // dialect is inference-only (rustc infers `T` from the ctor arg), so an explicit
+  // arg is fail-loud. (`Map`/`Set` carry their own turbofish path below and are
+  // excluded — their type args drive the collection element type, not a generic.)
+  if (
+    className !== "Map" &&
+    className !== "Set" &&
+    (expr as { typeArguments?: unknown }).typeArguments
+  ) {
+    throw new UnsupportedError({
+      type: `explicit type arguments on \`new ${className}<…>(…)\` (construction is inference-only — drop the \`<…>\`; rustc infers T from the argument)`,
+    });
+  }
   // `new Map<K, V>()` / `new Set<T>()` (series 061) → an empty `IndexMap`/`IndexSet`
   // with a turbofish so an un-annotated binding still infers. A non-empty
   // initializer (`new Map([...])` / `new Set(items)`, series 072) carries an
@@ -10787,7 +11089,11 @@ function recordDynFieldRead(
  * — no `f64` field — is enforced later in `collectHashEqStructs`); `boolean` →
  * `bool`. Anything else is fail-loud (unhashable key).
  */
-function lowerMapKeyType(ty: TSType, structs: Set<string>): RustType {
+function lowerMapKeyType(
+  ty: TSType,
+  structs: Set<string>,
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
+): RustType {
   switch (ty.type) {
     case "TSStringKeyword":
       return { kind: "String" };
@@ -10796,7 +11102,7 @@ function lowerMapKeyType(ty: TSType, structs: Set<string>): RustType {
     case "TSBooleanKeyword":
       return { kind: "bool" };
     default: {
-      const lowered = lowerType(ty, structs);
+      const lowered = lowerType(ty, structs, typeParams);
       if (lowered.kind === "struct") return lowered;
       throw new UnsupportedError({
         type: "Map/Set key type that is not string, number, boolean, or a struct",
@@ -10989,7 +11295,16 @@ function collectHashEqStructs(analysis: ModuleAnalysis): {
   return { hashEq, structKey };
 }
 
-function lowerType(ty: TSType, structs: Set<string>): RustType {
+function lowerType(
+  ty: TSType,
+  structs: Set<string>,
+  // In-scope generic type-param names (series 081). A bare `TSTypeReference` whose
+  // name is here resolves to a `{kind:"param"}` `RustType` (a type variable),
+  // instead of failing loud as an undeclared struct. Threaded through recursion so
+  // a nested `Vec<T>` / `Option<T>` resolves its inner `T` too. Empty by default
+  // (a non-generic scope); the class/method path passes `analysis.typeParams`.
+  typeParams: Set<string> = EMPTY_TYPE_PARAMS,
+): RustType {
   switch (ty.type) {
     case "TSNumberKeyword":
       return { kind: "f64" };
@@ -10999,20 +11314,34 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
       return { kind: "bool" };
     case "TSVoidKeyword":
       return UNIT;
+    case "TSArrayType": {
+      // `T[]` / `number[]` shorthand → `Vec<T>` (series 081; equivalent to the
+      // `Array<T>` reference form). The element resolves through the same
+      // `typeParams` scope, so `U[]` in a generic method is `Vec<U>`.
+      const elem = (ty as unknown as { elementType: TSType }).elementType;
+      return { kind: "vec", elem: lowerType(elem, structs, typeParams) };
+    }
     case "TSTypeReference": {
       const ref = ty as Extract<TSType, { type: "TSTypeReference" }>;
+      // A bare `T` in scope of a generic class/method (series 081) → a type
+      // variable. Checked *before* the built-in wrappers so a param named `Array`
+      // etc. can't collide (a valid TS program never shadows those, but the scope
+      // check is authoritative here). A param never carries type arguments.
+      if (typeParams.has(ref.typeName.name) && !ref.typeArguments) {
+        return { kind: "param", name: ref.typeName.name };
+      }
       if (ref.typeName.name === "Promise") {
         // An `async fn`'s Rust return type is its resolved `T`, not a wrapper —
         // Rust wraps in `Future` implicitly. `Promise<void>` → `()`. In-dialect
         // `Promise` only ever annotates an `async` return (see design 014).
         const inner = ref.typeArguments?.params?.[0];
         if (!inner) throw new UnsupportedError(ty);
-        return lowerType(inner, structs);
+        return lowerType(inner, structs, typeParams);
       }
       if (ref.typeName.name === "Array") {
         const inner = ref.typeArguments?.params?.[0];
         if (!inner) throw new UnsupportedError(ty);
-        return { kind: "vec", elem: lowerType(inner, structs) };
+        return { kind: "vec", elem: lowerType(inner, structs, typeParams) };
       }
       if (ref.typeName.name === "Record") {
         // `Record<string, V>` → `HashMap<String, V>`. Only a `string` key maps
@@ -11027,7 +11356,7 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
         return {
           kind: "hashmap",
           key: { kind: "String" },
-          value: lowerType(value, structs),
+          value: lowerType(value, structs, typeParams),
         };
       }
       if (ref.typeName.name === "Map") {
@@ -11038,19 +11367,30 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
         if (!key || !value) throw new UnsupportedError(ty);
         return {
           kind: "hashmap",
-          key: lowerMapKeyType(key, structs),
-          value: lowerType(value, structs),
+          key: lowerMapKeyType(key, structs, typeParams),
+          value: lowerType(value, structs, typeParams),
         };
       }
       if (ref.typeName.name === "Set") {
         // `Set<T>` → `IndexSet<T>` (series 061); element follows the key policy.
         const elem = ref.typeArguments?.params?.[0];
         if (!elem) throw new UnsupportedError(ty);
-        return { kind: "set", elem: lowerMapKeyType(elem, structs) };
+        return { kind: "set", elem: lowerMapKeyType(elem, structs, typeParams) };
       }
-      // A reference to a declared `interface` → its nominal `struct` type. An
+      // A reference to a declared `interface`/`class` → its nominal `struct` type.
+      // A **generic instantiation** `Box<number>` (series 081) carries type
+      // arguments → `{kind:"struct", name, args}` (emitted `Box<f64>`), so an
+      // annotation `const b: Box<number> = …` matches the inferred ctor return. An
       // unknown type name stays fail-loud (`Promise`, `Map`, … are unsupported).
       if (structs.has(ref.typeName.name)) {
+        const targs = ref.typeArguments?.params;
+        if (targs && targs.length > 0) {
+          return {
+            kind: "struct",
+            name: ref.typeName.name,
+            args: targs.map((a) => lowerType(a, structs, typeParams)),
+          };
+        }
         return { kind: "struct", name: ref.typeName.name };
       }
       throw new UnsupportedError(ty);
@@ -11067,10 +11407,10 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
       const params = f.params.map((p) => {
         const inner = p.typeAnnotation?.typeAnnotation;
         if (!inner) throw new UnsupportedError(ty);
-        return lowerType(inner, structs);
+        return lowerType(inner, structs, typeParams);
       });
       const ret = f.returnType
-        ? lowerType(f.returnType.typeAnnotation, structs)
+        ? lowerType(f.returnType.typeAnnotation, structs, typeParams)
         : UNIT;
       return { kind: "fnPtr", params, ret };
     }
@@ -11088,7 +11428,7 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
       );
       const hasNullish = real.length !== u.types.length;
       if (hasNullish && real.length === 1 && real[0]) {
-        return { kind: "option", inner: lowerType(real[0], structs) };
+        return { kind: "option", inner: lowerType(real[0], structs, typeParams) };
       }
       throw new UnsupportedError(ty);
     }
@@ -11096,3 +11436,7 @@ function lowerType(ty: TSType, structs: Set<string>): RustType {
       throw new UnsupportedError(ty);
   }
 }
+
+/** A shared frozen empty set — the default `typeParams` of a non-generic `lowerType`
+ * call (series 081), so no allocation per call and no accidental mutation. */
+const EMPTY_TYPE_PARAMS: Set<string> = new Set();

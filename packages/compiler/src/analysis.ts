@@ -419,6 +419,14 @@ export interface ModuleAnalysis {
    */
   currentClass?: string;
   /**
+   * Type-parameter names in scope of the class/method currently being lowered
+   * (series 081). Set transiently by `lowerClass` (the class's `<T, …>`) and
+   * extended by a generic method (its own `<U>`) for that signature/body only, so
+   * `lowerType` resolves a bare `T` here to a `{kind:"param"}` `RustType` instead
+   * of failing loud. Empty (never `undefined` after init) outside a generic scope.
+   */
+  typeParams: Set<string>;
+  /**
    * Bindings whose value is a `&dyn IA` / `Box<dyn IA>` element (series 053c),
    * keyed by the binding/param name → the base (trait-owning) class name. A
    * field read on such a binding routes through a trait accessor (`a.x()`), and
@@ -1582,6 +1590,9 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // `if let Some(x)` block `x` is a plain `T`, not `Option<T>`, so the arithmetic
     // fail-loud guard must skip it. Pushed/popped by `lowerIf` around the some-body.
     narrowedOptions: new Set(),
+    // In-scope generic type-param names (series 081); pushed/popped by `lowerClass`
+    // and generic methods. Empty outside a generic scope.
+    typeParams: new Set(),
     // Built by `lower()` only when source text is threaded in (series 082); null
     // otherwise, in which case `collectionOf` uses the `bindingTypes` path alone.
     typeOracle: null,

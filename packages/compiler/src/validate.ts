@@ -125,6 +125,17 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "TSTypeAnnotation",
   "TSTypeReference",
   "TSTypeParameterInstantiation",
+  // Class/method/fn type-parameter *declarations* `<T>` / `<T extends I>` (series
+  // 081). The declaration + each `TSTypeParameter` are modeled; `lowerClass` /
+  // the fn lowering collect the in-scope param names and resolve a bare `T` to a
+  // `{kind:"param"}` `RustType`. A class/multi bound is rejected *in lowering* with
+  // a precise message (so a `TSIntersectionType` constraint reaches it), not here.
+  "TSTypeParameterDeclaration",
+  "TSTypeParameter",
+  "TSIntersectionType",
+  // `T[]` / `number[]` array-type shorthand (series 081) → `Vec<T>` in `lowerType`
+  // (equivalent to the `Array<T>` reference form).
+  "TSArrayType",
   "TSNumberKeyword",
   "TSStringKeyword",
   "TSBooleanKeyword",
