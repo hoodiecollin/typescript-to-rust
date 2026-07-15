@@ -575,7 +575,8 @@ The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
 |---------|------|---------|
 | Logical operator other than `&&`, `\|\|`, `??` | Not yet | `logical operator '<op>'` |
 | Unary operator other than `-`, `!` (i.e. `+`, `~`, `typeof`, `void`, `delete`) | Not yet | `unary operator '<op>'` |
-| `UpdateExpression` (`++`/`--`), `ConditionalExpression` (`?:`), `SequenceExpression` (comma), tagged/template literals, and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
+| `ConditionalExpression` (`?:`) **outside** a `flatMap` ternary callback (series 092 lifts only that shape) | Not yet | generic `Unsupported <node>` (at lowering) |
+| `UpdateExpression` (`++`/`--`), `SequenceExpression` (comma), tagged/template literals, and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
 
 ---
 
@@ -622,15 +623,20 @@ Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
 `join`, `concat`, `forEach`; string `padStart`, `padEnd`; `Object.*` (above);
 `JSON.*` (below).
 
-**`flatMap` / `flat` (series 085).** `xs.flatMap(f)` with a uniform
+**`flatMap` / `flat` (series 085 + 092).** `xs.flatMap(f)` with a uniform
 `U[]`-returning callback → `xs.iter().flat_map(f).collect::<Vec<_>>()` — the
 lifted callback returns `Vec<U>` (one-level element unwrap), so `flat_map`
-flattens exactly one level to `Vec<U>`. `xs.flat(k)` for a **literal-constant**
-integer `k ≥ 1` on a uniformly `k`-deep-nested array → `k` chained depth-1
-`tslib::array::flat` calls; `xs.flat()` is depth 1. The k-level walk requires the
-receiver be nested that deep. Residuals stay fail-loud → **epic #59**: a
-`U | U[]` union callback, a dynamic (non-literal) `flat(n)`, `flat(Infinity)`,
-and jagged / under-nested arrays.
+flattens exactly one level to `Vec<U>`. **Series 092** also lifts a **ternary**
+callback `x => cond ? U : U[]`: both arms share the scalar `U`, a scalar arm is
+wrapped `vec![x]`, so the lifted fn returns a uniform `Vec<U>` (homogeneous
+result — no `JsonValue`). `xs.flat(k)` flattens `min(k, N)` levels, where `N` is
+the receiver's statically-known nesting depth (the homogeneous dialect makes it a
+compile-time constant): `xs.flat()` is depth 1, `xs.flat(Infinity)` flattens all
+`N` levels to the scalar leaf, and an over-deep / already-flat `flat(k)` is a
+**no-op** shallow copy (never an under-nested error). Residuals stay fail-loud →
+**epic #59** (the deferred `JsonValue`-backed increment): a runtime-**variable**
+`flat(n)` depth, and a genuinely-heterogeneous `(U | U[])[]` / empty-arm callback
+return.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
@@ -638,9 +644,8 @@ and jagged / under-nested arrays.
 | Call whose callee is neither identifier nor member (`(f1 \|\| f2)()`, `(arr[0])()`) | Not yet | generic `Unsupported <node>` |
 | `reduce` with no explicit initial value | Not yet | `reduce without an explicit initial value (Option-typed, a later slice)` |
 | `sort` with a non-arrow comparator | Not yet | `sort with a non-arrow comparator (pass `(a, b) => …` or no argument)` |
-| `flatMap` with a `U \| U[]` union callback (→ #59) | Not yet | `cannot lift flatMap callback: heterogeneous array-literal return (a `U \| U[]` union stays fail-loud → #59)` (or the conditional-body reject) |
-| `flat(n)` with a non-literal / `Infinity` depth (→ #59) | Not yet | generic `Unsupported <node>` (cargo-loud: `Vec` has no `.flat`) |
-| `flat(k)` on an array not nested `k` deep (jagged/under-nested → #59) | Not yet | `flat(<k>) on an array not nested <k> deep (walk hit a non-array level …; jagged/under-nested stays fail-loud → #59)` |
+| `flatMap` returning a heterogeneous `(U \| U[])[]` or empty array (→ #59) | Not yet | `cannot lift flatMap callback: heterogeneous array-literal return …` / `… different element types … → #59` |
+| `flat(n)` with a runtime-**variable** depth (→ #59) | Not yet | generic `Unsupported <node>` (cargo-loud: `Vec` has no `.flat`) |
 | Any receiver/method combination not in the supported set | Not yet | generic `Unsupported <node>` (`lowerCall` fallback) |
 
 ### Closures & callbacks
