@@ -89,6 +89,9 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "BinaryExpression",
   "LogicalExpression",
   "UnaryExpression",
+  // A ternary `cond ? a : b`. Modeled at validate; lowering implements only the
+  // `flatMap` ternary-callback shape (series 092) and fails loud elsewhere.
+  "ConditionalExpression",
   "AssignmentExpression",
   "CallExpression",
   "MemberExpression",

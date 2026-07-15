@@ -9588,8 +9588,35 @@ function liftCallback(
     });
   }
 
-  const body = lowerExpr(bodyExpr, analysis);
-  const ret = typeCbBody(body, ctx);
+  // A `flatMap` callback whose body is a ternary `cond ? U : U[]` (series 092)
+  // lifts to a fn returning a uniform `Vec<U>` — the scalar arm is wrapped
+  // `vec![x]`, so `flat_map`'s one-level flatten yields a homogeneous result. The
+  // single-expression path (everything else) lowers + types the body directly.
+  let ret: RustType;
+  let fnBody: HirStmt[];
+  // Unwrap source parens (`(cond ? … : …)`) so a parenthesized ternary body is
+  // recognized (the emitter re-parenthesizes from precedence).
+  let unwrapped = bodyExpr;
+  while (unwrapped.type === "ParenthesizedExpression") {
+    unwrapped = (unwrapped as unknown as { expression: Expression }).expression;
+  }
+  if (method === "flatMap" && unwrapped.type === "ConditionalExpression") {
+    const t = liftFlatMapTernaryBody(
+      unwrapped as unknown as {
+        test: Expression;
+        consequent: Expression;
+        alternate: Expression;
+      },
+      ctx,
+      analysis,
+    );
+    ret = t.ret;
+    fnBody = t.fnBody;
+  } else {
+    const body = lowerExpr(bodyExpr, analysis);
+    ret = typeCbBody(body, ctx);
+    fnBody = [{ kind: "return", value: body }];
+  }
   const cbName = `__cb_${method}_${++analysis.liftCounter}`;
   analysis.liftedFns.push({
     kind: "fn",
@@ -9601,9 +9628,52 @@ function liftCallback(
     isAsync: arrow.async,
     params: [...ownParams, ...freeParams],
     ret,
-    body: [{ kind: "return", value: body }],
+    body: fnBody,
   });
   return { cbName, paramNames: params, forwarded, elemMode, indexParam };
+}
+
+/**
+ * Lift a `flatMap` callback whose body is a ternary `cond ? U : U[]` (series 092).
+ * JS `flatMap` flattens one level, so a scalar arm contributes one element and an
+ * array arm is spread — the homogeneous result is `Vec<U>`. A **scalar** arm `x`
+ * (element `U`) is wrapped `vec![x]`; an **array-literal** arm `[a, b]` already
+ * yields `Vec<U>`; both arms must share `U`. The lifted body is
+ * `if cond { return <Vec<U>> } else { return <Vec<U>> }`. Genuinely-different arm
+ * types, an empty-array arm, or a non-array/non-scalar arm stay fail-loud (the
+ * dynamic-value residual → epic #59).
+ */
+function liftFlatMapTernaryBody(
+  cond: { test: Expression; consequent: Expression; alternate: Expression },
+  ctx: Map<string, RustType>,
+  analysis: ModuleAnalysis,
+): { ret: RustType; fnBody: HirStmt[] } {
+  const normalizeArm = (arm: Expression): { expr: HirExpr; elem: RustType } => {
+    const hir = lowerExpr(arm, analysis);
+    const ty = typeCbBody(hir, ctx);
+    // An array-literal arm already yields `Vec<U>`; a scalar arm `x` → `vec![x]`.
+    return ty.kind === "vec"
+      ? { expr: hir, elem: ty.elem }
+      : { expr: { kind: "array", elements: [hir] }, elem: ty };
+  };
+  const consequent = normalizeArm(cond.consequent);
+  const alternate = normalizeArm(cond.alternate);
+  if (!sameRustType(consequent.elem, alternate.elem)) {
+    throw new UnsupportedError({
+      type: "cannot lift flatMap ternary callback: arms have different element types (a genuinely dynamic `U | V` stays fail-loud → #59)",
+    });
+  }
+  return {
+    ret: { kind: "vec", elem: consequent.elem },
+    fnBody: [
+      {
+        kind: "if",
+        cond: truthyCond(cond.test, analysis),
+        conseq: [{ kind: "return", value: consequent.expr }],
+        alt: [{ kind: "return", value: alternate.expr }],
+      },
+    ],
+  };
 }
 
 /**
@@ -10115,29 +10185,28 @@ function arrayTailMethod(
       ],
     };
   }
-  // `xss.flat()` (depth 1) / `xss.flat(k)` for a literal-constant `k` (series
-  // 085). Depth 1 flattens one level of an array-of-arrays. `flat(k)` for an
-  // integer literal `k ≥ 1` on a uniformly `k`-deep-nested array emits `k` chained
-  // depth-1 flattens (`flat(2)` → `flat(flat(x))`). The receiver's nested `vec`
-  // element type is walked exactly `k` levels — fail-loud if it isn't nested that
-  // deep (the jagged/under-nested residual → #59). A non-literal / `Infinity`
-  // depth is not claimed → generic fallthrough → cargo-loud.
+  // `xss.flat()` (depth 1) / `xss.flat(k)` / `xss.flat(Infinity)` (series 085 +
+  // 092). JS flattens `min(k, N)` levels, where `N` is the receiver's static
+  // nesting depth (the homogeneous dialect makes it compile-time-known) — an
+  // over-deep or `Infinity` request flattens all `N` levels to the scalar leaf,
+  // and flattening an already-flat array is a **no-op** copy (`min`→0), never an
+  // error. A runtime-**variable** depth isn't a compile-time constant → declined
+  // (fall through → cargo-loud). Emits `effective` chained depth-1 flattens.
   if (methodName === "flat" && (args.length === 0 || args.length === 1)) {
-    const depth = flatLiteralDepth(args[0]);
-    if (depth === null) return null; // non-literal / Infinity → fall through (cargo-loud)
-    // Walk the receiver element type `depth` levels: each level must be a `vec`.
-    let cur: RustType = _elem;
-    for (let level = 0; level < depth; level++) {
-      if (cur.kind !== "vec") {
-        throw new UnsupportedError({
-          type: `flat(${depth}) on an array not nested ${depth} deep (walk hit a non-array level ${level + 1}; jagged/under-nested stays fail-loud → #59)`,
-        });
-      }
-      cur = cur.elem;
+    const depth = flatDepthArg(args[0]);
+    if (depth === null) return null; // runtime-variable depth → fall through (cargo-loud)
+    // The static nesting depth `N`: count the `vec` levels of the element type.
+    let nesting = 0;
+    for (let cur: RustType = _elem; cur.kind === "vec"; cur = cur.elem) nesting++;
+    const effective = Math.min(depth, nesting);
+    if (effective === 0) {
+      // `min(depth, N) === 0` — already-flat / no-op flatten: JS returns a shallow
+      // copy of the array, so clone the receiver `Vec`.
+      return { kind: "method", receiver: lowerExpr(m.object, analysis), name: "clone", args: [] };
     }
-    // Emit `depth` chained depth-1 flattens: flat(flat(...flat(&recv)...)).
+    // Emit `effective` chained depth-1 flattens: flat(flat(...flat(&recv)...)).
     let call: HirExpr = { kind: "call", callee: "tslib::array::flat", args: [recvRef] };
-    for (let level = 1; level < depth; level++) {
+    for (let level = 1; level < effective; level++) {
       call = {
         kind: "call",
         callee: "tslib::array::flat",
@@ -10150,19 +10219,21 @@ function arrayTailMethod(
 }
 
 /**
- * The literal-constant depth of a `flat(k)` argument (series 085). No arg → the
- * default depth 1. A positive **integer** numeric literal → that depth. Anything
- * else — a variable, `Infinity`, a non-integer, or `< 1` — returns `null` so the
- * caller declines the route (→ generic fallthrough → cargo-loud, never a wrong
- * flatten).
+ * The requested depth of a `flat(k)` argument (series 085 + 092). No arg → depth
+ * 1. A numeric literal → `max(0, floor(k))` (JS clamps a negative/fractional
+ * depth). The `Infinity` global → `Infinity` (flatten all levels). A runtime
+ * **variable** (or any other non-constant) → `null` so the caller declines and
+ * falls through (never a wrong flatten). The caller clamps to the static nesting.
  */
-function flatLiteralDepth(arg: Expression | undefined): number | null {
+function flatDepthArg(arg: Expression | undefined): number | null {
   if (arg === undefined) return 1;
+  if (arg.type === "Identifier" && (arg as Identifier).name === "Infinity") {
+    return Infinity;
+  }
   if (arg.type !== "Literal") return null;
   const v = (arg as Literal).value;
   if (typeof v !== "number") return null;
-  if (!Number.isInteger(v) || v < 1) return null;
-  return v;
+  return Math.max(0, Math.floor(v));
 }
 
 /** A `&self` shared-borrow arg of the primitive receiver (for a tslib fn). */
