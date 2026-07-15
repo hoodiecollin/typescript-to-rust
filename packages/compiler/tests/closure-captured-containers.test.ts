@@ -133,7 +133,14 @@ console.log(s.size);`;
     expect(() => compile(src)).toThrow();
   });
 
-  test("CC11 fail-loud: shared/aliased captured container (→ Rc row, deferred)", () => {
+  test("CC11 shared/aliased captured container — GRADUATED to the Rc row (series 086)", () => {
+    // 079 deferred the shared/aliased case to the `Rc<RefCell>` row; **series 086 (issue
+    // #46) ships it** — an *annotated* alias `const t: Set<number> = s` promotes the
+    // captured container to `Rc<RefCell<IndexSet>>` (see closure-rc-capture.test.ts RC1).
+    // Here the alias is **untyped**, which is an orthogonal fail-loud (an untyped
+    // `const t = s` binding needs an annotation, series 046) — so this stays `toThrow`,
+    // but for the untyped-binding reason, not the removed `ctx.aliased` guard. The
+    // container-Rc graduation is covered by the 086 suite.
     const src = `const s: Set<number> = new Set<number>();
 const t = s;
 const add = (x: number): void => { s.add(x); };
