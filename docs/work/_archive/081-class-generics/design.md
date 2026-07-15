@@ -1,13 +1,29 @@
 # 081 — Class generics (`class Box<T>`, monomorphization + interface bounds)
 
-> **Status: DESIGN COMPLETE (2026-07-13). Impl pending.** This is issue **#40**
-> (split from #36). Dialect calls made with Collin 2026-07-13 (`needs-user-input`
-> cleared). Unblocked by **#43/071 slice 1** (behavioral-interface traits exist, so
-> `<T extends I>` has an `I<Name>` to bind by). Introduces **type parameters into
-> the type system for the first time**.
+> **Status: SLICES 1 + 2 SHIPPED (2026-07-14).** Issue **#40** (split from #36).
+> Dialect calls made with Collin 2026-07-13 (`needs-user-input` cleared). Unblocked
+> by **#43/071 slice 1** (behavioral-interface traits). Introduced **type parameters
+> into the type system for the first time** — the `{kind:"param"}` `RustType`.
 >
-> Spec-first: this `design.md` → RED `specs.md` → impl → archive. Decomposes into
-> impl sub-slices (see **Impl decomposition**); each ships spec-first.
+> **Shipped (slices 1 + 2, specs `CG1–CG13`):** `class Box<T>` → `struct Box<T>` /
+> `impl<T: Clone> Box<T>` (monomorphized, derive-driven bounds, inference-only
+> construction); store/move/clone/return `T`; multiple params `Pair<A, B>`; a
+> generic method `<U>`; `<T extends I>` (single behavioral interface) →
+> `struct Box<T: IShape>` / `impl<T: IShape + Clone>` with the bounded `T` calling
+> interface methods (reuses 071 `traitNameOf`). Generic **struct-reference** types
+> (`const b: Box<number>`) and the `T[]` array shorthand also lower. The inherent
+> `impl` (and a generic method's own `<U>`) carry an explicit derive-driven `Clone`
+> bound, because a `return self.field` of a `param` field clones (`self.v.clone()`,
+> which the struct's `#[derive(Clone)]` alone doesn't bound on the inherent impl).
+>
+> **Documented tail — slice 3, graduates with #44 (still fail-loud, guard specs
+> `CG8–CG12`):** an operator on a bare `T` (`a + b` / `a < b` / `a === b` — the #44
+> type-layer wall); explicit call-site type args (`new Box<string>(x)`,
+> `identity<number>(5)`); a **class** as a bound; a **multi-bound** (`A & B`).
+> Also deferred (fail-loud): a generic class that *also* participates in inheritance
+> / `implements` (the `impl IA for Name` blocks don't yet carry generic clauses).
+>
+> Spec-first: this `design.md` → RED `specs.md` → impl → archive (done).
 
 ## Problem
 
