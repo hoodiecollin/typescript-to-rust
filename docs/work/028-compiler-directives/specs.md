@@ -71,6 +71,14 @@ Specs (`rc-directive.test.ts`):
 
 ### Residual (documented, cargo-loud — not a silent miscompile)
 
+> **Graduated in series 087** (`docs/work/_archive/087-directives-next/`): method
+> calls (`a.foo()` → `a.borrow().foo()` / `.borrow_mut()`), `rc` fields / params
+> (analysis-promoted), and cross-call values (clone into a promoted param; a read
+> into a non-promoted inner-class param wraps `f(&a.borrow())`) all work now. The
+> remaining residual is a `refMut`/owned use of an `rc` binding into a
+> non-promoted position (e.g. moving into a `Vec<T>`, or a cross-fn
+> self-referential `x.v = x.v + 1` re-borrow) — still cargo-loud, never silent.
+
 Calling a **method** on an `rc` binding (`a.foo()`) stays bare — `Rc<RefCell<C>>`
 has no `C` methods, so cargo `E0599` flags it. `rc` struct fields / params,
 nested-scope shadowing, and passing an `rc` value across a call boundary are
@@ -102,6 +110,14 @@ Specs (`arena-directive.test.ts`):
 - `"use arena"` in a method body → `UnsupportedError`.
 
 ### Residual (deferred — heap or cargo-loud, never silent)
+
+> **Graduated in series 087** (`docs/work/_archive/087-directives-next/`): arena
+> `String` (`bumpalo::collections::String::from_str_in`) and **nested** arenas (a
+> nested `array`/`string` literal element is recursively routed into the same
+> arena) now work. Still deferred: arena boxed trees, arena values crossing a
+> signature/field with an explicit `'a` (an escape → cargo lifetime error), and
+> non-literal sources. Proactive escape diagnostics remain a later ergonomics
+> upgrade.
 
 Arena `String`/boxed trees, arena values crossing a signature/field with an
 explicit `'a`, nested arenas, and non-literal `Vec` sources are left heap or hit

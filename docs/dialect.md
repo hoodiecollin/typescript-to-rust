@@ -663,6 +663,22 @@ annotation-driven `JSON.parse` and untyped `serde_json::Value` fallback are
 Recognized: `"use strict"` (ignored), `"use panic"`, `"use rc"`, `"use arena"`.
 Strategy directives are only valid on a free function or at script scope.
 
+`"use rc"` (`Rc<RefCell<T>>`) covers, within its scope: class-typed local bindings,
+**method calls** (receiver routed `.borrow()`/`.borrow_mut()`), **fields / params**
+(analysis-promoted), and **cross-call** values — passing an rc binding into an
+analysis-promoted callee param clones the handle (`Rc::clone(&x)`), and a *read*
+into a **non-promoted** param of the inner class type wraps `f(&a.borrow())`
+(series 087). A `refMut`/owned use of an rc binding into a non-promoted position
+(e.g. `Vec<T>::push(a)`, or a cross-fn self-referential write `x.v = x.v + 1` that
+re-borrows one cell) stays **cargo-loud** — never silent.
+
+`"use arena"` (bumpalo) covers: `array`-literal and `string`-literal `let` inits →
+`bumpalo::vec![in &arena; …]` / `bumpalo::collections::String::from_str_in(…, &arena)`,
+**recursively** (a nested `[[…]]` / `["…"]` allocates every level from the arena;
+series 087). An arena value that **escapes** its scope (returned, stored past the
+arena's lifetime, an explicit-`'a` signature/field) is a Rust lifetime error
+**cargo rejects** — cargo is the escape analysis, so escape stays fail-loud.
+
 | Trigger | Kind | Message |
 |---------|------|---------|
 | An unrecognized `"use …"` directive | Forbidden | `unrecognized directive "<d>"` |
