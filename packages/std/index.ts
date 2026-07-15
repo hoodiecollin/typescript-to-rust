@@ -107,3 +107,120 @@ export class Rng {
 export function rng(seed: number): Rng {
   return new Rng(seed);
 }
+
+/**
+ * `JsonValue` — the opt-in dynamic JSON value (series 090, epic #59). Reached
+ * only via {@link parseJsonValue} / {@link fromJsonValue} / {@link toJsonValue};
+ * it does NOT reopen `any`. Wraps the raw parsed tree with an explicit,
+ * dynamically-checked accessor surface that mirrors the Rust
+ * `tslib::json::JsonValue` newtype exactly — a `serde(transparent)` newtype there
+ * means the Bun-run wrapper and the Rust value observe the identical tree, so the
+ * differential oracle matches.
+ *
+ * Absent object keys / out-of-bounds indices yield a `Null` value (matching JS
+ * `undefined`, so `.isNull()` distinguishes and chaining stays safe); navigating
+ * into a non-container, or coercing a mismatched scalar, `throw`s — the mirror of
+ * the Rust `panic!`. Panic/throw messages carry the accessor name so the
+ * differential observes matching failures.
+ */
+export class JsonValue {
+  constructor(private raw: unknown) {}
+
+  /** Object member (`Null` if absent); throws on a non-object. */
+  get(key: string): JsonValue {
+    if (this.raw === null || typeof this.raw !== "object" || Array.isArray(this.raw)) {
+      throw new Error("get: JsonValue is not an object");
+    }
+    const obj = this.raw as Record<string, unknown>;
+    return new JsonValue(key in obj ? obj[key] : null);
+  }
+
+  /** Array element (`Null` if out of bounds); throws on a non-array. */
+  at(i: number): JsonValue {
+    if (!Array.isArray(this.raw)) throw new Error("at: JsonValue is not an array");
+    const idx = Math.trunc(i);
+    return new JsonValue(idx >= 0 && idx < this.raw.length ? this.raw[idx] : null);
+  }
+
+  /** Number → `number`; throws otherwise. */
+  asNumber(): number {
+    if (typeof this.raw !== "number") throw new Error("asNumber: JsonValue is not a number");
+    return this.raw;
+  }
+
+  /** String → `string`; throws otherwise. */
+  asString(): string {
+    if (typeof this.raw !== "string") throw new Error("asString: JsonValue is not a string");
+    return this.raw;
+  }
+
+  /** Bool → `boolean`; throws otherwise. */
+  asBool(): boolean {
+    if (typeof this.raw !== "boolean") throw new Error("asBool: JsonValue is not a bool");
+    return this.raw;
+  }
+
+  isNull(): boolean {
+    return this.raw === null;
+  }
+  isNumber(): boolean {
+    return typeof this.raw === "number";
+  }
+  isString(): boolean {
+    return typeof this.raw === "string";
+  }
+  isBool(): boolean {
+    return typeof this.raw === "boolean";
+  }
+  isArray(): boolean {
+    return Array.isArray(this.raw);
+  }
+  isObject(): boolean {
+    return this.raw !== null && typeof this.raw === "object" && !Array.isArray(this.raw);
+  }
+
+  /** Array element count; throws on a non-array. A **property** here (a `get`
+   * accessor) — the compiler lowers `v.length` to the Rust `.length()` method. */
+  get length(): number {
+    if (!Array.isArray(this.raw)) throw new Error("length: JsonValue is not an array");
+    return this.raw.length;
+  }
+
+  /** So `stringifyJson(v)` (`JSON.stringify`) serializes the raw tree, matching
+   * the `serde(transparent)` Rust newtype. */
+  toJSON(): unknown {
+    return this.raw;
+  }
+}
+
+/**
+ * `parseJsonValue(s)` (series 090) — dynamic parse. Returns the same
+ * {@link ParseResult} shape 084 uses, carrying a {@link JsonValue} on success.
+ * The compiler lowers it to `tslib::json::ParseResult::<tslib::json::JsonValue>::parse`.
+ */
+export function parseJsonValue(s: string): ParseResult<JsonValue> {
+  try {
+    return { ok: true, value: new JsonValue(JSON.parse(s)) };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+/**
+ * `fromJsonValue<T>(v)` (series 090) — dynamic → static. Deserialize a
+ * {@link JsonValue} into a modeled `T`. Under Bun the runtime is untyped, so this
+ * reference simply hands back the raw tree as `T` (the well-shaped differential
+ * inputs match); the emitted Rust is `ParseResult::<T>::from_value`, whose serde
+ * deserialize is the real validation.
+ */
+export function fromJsonValue<T>(v: JsonValue): ParseResult<T> {
+  return { ok: true, value: v.toJSON() as T };
+}
+
+/**
+ * `toJsonValue<T>(x)` (series 090) — static → dynamic. Wrap a modeled value as a
+ * {@link JsonValue}. Emits `tslib::json::JsonValue(serde_json::to_value(&x))`.
+ */
+export function toJsonValue<T>(x: T): JsonValue {
+  return new JsonValue(x);
+}
