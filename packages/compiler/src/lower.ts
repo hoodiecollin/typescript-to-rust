@@ -913,12 +913,13 @@ function normalizeArrows(program: Program): Program {
       if (f.id) fnSigs.set(f.id.name, f);
     }
   }
-  // Container-capture threading (series 079, issue #46): a stored arrow that
+  // Container-capture threading (series 079/086, issue #46): a stored arrow that
   // captures a container needs, per captured var, its declaration (for the threaded
-  // param's owned type annotation) and whether its owner is aliased (→ the deferred
-  // `Rc<RefCell>` row → fail-loud). Both are program-wide, so collect them once here.
+  // param's owned type annotation). Aliasing is **not** decided here — the shared/aliased
+  // `Rc<RefCell>` promotion (series 086) is made by the post-lowering `computeAutoRc`
+  // union-find, so the lift just threads the container either way. Program-wide, collected
+  // once here.
   const declInfo = collectDeclInfo(program.body);
-  const aliased = collectAliasedVars(program.body);
   const topLevelFns = new Set<string>(fnSigs.keys());
   const ctx: LiftCtx = {
     hoisted: [],
@@ -926,10 +927,10 @@ function normalizeArrows(program: Program): Program {
     fnSigs,
     reassigned: collectReassignedNames(program.body),
     declInfo,
-    aliased,
     topLevelFns,
     threadedRewrites: [],
     programBody: program.body,
+    scopeVars: declaredNamesOf(program.body),
   };
   const body = liftStmts(program.body, ctx, true);
   // Apply the call-site rewrites (`add(a)` → `__arrow_n(env, a)`) across the whole
@@ -957,25 +958,6 @@ function collectDeclInfo(
   return out;
 }
 
-/**
- * Vars whose owner is aliased (series 079 / 062): a binding `const t = s` where `s`
- * is a bare identifier makes `s` (and `t`) aliased — a captured container that is
- * aliased routes to the deferred `Rc<RefCell>` row → fail-loud in the interim.
- */
-function collectAliasedVars(stmts: Statement[]): Set<string> {
-  const aliased = new Set<string>();
-  astWalk(stmts, (n) => {
-    if (n.type !== "VariableDeclarator") return;
-    const id = n.id as { type?: string; name?: string };
-    const init = n.init as { type?: string; name?: string } | undefined;
-    if (id?.type === "Identifier" && init?.type === "Identifier" && init.name) {
-      aliased.add(init.name); // the aliased source
-      if (id.name) aliased.add(id.name); // and the new alias
-    }
-  });
-  return aliased;
-}
-
 /** State threaded through the arrow-lift transform (series 058). */
 interface LiftCtx {
   /** `__arrow_n` fns extracted from inline arrows, appended at module scope. */
@@ -989,9 +971,6 @@ interface LiftCtx {
   /** Binding name → its declaration (annotation + init), for a captured container's
    * threaded param type (series 079). */
   declInfo: Map<string, { annotation?: unknown; init?: unknown }>;
-  /** Aliased-owner vars (series 079 / 062) — a captured aliased container is the
-   * deferred `Rc<RefCell>` row → fail-loud. */
-  aliased: Set<string>;
   /** Top-level fn names (excluded from a closure's free-var set). */
   topLevelFns: Set<string>;
   /** Deferred call-site rewrites for threaded stored closures (series 079), applied
@@ -999,6 +978,15 @@ interface LiftCtx {
   threadedRewrites: { binding: string; fnName: string; captures: string[] }[];
   /** The original (pre-lift) program body — for the whole-program escape check. */
   programBody: Statement[];
+  /**
+   * Names in scope at the current lift point (series 086): the top-level declarations
+   * plus, when lifting inside a `function`/arrow body, that scope's params + local
+   * declarations. A container-capturing stored closure whose captured container is
+   * **not** in this set is a **two-level** (or otherwise out-of-scope) capture — the
+   * env-threaded call site can't reach the container → fail-loud. Reset per scope in
+   * `liftStmts` (see `withScope`).
+   */
+  scopeVars: Set<string>;
 }
 
 /**
@@ -1031,13 +1019,68 @@ function liftStmts(
   return out;
 }
 
+/**
+ * The names declared directly in a statement list (series 086): each `const`/`let`/`var`
+ * binding id (a plain `Identifier`) and each nested `function`/`class` name. Used to seed
+ * the `scopeVars` in-scope set so a container-capturing closure can verify its captured
+ * container is reachable at the lift point (else it is a two-level capture → fail-loud).
+ * Shallow (does not descend nested bodies — those are separate scopes).
+ */
+function declaredNamesOf(stmts: Statement[]): Set<string> {
+  const names = new Set<string>();
+  for (const s of stmts) {
+    if (s.type === "VariableDeclaration") {
+      for (const d of (s as VariableDeclaration).declarations) {
+        const id = d.id as { type?: string; name?: string };
+        if (id?.type === "Identifier" && id.name) names.add(id.name);
+      }
+    }
+    const named = s as { type?: string; id?: { name?: string } };
+    if (
+      (named.type === "FunctionDeclaration" || named.type === "ClassDeclaration") &&
+      named.id?.name
+    ) {
+      names.add(named.id.name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Run `fn` with `scopeVars` **replaced** by an inner function scope's own params + local
+ * declarations (series 086). `scopeVars` tracks only the **immediately-enclosing function
+ * scope**, not the transitive outer chain: a container-capturing closure can thread its
+ * captured container only when the container is a param/local of the same function scope
+ * the closure sits in — a container from a further-out scope (`inner` inside `outer`
+ * capturing a top-level `s`) is a two-level capture env-threading can't reach → fail-loud.
+ */
+function withScope(
+  ctx: LiftCtx,
+  params: readonly unknown[],
+  body: Statement[],
+  fn: () => void,
+): void {
+  const prev = ctx.scopeVars;
+  const inner = new Set<string>();
+  for (const p of params) collectBoundNames(p, inner);
+  for (const n of declaredNamesOf(body)) inner.add(n);
+  ctx.scopeVars = inner;
+  try {
+    fn();
+  } finally {
+    ctx.scopeVars = prev;
+  }
+}
+
 /** Recurse the transform into a statement's nested scopes (fn bodies, blocks, …). */
 function liftNested(stmt: Statement, ctx: LiftCtx): Statement {
   switch (stmt.type) {
     case "FunctionDeclaration": {
       const f = stmt as FunctionDeclaration;
       if (f.body) {
-        f.body = { ...f.body, body: liftStmts(f.body.body, ctx, false) };
+        withScope(ctx, f.params ?? [], f.body.body, () => {
+          f.body = { ...(f.body as BlockStatement), body: liftStmts((f.body as BlockStatement).body, ctx, false) };
+        });
       }
       return f;
     }
@@ -1172,15 +1215,27 @@ function threadStoredCapture(
       type: "an `async` closure capturing a container (no env-threaded async form, series 079)",
     });
   }
-  // An aliased/shared captured container routes to the `Rc<RefCell>` row, which is
-  // deferred (needs `refineRc` to recurse into lifted-fn bodies) — fail-loud interim.
+  // Two-level (out-of-scope) capture guard (series 086): env-threading can only thread a
+  // captured container that is a param/local of the **same** function scope the closure
+  // sits in. A container declared further out (`inner` inside `outer` capturing a
+  // top-level `s`) has no threadable path — the intermediate scope would have to
+  // re-thread it. Fail-loud (the 079 two-level residual).
   for (const cap of captures) {
-    if (ctx.aliased.has(cap)) {
+    if (!ctx.scopeVars.has(cap)) {
       throw new UnsupportedError({
-        type: `closure captures a shared/aliased container '${cap}' — needs Rc<RefCell> promotion (deferred to the #45/078-coupled Rc row, fail-loud interim, series 079)`,
+        type: `closure captures container '${cap}' from an enclosing scope more than one level out (two-level capture) — env-threading can't reach it (fail-loud residual, series 086)`,
       });
     }
   }
+  // A captured container is threaded as a leading param **regardless** of whether its
+  // owner is aliased (series 086, issue #46). The owned-mutable case keeps 079's by-need
+  // `&mut` borrow; the **shared/aliased** case (`const t = s`) instead promotes the
+  // whole alias closure to `Rc<RefCell<T>>` — but that decision is made **later**, by the
+  // post-lowering `computeAutoRc` union-find (it sees the alias edge, the bare-ident
+  // collection mutator inside `__arrow_n`, and the arg→param thread), not here. So the
+  // pre-analysis lift produces the ordinary `__arrow_n(s, a)` shape either way and lets
+  // `refineRc` splice the `Rc::clone` / `.borrow_mut()` in for the promoted case. The
+  // ≥2-member alias gate keeps a lone owned container on the `&mut` path (no regression).
   // Escape check: every use of the binding must be a direct call. Run over the whole
   // program (a call site can precede or follow the declaration in source order).
   assertNonEscaping(binding, ctx.programBody);

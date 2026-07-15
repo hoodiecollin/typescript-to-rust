@@ -125,6 +125,52 @@ export interface AutoRcResult {
  */
 const COLLECTION_MUT_METHODS = new Set<string>(["insert", "shift_remove"]);
 
+/**
+ * The **lowered** HIR mutator names for a **captured container** promotion seed
+ * (series 086 / issue #46). A bare-ident collection mutator inside a lifted
+ * `__arrow_n` fn (`s.insert(x)` / `xs.push(x)` — the lowered `Set.add` / `Array.push`)
+ * marks that container binding mutated in the alias union-find, so a shared/aliased
+ * captured container (`const t = s`) promotes to `Rc<RefCell<T>>`. Covers the `Map`/`Set`
+ * lowered forms (`insert`/`shift_remove`) plus the array in-place mutators (`push`/`pop`
+ * and the lowered `remove`/`insert` shapes). Kept in lockstep with `lower.ts`
+ * (`CAPTURE_MUTATORS`, the pre-lowering source names).
+ */
+const CONTAINER_MUT_METHODS = new Set<string>([
+  "insert",
+  "shift_remove",
+  "push",
+  "pop",
+  "remove",
+  "clear",
+  "truncate",
+  "sort",
+  "sort_by",
+  "reverse",
+  "swap",
+]);
+
+/**
+ * Is a lowered type a **capture container** (series 086): a `Vec`, `Set` (`IndexSet`),
+ * `Map` (`IndexMap`), or `String` — the shapes a stored closure threads and, when
+ * aliased, promotes to `Rc<RefCell<T>>`. Mirrors `isCaptureContainerType` in `lower.ts`.
+ * A `ref`/`rc` wrapper resolves to its inner (a threaded `&mut Set` param is still a
+ * container binding for the alias union-find).
+ */
+function containerTypeOf(ty: RustType | null | undefined): RustType | null {
+  if (!ty) return null;
+  if (
+    ty.kind === "vec" ||
+    ty.kind === "set" ||
+    ty.kind === "hashmap" ||
+    ty.kind === "String"
+  ) {
+    return ty;
+  }
+  if (ty.kind === "ref") return containerTypeOf(ty.inner);
+  if (ty.kind === "rc") return containerTypeOf(ty.inner);
+  return null;
+}
+
 /** The scope key for a class ctor (its associated `new`). */
 function ctorScope(cls: string): string {
   return `${cls}::new`;
@@ -161,6 +207,23 @@ function constructedClass(
     }
   }
   return null;
+}
+
+/**
+ * Does a `let` initializer construct a container (series 086): a `Set`/`Map`
+ * construction (`setNew`/`mapNew`), an array literal, a `hashmap` literal, or a string?
+ * Used to track a container binding whose declared type isn't a resolved container yet
+ * (e.g. an un-annotated `const acc = []`). A `ref`/`try`-wrapped init unwraps first.
+ */
+function isContainerInit(init: HirExpr): boolean {
+  const e = unwrapTry(init);
+  return (
+    e.kind === "setNew" ||
+    e.kind === "mapNew" ||
+    e.kind === "array" ||
+    e.kind === "hashmap" ||
+    e.kind === "string"
+  );
 }
 
 /** The root identifier of a projection chain (`a.b[c].d` → `a`), or null. */
@@ -231,6 +294,17 @@ export function computeAutoRc(
 ): AutoRcResult {
   const parent = new Map<string, string>();
   const mutated = new Set<string>(); // union-find keys directly mutated.
+  // Container union-find keys that are **truly shared** in an outer scope (series 086):
+  // a container binding that received a bare-ident **container alias** edge `const t = s`.
+  // A captured container promotes to `Rc<RefCell<T>>` **only** when its component is
+  // both mutated *and* contains a `containerShared` member — the arg→param thread into a
+  // lifted `__arrow_n` alone (which every captured container has) is **not** sharing, so
+  // it can't trigger promotion. This is the owned-`&mut` (079) vs shared-`Rc` (086) split.
+  const containerShared = new Set<string>();
+  // Union-find keys that belong to the **container** namespace (a `Vec`/`Set`/`Map`/
+  // `String` binding or param), so the promotion gate can apply the container-specific
+  // `containerShared` rule to them and the class-specific ≥2-member rule to classes.
+  const containerKey = new Set<string>();
   // Union-find keys **force-promoted** by the series-068 consuming edge: a receiver
   // that is live *after* a consuming (`fn m(self)`) call must become `Rc<RefCell<T>>`
   // rather than move (a consumed-then-reused object is shared-mutable). Unlike
@@ -282,9 +356,13 @@ export function computeAutoRc(
   // Param name lists per callee key (free fn + ctor) — args are matched positionally.
   const paramNames = new Map<string, string[]>();
   const paramClass = new Map<string, (string | null)[]>();
+  // Positional "is a container param" flags (series 086) — a threaded `__arrow_n`
+  // container param (`&mut Set` / `Set` / …) so a container arg unions into it.
+  const paramContainer = new Map<string, boolean[]>();
   const recordFnParams = (key: string, fn: HirFn): void => {
     paramNames.set(key, fn.params.map((p) => p.name));
     paramClass.set(key, fn.params.map((p) => classOfType(p.ty, classes)));
+    paramContainer.set(key, fn.params.map((p) => containerTypeOf(p.ty) !== null));
   };
   for (const item of module.items) {
     if (item.kind === "fn") recordFnParams(item.name, item);
@@ -300,6 +378,15 @@ export function computeAutoRc(
 
   let currentScope = SCRIPT_SCOPE;
   let currentBindingClass = new Map<string, string>();
+  // Container bindings/params in the current scope (series 086) — a `Vec`/`Set`/`Map`/
+  // `String` local or a threaded `__arrow_n` container param. Tracked alongside class
+  // bindings so a shared/aliased captured container (`const t = s`) threads its alias +
+  // arg edges into the **same** union-find and promotes to `Rc<RefCell<T>>` when
+  // mutated. A binding is "tracked" for the alias/arg edges iff it is a class **or** a
+  // container binding.
+  let currentContainerBinding = new Set<string>();
+  const isTracked = (name: string): boolean =>
+    currentBindingClass.has(name) || currentContainerBinding.has(name);
 
   /** Record mutations + alias/field/arg edges in one expression. */
   const noteExpr = (e: HirExpr): void => {
@@ -341,20 +428,43 @@ export function computeAutoRc(
       const root = rootIdent(e.receiver);
       if (root) mutated.add(localKey(currentScope, root));
     }
+    // A **bare-ident** collection mutator on a tracked container binding (series 086 /
+    // issue #46) — `s.insert(x)` / `xs.push(x)` inside a lifted `__arrow_n` on a threaded
+    // container **param** (or on a local container). This is the captured-container
+    // promotion seed: it marks the container mutated so an aliased owner (a ≥2-member
+    // component via the `const t = s` alias edge + the arg→param thread) promotes to
+    // `Rc<RefCell<T>>`. A **lone** owned container (1-member component) is left on 079's
+    // `&mut` path by the ≥2-member gate. A field receiver is the 078 case above.
+    if (
+      e.kind === "method" &&
+      CONTAINER_MUT_METHODS.has(e.name) &&
+      e.receiver.kind === "ident" &&
+      currentContainerBinding.has(e.receiver.name)
+    ) {
+      mutated.add(localKey(currentScope, e.receiver.name));
+    }
     // A struct literal `X { f: a }` stores each ident field into `X#f`.
     if (e.kind === "structLit" && classes.has(e.name)) {
       for (const f of e.fields) noteFieldStore(e.name, f.name, f.value);
     }
-    // A call `f(x)` / `C::new(x)` threads each class-binding arg into the callee's param.
+    // A call `f(x)` / `C::new(x)` / `__arrow_n(s, a)` threads each class-**or-container**
+    // binding arg into the callee's param (series 069 class; series 086 container). The
+    // arg→param edge is what unions a shared captured container's outer binding with the
+    // `__arrow_n` container param, so the mutation seed inside the lifted fn reaches the
+    // outer alias closure.
     if (e.kind === "call") {
       const info = calleeInfo(e.callee, classes, freeFns);
       if (info) {
         const names = paramNames.get(info.scope) ?? [];
         const pcls = paramClass.get(info.scope) ?? [];
+        const pcon = paramContainer.get(info.scope) ?? [];
         e.args.forEach((arg, i) => {
           const pname = names[i];
           if (!pname) return;
-          if (arg.expr.kind === "ident" && (pcls[i] || currentBindingClass.get(arg.expr.name))) {
+          if (
+            arg.expr.kind === "ident" &&
+            (pcls[i] || pcon[i] || isTracked(arg.expr.name))
+          ) {
             unite(localKey(currentScope, arg.expr.name), localKey(info.scope, pname));
           }
         });
@@ -369,10 +479,29 @@ export function computeAutoRc(
       if (cls) {
         currentBindingClass.set(s.name, cls);
         ensure(localKey(currentScope, s.name));
-      } else if (s.init.kind === "ident" && currentBindingClass.has(s.init.name)) {
-        // A bare-ident alias `const b = a`.
-        currentBindingClass.set(s.name, currentBindingClass.get(s.init.name) as string);
+      } else if (s.init.kind === "ident" && isTracked(s.init.name)) {
+        // A bare-ident alias `const b = a` — a class alias (069) or a **container**
+        // alias `const t = s` (086). The alias edge unions the two into one component;
+        // if either is mutated the whole component promotes to `Rc<RefCell<T>>`.
+        if (currentBindingClass.has(s.init.name)) {
+          currentBindingClass.set(s.name, currentBindingClass.get(s.init.name) as string);
+        }
+        if (currentContainerBinding.has(s.init.name)) {
+          // A **container** alias `const t = s` — this is the genuine sharing that turns
+          // the captured container into an `Rc<RefCell<T>>` (086). Mark both handles
+          // shared (the arg→param thread alone never sets this).
+          currentContainerBinding.add(s.name);
+          containerKey.add(localKey(currentScope, s.name));
+          containerShared.add(localKey(currentScope, s.name));
+          containerShared.add(localKey(currentScope, s.init.name));
+        }
         unite(localKey(currentScope, s.name), localKey(currentScope, s.init.name));
+      } else if (containerTypeOf(s.ty) !== null || isContainerInit(s.init)) {
+        // A container binding `const s: Set<number> = new Set()` (or an array/String/Map
+        // literal init) — tracked so its aliases + arg-threads feed the union-find (086).
+        currentContainerBinding.add(s.name);
+        containerKey.add(localKey(currentScope, s.name));
+        ensure(localKey(currentScope, s.name));
       } else {
         // A binding whose class we can still learn from its declared type (e.g. the
         // result of a retaining call, `const h: Box = store(b)`).
@@ -390,10 +519,19 @@ export function computeAutoRc(
   const analyzeBody = (scope: string, params: HirFn["params"], body: HirStmt[]): void => {
     currentScope = scope;
     currentBindingClass = new Map<string, string>();
+    currentContainerBinding = new Set<string>();
     for (const p of params) {
       const cls = classOfType(p.ty, classes);
       if (cls) {
         currentBindingClass.set(p.name, cls);
+        ensure(localKey(scope, p.name));
+      } else if (containerTypeOf(p.ty) !== null) {
+        // A threaded `__arrow_n` container param (series 086) — tracked so the bare-ident
+        // collection mutator in its body seeds the union-find and the arg→param edge
+        // reaches it. It is a container key but **not** `containerShared` — being a lifted
+        // param is not outer-scope sharing (only a `const t = s` alias is).
+        currentContainerBinding.add(p.name);
+        containerKey.add(localKey(scope, p.name));
         ensure(localKey(scope, p.name));
       }
     }
@@ -482,14 +620,29 @@ export function computeAutoRc(
   // unwrapped. An interprocedural component is already ≥2 (arg + param, or
   // binding + field), so the gate does not block cross-boundary promotion.
   const componentSize = new Map<string, number>();
+  // Per component root: does it contain a **container** key, and a **shared** container
+  // (a `const t = s` alias)? A container component promotes only when it is *shared*
+  // (086) — the ≥2-member gate can't distinguish it from the always-present arg→param
+  // thread to a lifted `__arrow_n`. A class component keeps the 062/069 ≥2-member gate.
+  const componentHasContainer = new Set<string>();
+  const componentHasShared = new Set<string>();
   for (const key of parent.keys()) {
     const root = find(key);
     componentSize.set(root, (componentSize.get(root) ?? 0) + 1);
+    if (containerKey.has(key)) componentHasContainer.add(root);
+    if (containerShared.has(key)) componentHasShared.add(root);
   }
   const promotedRoot = new Set<string>();
   for (const key of mutated) {
     const root = find(key);
-    if ((componentSize.get(root) ?? 0) >= 2) promotedRoot.add(root);
+    if (componentHasContainer.has(root)) {
+      // A captured **container** component (086) — promote iff it is genuinely shared
+      // in an outer scope (`const t = s`). A lone owned container stays 079's `&mut`.
+      if (componentHasShared.has(root)) promotedRoot.add(root);
+    } else if ((componentSize.get(root) ?? 0) >= 2) {
+      // A class component (062/069) — the shared ≥2-member gate is unchanged.
+      promotedRoot.add(root);
+    }
   }
   // A series-068 consuming reuse force-promotes its receiver's whole component,
   // bypassing the ≥2-member gate (the sharing is with the consumed handle, not a

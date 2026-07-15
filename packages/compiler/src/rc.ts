@@ -58,6 +58,27 @@ const COLLECTION_MUT_METHODS: ReadonlySet<string> = new Set([
   "shift_remove",
 ]);
 
+/**
+ * The **lowered** in-place mutators of a promoted **captured container** (series 086 /
+ * issue #46): the `Vec` / `IndexSet` / `IndexMap` methods that need `.borrow_mut()` when
+ * called on a promoted `Rc<RefCell<T>>` container binding. A read (`get`/`contains`/
+ * `len`) is not here, so it stays `.borrow()`. Kept in lockstep with `alias-escape.ts`
+ * (`CONTAINER_MUT_METHODS`).
+ */
+const CONTAINER_MUT_METHODS: ReadonlySet<string> = new Set([
+  "insert",
+  "shift_remove",
+  "push",
+  "pop",
+  "remove",
+  "clear",
+  "truncate",
+  "sort",
+  "sort_by",
+  "reverse",
+  "swap",
+]);
+
 /** The scope key for a class ctor (its associated `new`). */
 function ctorScope(cls: string): string {
   return `${cls}::new`;
@@ -77,6 +98,18 @@ function classOfType(
   if (ty.kind === "ref") return classOfType(ty.inner, classes);
   if (ty.kind === "rc") return classOfType(ty.inner, classes);
   return null;
+}
+
+/**
+ * Does an expression subtree read the promoted rc ident `name` (series 086 re-entrant
+ * guard)? A bare `name` ident that is in the `rc` set counts; recurses through every
+ * sub-expression. Used to reject `m.set(k, m.get(k)+v)` on a shared cell (the 062
+ * `RefCell` re-entrant-panic shape) before it emits a silent panic.
+ */
+function readsRcIdent(e: HirExpr, name: string, rc: ReadonlySet<string>): boolean {
+  if (name === "") return false;
+  if (e.kind === "ident") return e.name === name && rc.has(name);
+  return subExprsRc(e).some((c) => readsRcIdent(c, name, rc));
 }
 
 export function refineRc(module: HirModule, opts: RcOpts): HirModule {
@@ -138,10 +171,14 @@ export function refineRc(module: HirModule, opts: RcOpts): HirModule {
   return module;
 }
 
-/** Wrap a class type in `Rc<RefCell<T>>`, unwrapping any borrow first. */
+/**
+ * Wrap a type in `Rc<RefCell<T>>`, unwrapping any borrow first. A class `&C` and a
+ * threaded container `&mut IndexSet` (series 086) both unwrap to their owned inner
+ * before wrapping — a promoted handle is an owned `Rc`, never a `&`.
+ */
 function wrapRc(ty: RustType, classes: ReadonlySet<string>): RustType {
   if (ty.kind === "rc") return ty;
-  if (ty.kind === "ref" && classOfType(ty, classes)) return wrapRc(ty.inner, classes);
+  if (ty.kind === "ref") return wrapRc(ty.inner, classes);
   return { kind: "rc", inner: ty };
 }
 
@@ -168,13 +205,17 @@ function rcBody(
   const bindingClass = new Map<string, string>();
 
   // Seed promoted params: they enter scope already `rc`, and their declared type
-  // becomes `Rc<RefCell<T>>` (069 interprocedural).
+  // becomes `Rc<RefCell<T>>` (069 interprocedural class param; 086 a threaded
+  // `__arrow_n` **container** param). A promoted param is wrapped regardless of whether
+  // it is a class — a captured shared container param (`s: IndexSet` → `Rc<RefCell<…>>`)
+  // rides the same path. `bindingClass` still only tracks class params (it drives the
+  // promoted-field read route, a class-only shape).
   const scopeParams = promotedParams.get(scope);
   if (fn) {
     for (const p of fn.params) {
       const cls = classOfType(p.ty, classes);
       if (cls) bindingClass.set(p.name, cls);
-      if (scopeParams?.has(p.name) && cls) {
+      if (scopeParams?.has(p.name)) {
         p.ty = wrapRc(p.ty, classes);
         rc.add(p.name);
       }
@@ -335,7 +376,14 @@ function rcBody(
         // `mutatingMethods` fixpoint). This drives both the `borrow` vs `borrow_mut`
         // choice below **and** the write-mode threaded into a `owner.field` receiver.
         const mutatingCall =
-          mutatingMethods.has(e.name) || COLLECTION_MUT_METHODS.has(e.name);
+          mutatingMethods.has(e.name) ||
+          COLLECTION_MUT_METHODS.has(e.name) ||
+          // A bare in-place container mutator on a promoted captured container (086) —
+          // `a.push(x)` on an rc `Vec` → `a.borrow_mut().push(x)`. Only applies when the
+          // receiver is the promoted rc ident itself (a container binding), never a read.
+          (CONTAINER_MUT_METHODS.has(e.name) &&
+            e.receiver.kind === "ident" &&
+            rc.has(e.receiver.name));
         // A field-held collection mutation on a promoted **owner** —
         // `owner.entries.insert(..)` with `owner` an rc binding (078). The `entries`
         // field itself is not promoted; only the owner is. The receiver `field` must
@@ -347,6 +395,26 @@ function rcBody(
           e.receiver.kind === "field" &&
           e.receiver.object.kind === "ident" &&
           rc.has(e.receiver.object.name);
+        // Re-entrant `RefCell` borrow guard (062 residual, surfaced for containers in
+        // 086): a **mutating** call on a promoted rc ident whose **argument reads the
+        // same cell** would emit `m.borrow_mut().insert(k, m.borrow()…)` — the
+        // `borrow_mut()` guard is live while the arg's `borrow()` runs → runtime panic
+        // (JS never panics). This is the settled 062 fail-loud shape (not a new fork):
+        // `m.set(k, m.get(k) + v)` over a **shared** Map/Set/Vec. Detected on the
+        // pre-rewrite args so the `m` read is still a bare ident.
+        if (
+          mutatingCall &&
+          e.receiver.kind === "ident" &&
+          rc.has(e.receiver.name) &&
+          e.args.some((a) => readsRcIdent(a, e.receiver.kind === "ident" ? e.receiver.name : "", rc))
+        ) {
+          throw new DialectError(
+            `re-entrant mutation of a shared \`Rc<RefCell>\` container '${e.receiver.name}' — ` +
+              `a mutating call whose argument reads the same cell (\`.borrow_mut()\` held ` +
+              `across a \`.borrow()\`) would panic at runtime; split the read out into a ` +
+              `local before the write (series 086 / 062 re-entrant fail-loud residual)`,
+          );
+        }
         const recv = rewrite(e.receiver, ownerFieldMut);
         const args = e.args.map((a) => rewrite(a));
         // A method call on a promoted binding (062) — or on a read through a
@@ -365,7 +433,9 @@ function rcBody(
         return { ...e, receiver: recv, args };
       }
       case "len":
-        return { ...e, object: rewrite(e.object) };
+        // `s.len()` / `.size` on an rc container (086) reads through `.borrow()`:
+        // `s.borrow().len()`. A non-rc object is returned unchanged by `maybeBorrow`.
+        return { ...e, object: maybeBorrow(rewrite(e.object), false) };
       case "strConcat":
         // A `+`-concatenation over parts (series string-concat): each part may read
         // through an `rc` field (`a.items.len()`), so recurse or the read misses its
@@ -789,14 +859,20 @@ function rcBody(
           if (cls) bindingClass.set(s.name, cls);
         }
         const alias = s.init.kind === "ident" && rc.has(s.init.name);
-        // Promote when a `"use rc"` directive covers *any* class binding (028b),
-        // or when the alias-escape analysis selected this binding (062/069).
+        // Promote when a `"use rc"` directive covers *any* class binding (028b), or when
+        // the alias-escape analysis selected this binding (062/069 class; 086 a
+        // shared/aliased captured **container** — `const s = new Set()` / `const t = s`).
         const promote = (directive && classTy) || promotedLocals.has(s.name);
         if (promote) {
           s.init = alias
             ? { kind: "rcClone", expr: s.init }
             : { kind: "rcNew", inner: s.init };
+          // Wrap the declared type in `Rc<RefCell<T>>` for a class (069) or a container
+          // (086); a bare untyped container binding (`const acc = []`, `s.ty === null`)
+          // has no annotation to wrap — the `Rc::new(RefCell::new(..))` init + turbofish
+          // carries the type. `wrapRc` is idempotent and container-generic.
           if (classTy) s.ty = { kind: "rc", inner: classTy };
+          else if (s.ty) s.ty = wrapRc(s.ty, classes);
           s.mut = false; // RefCell gives interior mutability — the handle is not `mut`.
           rc.add(s.name);
         }
