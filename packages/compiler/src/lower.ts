@@ -346,6 +346,10 @@ export function lower(program: Program, source?: string): HirModule {
   // as top-level items now, *before* the refine chain, so the passes below type
   // and refine them like any other fn.
   items.push(...analysis.liftedFns);
+  // Object-literal interface synthesis (series 071 increment 2): the per-literal
+  // `struct <Interface>__litN` + its `impl I<Interface>` synthesized when an
+  // object literal was typed as a behavioral interface during lowering.
+  items.push(...analysis.litStructs);
 
   // Class inheritance (series 053b/c): synthesize the shared `trait IA` for each
   // extended base and rewire each participating class's `impl IA` (overrides +
@@ -3562,9 +3566,12 @@ function lowerClass(
       throw new UnsupportedError({ type: "class implements a non-identifier" });
     }
     if (!analysis.behavioralInterfaces.has(iname)) {
-      throw new UnsupportedError({
-        type: `class implements '${iname}' (a data-only interface has no behavioral trait — deferred)`,
-      });
+      // `implements` of a **pure-data** (methods-less) interface (series 071
+      // increment 2) is a field-shape assertion, not a dispatch contract: there
+      // is no trait to bind. TS already type-checked that the class structurally
+      // carries the interface's fields, so the class stays a plain `struct` with
+      // no `impl` synthesized. Skip this clause (contribute no `interfaceImpl`).
+      continue;
     }
     const methods = analysis.interfaceMethods.get(iname) ?? [];
     const getters = (analysis.structFields.get(iname) ?? []).map((f) => ({
@@ -6274,7 +6281,8 @@ function lowerVarDecl(
     if (
       ty?.kind === "vec" &&
       ty.elem.kind === "struct" &&
-      analysis.baseClasses.has(ty.elem.name) &&
+      (analysis.baseClasses.has(ty.elem.name) ||
+        analysis.behavioralInterfaces.has(ty.elem.name)) &&
       d.init.type === "ArrayExpression" &&
       isHeterogeneous(d.init as ArrayExpression, ty.elem.name, analysis)
     ) {
@@ -6284,6 +6292,18 @@ function lowerVarDecl(
         elem: { kind: "box", inner: { kind: "dyn", trait: traitNameOf(base) } },
       };
       analysis.dynBindings.set(d.id.name, base);
+    }
+    // Object-literal interface synthesis (series 071 increment 2): a binding typed
+    // as a behavioral interface whose init lowered to a synthesized per-literal
+    // struct (`Shape__litN { … }`) has no `struct Shape` — retype the binding to
+    // the synthesized struct so `let s = Shape__lit1 { … }` type-checks.
+    if (
+      letTy?.kind === "struct" &&
+      analysis.behavioralInterfaces.has(letTy.name) &&
+      init.kind === "structLit" &&
+      init.name !== letTy.name
+    ) {
+      letTy = { kind: "struct", name: init.name };
     }
     // A stepped generator instance (`const it = g()`, series 075) is mutated by each
     // `it.step()` (`&mut self`), so it must bind `let mut` even without a TS reassign.
@@ -6391,6 +6411,17 @@ function lowerTyped(
       : { kind: "some", value: lowerTyped(expr, ty.inner, analysis) };
   }
   if (ty?.kind === "struct" && expr.type === "ObjectExpression") {
+    // Object-literal interface synthesis (series 071 increment 2): an object
+    // literal typed as a *behavioral* interface has no `struct <Name>` to build —
+    // synthesize a per-literal nominal struct (data fields + non-capturing method
+    // literals as `fn`-pointer fields) + `impl I<Name>`, and construct *that*.
+    if (analysis.behavioralInterfaces.has(ty.name)) {
+      return synthesizeInterfaceLiteral(
+        expr as ObjectExpression,
+        ty.name,
+        analysis,
+      );
+    }
     return lowerStructLiteral(expr as ObjectExpression, ty.name, analysis);
   }
   if (ty?.kind === "hashmap" && expr.type === "ObjectExpression") {
@@ -6425,9 +6456,15 @@ function lowerTyped(
     // subtypes is heterogeneous → `Vec<Box<dyn IA>>`; each element is upcast
     // with `Box::new(...)`. Detected when the elem type is an extended base and
     // the literal's `new` elements name a subclass (a class ≠ the base).
+    // Behavioral-interface arrays (series 071 increment 2) reuse the same
+    // `Box<dyn I<Name>>` path: a `Shape[]` holding instances of implementing
+    // classes is stored polymorphically → each element dispatches via the trait
+    // vtable. Every element class differs from the interface name, so
+    // `isHeterogeneous` is always true for a non-empty array of instances.
     if (
       ty.elem.kind === "struct" &&
-      analysis.baseClasses.has(ty.elem.name) &&
+      (analysis.baseClasses.has(ty.elem.name) ||
+        analysis.behavioralInterfaces.has(ty.elem.name)) &&
       isHeterogeneous(expr as ArrayExpression, ty.elem.name, analysis)
     ) {
       return {
@@ -6446,6 +6483,208 @@ function lowerTyped(
     };
   }
   return lowerExpr(expr, analysis);
+}
+
+/**
+ * Object-literal interface synthesis (series 071 increment 2). An object literal
+ * typed as a **behavioral** interface (`const s: Shape = { area: () => 5 }`) has
+ * no named struct to build — synthesize a per-literal nominal struct
+ * `struct <Interface>__litN` whose data fields are ordinary and whose method
+ * literals are stored as **`fn`-pointer fields** (non-capturing arrows only) plus
+ * an `impl I<Interface>` dispatching each trait method through the stored pointer.
+ * The synthesized struct is queued on `analysis.litStructs` (appended to module
+ * items) and the literal is lowered to its `structLit` construction.
+ *
+ * @throws {UnsupportedError} on a **capturing** method literal (needs a boxed
+ *   `Box<dyn Fn…>` field — a later series), a non-arrow method value, or a
+ *   property not present on the interface (the interface drives the field set).
+ */
+function synthesizeInterfaceLiteral(
+  obj: ObjectExpression,
+  iface: string,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const methodSigs = analysis.interfaceMethods.get(iface) ?? [];
+  const methodByName = new Map(methodSigs.map((m) => [m.name, m]));
+  const dataFields = analysis.structFields.get(iface) ?? [];
+  const dataByName = new Map(dataFields.map((f) => [f.name, f.ty]));
+
+  const structName = `${iface}__lit${(analysis.litCounter += 1)}`;
+  const fields: { name: string; ty: RustType }[] = [];
+  const litFields: { name: string; value: HirExpr }[] = [];
+  const litMethods: { sig: HirFn; field: string }[] = [];
+  const litGetters: { field: string; ty: RustType }[] = [];
+
+  for (const p of obj.properties) {
+    if (p.type !== "Property" || p.computed) {
+      throw new UnsupportedError({
+        type: "unsupported object-literal member (spread or computed key) in an interface-typed literal",
+      });
+    }
+    const key = p.key;
+    const name =
+      key.type === "Identifier"
+        ? (key as Identifier).name
+        : key.type === "Literal" && typeof (key as Literal).value === "string"
+          ? ((key as Literal).value as string)
+          : null;
+    if (name == null) {
+      throw new UnsupportedError({
+        type: "non-identifier key in an interface-typed object literal",
+      });
+    }
+    const sig = methodByName.get(name);
+    if (sig) {
+      // A method member — its value must be a **non-capturing** arrow so it can
+      // coerce to an `fn`-pointer field. A capturing arrow (closes over a local /
+      // `this`) needs a boxed-closure field — fail-loud until a later series.
+      const value = p.value;
+      if (value.type !== "ArrowFunctionExpression") {
+        throw new UnsupportedError({
+          type: `method '${name}' in an interface-typed literal must be an arrow (non-method-shorthand)`,
+        });
+      }
+      assertNonCapturingLiteralMethod(
+        value as ArrowFunctionExpression,
+        analysis,
+      );
+      const fnTy: RustType = {
+        kind: "fnPtr",
+        params: sig.params.map((pp) => pp.ty),
+        ret: sig.ret,
+      };
+      fields.push({ name, ty: fnTy });
+      litFields.push({
+        name,
+        value: lowerLiteralMethodClosure(
+          value as ArrowFunctionExpression,
+          analysis,
+        ),
+      });
+      litMethods.push({ sig, field: name });
+    } else if (dataByName.has(name)) {
+      // A data field (mixed interface) — an ordinary struct field + by-value getter.
+      const ty = dataByName.get(name) as RustType;
+      fields.push({ name, ty });
+      litFields.push({ name, value: lowerTyped(p.value, ty, analysis) });
+      litGetters.push({ field: name, ty });
+    } else {
+      throw new UnsupportedError({
+        type: `object-literal property '${name}' is not declared on interface '${iface}'`,
+      });
+    }
+  }
+
+  analysis.litStructs.push({
+    kind: "struct",
+    name: structName,
+    fields,
+    litImpl: {
+      trait: traitNameOf(iface),
+      methods: litMethods,
+      getters: litGetters,
+    },
+  });
+
+  return { kind: "structLit", name: structName, fields: litFields };
+}
+
+/**
+ * A method literal in an interface-typed object literal must be **non-capturing**
+ * to become an `fn`-pointer field (series 071 increment 2). It captures if its
+ * body references `this`, or any free identifier that is not its own param/local,
+ * a top-level fn/class/enum, or a known callback global. A capturing literal is
+ * fail-loud (a boxed-closure field is a later series).
+ *
+ * @throws {UnsupportedError} when the arrow captures its environment.
+ */
+function assertNonCapturingLiteralMethod(
+  arrow: ArrowFunctionExpression,
+  analysis: ModuleAnalysis,
+): void {
+  const bound = new Set<string>();
+  for (const p of arrow.params) collectBoundNames(p, bound);
+  astWalk(arrow.body, (n) => {
+    if (n.type === "VariableDeclarator") collectBoundNames(n.id, bound);
+    if (
+      n.type === "ArrowFunctionExpression" ||
+      n.type === "FunctionExpression"
+    ) {
+      for (const p of (n as { params?: unknown[] }).params ?? []) {
+        collectBoundNames(p, bound);
+      }
+    }
+  });
+  // A reference to a top-level *name* (class, enum, interface, generator, or
+  // free/async fn) is not a capture — it's a path, valid in a non-capturing
+  // closure. `analysis.topLevelFns` holds the module's free-fn names.
+  const topLevel = (name: string): boolean =>
+    analysis.classes.has(name) ||
+    analysis.enums.has(name) ||
+    analysis.behavioralInterfaces.has(name) ||
+    analysis.asyncFns.has(name) ||
+    analysis.generators.has(name) ||
+    analysis.topLevelFns.has(name);
+  let captures = false;
+  astWalk(arrow.body, (n) => {
+    if (n.type === "ThisExpression") captures = true;
+    if (n.type === "Identifier") {
+      const name = (n as { name?: string }).name;
+      if (
+        name != null &&
+        !bound.has(name) &&
+        !CB_GLOBALS.has(name) &&
+        !topLevel(name)
+      ) {
+        captures = true;
+      }
+    }
+  });
+  if (captures) {
+    throw new UnsupportedError({
+      type: "capturing method literal in an interface-typed object literal (closes over a local or `this` — needs a boxed-closure field, a later series)",
+    });
+  }
+}
+
+/**
+ * Lower a non-capturing method literal (`() => 5` or `(x) => { return x + 1 }`)
+ * to a `{kind:"closure"}` HirExpr that coerces to the field's `fn`-pointer type
+ * (series 071 increment 2). An expression body lowers directly; a block body must
+ * be a single `return <expr>;` (an early-return / multi-statement literal method
+ * is a later slice). The capture check has already run.
+ *
+ * @throws {UnsupportedError} on a block body that is not a single `return <expr>`.
+ */
+function lowerLiteralMethodClosure(
+  arrow: ArrowFunctionExpression,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const params = arrow.params.map((p) => {
+    if ((p as { type?: string }).type !== "Identifier") {
+      throw new UnsupportedError({
+        type: "destructured parameter in an interface-literal method (a later slice)",
+      });
+    }
+    return (p as unknown as Identifier).name;
+  });
+  const body = arrow.body as unknown as { type: string; body?: Statement[] };
+  let value: HirExpr;
+  if (body.type === "BlockStatement") {
+    const stmts = body.body ?? [];
+    if (stmts.length !== 1 || stmts[0]?.type !== "ReturnStatement") {
+      throw new UnsupportedError({
+        type: "interface-literal method body must be an expression or a single `return` (a later slice)",
+      });
+    }
+    const ret = (stmts[0] as unknown as { argument?: Expression }).argument;
+    value = ret
+      ? lowerExpr(ret, analysis)
+      : ({ kind: "unit" } as unknown as HirExpr);
+  } else {
+    value = lowerExpr(arrow.body as unknown as Expression, analysis);
+  }
+  return { kind: "closure", params, body: value };
 }
 
 /**

@@ -1091,6 +1091,20 @@ export interface HirStruct {
    * `Hash, PartialEq, Eq` (its field eligibility was enforced at collection time).
    */
   hashEq?: boolean;
+  /**
+   * Object-literal interface synthesis (series 071 increment 2): a per-literal
+   * nominal struct standing in for `const s: Shape = { area: () => 5 }`. Its data
+   * fields are ordinary; each method literal is stored as an **`fn`-pointer field**
+   * (non-capturing). `litImpl` records the behavioral trait it satisfies and, for
+   * every trait method, the fn-ptr field to invoke — emitted as
+   * `impl ITrait for Name { fn m(&self, …) -> R { (self.m)(…) } }`. Absent for an
+   * ordinary struct/interface.
+   */
+  litImpl?: {
+    trait: string;
+    methods: { sig: HirFn; field: string }[];
+    getters: { field: string; ty: RustType }[];
+  };
 }
 
 /**

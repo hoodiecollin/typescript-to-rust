@@ -630,6 +630,26 @@ function emitStruct(
       .join("\n");
     return `impl ${rid(it.trait)} for ${rid(s.name)} {\n${getters}\n}`;
   });
+  // Object-literal interface synthesis (series 071 increment 2): the per-literal
+  // struct's `impl I<Name>` — each data field a by-value getter (clone), each
+  // method a call through the stored `fn`-pointer field `(self.m)(args)`.
+  if (s.litImpl) {
+    const li = s.litImpl;
+    const getterFns = li.getters.map((g) =>
+      indent(
+        `fn ${rid(g.field)}(&self) -> ${emitType(g.ty)} { self.${rid(g.field)}.clone() }`,
+      ),
+    );
+    const methodFns = li.methods.map(({ sig, field }) =>
+      indent(
+        `${emitFnSig(sig)} { (self.${rid(field)})(${sig.params
+          .map((p) => rid(p.name))
+          .join(", ")}) }`,
+      ),
+    );
+    const body = [...getterFns, ...methodFns].join("\n");
+    impls.push(`impl ${rid(li.trait)} for ${rid(s.name)} {\n${body}\n}`);
+  }
   return [decl, ...impls].join("\n\n");
 }
 

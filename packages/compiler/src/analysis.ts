@@ -24,7 +24,7 @@
  */
 
 import type { FunctionDeclaration, Program, Statement, TSType } from "./ast";
-import type { HirFn, RustType } from "./hir";
+import type { HirFn, HirStruct, RustType } from "./hir";
 import { type StdShimName, collectStdShimBindings } from "./std-shim";
 import type { TypeOracle } from "./type-oracle";
 
@@ -229,6 +229,12 @@ export interface ModuleAnalysis {
    */
   classes: Set<string>;
   /**
+   * Top-level free-function names (series 071 increment 2). A reference to one
+   * inside a synthesized interface-literal method is a path (valid in a
+   * non-capturing closure), not an environment capture.
+   */
+  topLevelFns: Set<string>;
+  /**
    * Scope keys (free-fn names + `SCRIPT_SCOPE`) carrying a leading `"use rc"`
    * directive (series 028b). In such a scope, class-typed bindings translate under
    * `Rc<RefCell<T>>` (shared, interior-mutable) instead of plain moves, so
@@ -358,6 +364,18 @@ export interface ModuleAnalysis {
    * incremented once per lifted callback so two callbacks get distinct names.
    */
   liftCounter: number;
+  /**
+   * Object-literal interface synthesis (series 071 increment 2): the per-literal
+   * `struct <Interface>__litN` items synthesized when an object literal is typed
+   * as a behavioral interface. Collected during lowering and appended to the
+   * module's `items` (like `liftedFns`) before the refine passes.
+   */
+  litStructs: HirStruct[];
+  /**
+   * A per-module counter for the `<Interface>__litN` naming (series 071), so two
+   * object literals of the same interface type get distinct struct names.
+   */
+  litCounter: number;
   /**
    * Class inheritance (series 053). Subclass name → its direct base class name
    * (from `decl.superClass`). Drives the synthetic `base: A` embed and the
@@ -1360,6 +1378,16 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     }
   }
 
+  // Top-level free-function names (series 071 increment 2): a reference to one
+  // inside a synthesized interface-literal method is a path, not a capture.
+  const topLevelFns = new Set<string>();
+  for (const stmt of program.body) {
+    if (stmt.type === "FunctionDeclaration") {
+      const id = (stmt as { id?: { name?: string } }).id;
+      if (id?.name) topLevelFns.add(id.name);
+    }
+  }
+
   // ── Class inheritance facts (series 053) ────────────────────────────────────
   // `superclass`: subclass → its direct base (a plain `extends A`, not `extends
   // Error`). `ownFields`: per class, the field names it declares (property
@@ -1532,6 +1560,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     enums,
     panicScopes,
     classes,
+    topLevelFns,
     rcScopes,
     arenaScopes,
     generators,
@@ -1564,6 +1593,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     interfaceMethods: new Map(),
     liftedFns: [],
     liftCounter: 0,
+    litStructs: [],
+    litCounter: 0,
     superclass,
     inheritedFields,
     overrides,
