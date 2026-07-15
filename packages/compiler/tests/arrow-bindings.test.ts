@@ -67,21 +67,24 @@ console.log(run());`,
     extra: ({ rust }) => expect(rust).toContain("async fn load() -> f64"),
   },
   {
-    // A promoted/hoisted arrow becomes a free fn, which cannot capture — the
-    // captured name is out of scope, so cargo rejects (unchanged from 048).
-    name: "capturing arrow → rejected (cargo cannot resolve the captured name)",
-    src: `const base = 10;
-const addBase = (n: number): number => n + base;
-console.log(addBase(5));`,
-    expectFail: true,
-  },
-  {
     name: "regression: top-level `const` arrow still promotes to a direct fn",
     src: `const inc = (n: number): number => n + 1;\nconsole.log(inc(4));`,
     expected: "5",
     extra: ({ rust }) => expect(rust).toContain("fn inc(n: f64) -> f64"),
   },
 ]);
+
+test("capturing arrow → fail-loud (a promoted free fn cannot capture)", () => {
+  // A promoted/hoisted arrow becomes a free fn, which cannot capture — the
+  // captured scalar `base` is out of scope. The dialect rejects this at
+  // compile-to-Rust time (a compile-time throw, so a plain `toThrow`, not a
+  // cargo `expectFail`).
+  expect(() =>
+    compile(
+      `const base = 10;\nconst addBase = (n: number): number => n + base;\nconsole.log(addBase(5));`,
+    ),
+  ).toThrow();
+});
 
 test("rest param → UnsupportedError", () => {
   expect(() =>

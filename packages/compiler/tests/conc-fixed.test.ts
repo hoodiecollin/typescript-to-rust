@@ -52,7 +52,11 @@ async function run(): Promise<void> {
   console.log(a, b);
 }
 await run();`,
-    expected: "",
+    // The program *errors out* (a propagated rejection / `try_join!` short-circuit)
+    // — a non-zero exit on BOTH sides, so `expectFail` (not a plain ok-differential),
+    // with the extra pinning the "nothing is printed" intent (no "1 2").
+    expectFail: true,
+    extra: ({ result }) => expect(result.stdout.trim()).toBe(""),
   },
   {
     // Both futures resolve immediately. tokio's `select!` picks a *random* ready
