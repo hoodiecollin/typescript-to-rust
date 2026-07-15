@@ -955,7 +955,7 @@ function placeInExpr(e: HirExpr, liveOut: Live, ctx: PlaceCtx): void {
           });
         });
         return;
-      // Leaves: number, string, bool, path, bumpNew.
+      // Leaves: number, string, bool, path, bumpNew, bumpString.
     }
   }
 

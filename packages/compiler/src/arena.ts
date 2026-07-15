@@ -18,18 +18,39 @@
  * rejects — cargo *is* the escape analysis, so this stays fail-loud without a
  * bespoke pass. See `docs/work/028-compiler-directives/arena-spike.md`.
  *
- * Scope of this first increment: `array`-literal-initialized `let`s in the scope
- * body (Copy elements). The binding's type annotation is dropped so bumpalo's
- * lifetime is inferred — the emitter never has to write `'a`. Deferred (heap or
- * cargo-loud): arena `String`/boxed nodes, arena values in signatures/fields,
- * nested arenas, and non-literal `Vec` sources.
+ * Slices: `array`-literal `let`s (028c), plus (series 087) `string`-literal `let`s
+ * → `bumpalo::collections::String::from_str_in(…, &arena)` and **nested**
+ * literals — an `array` element that is itself an `array`/`string` literal is
+ * recursively routed into the same arena. The binding's type annotation is
+ * dropped so bumpalo's lifetime is inferred — the emitter never has to write `'a`.
+ * Deferred (heap or cargo-loud): arena boxed nodes, arena values in
+ * signatures/fields (an escape → cargo lifetime error), and non-literal sources.
  */
 
 import { SCRIPT_SCOPE } from "./analysis";
-import type { HirModule, HirStmt } from "./hir";
+import type { HirExpr, HirModule, HirStmt } from "./hir";
 
 /** The synthetic arena binding injected at each `"use arena"` scope entry. */
 const ARENA = "arena";
+
+/**
+ * Route a `let`-init expression into the arena (series 087). An `array` literal
+ * becomes a `bumpVec` whose *elements* are themselves recursively routed (so a
+ * nested `[[…], …]` / `["…", …]` allocates every level from the arena); a
+ * `string` literal becomes a `bumpString`. Any other expression is left as-is
+ * (heap / cargo-loud). Returns null when nothing was routed, so the caller knows
+ * whether to prepend the arena binding.
+ */
+function routeArena(e: HirExpr): HirExpr | null {
+  if (e.kind === "array") {
+    const elements = e.elements.map((el) => routeArena(el) ?? el);
+    return { kind: "bumpVec", arena: ARENA, elements };
+  }
+  if (e.kind === "string") {
+    return { kind: "bumpString", arena: ARENA, value: e.value };
+  }
+  return null;
+}
 
 export function refineArena(
   module: HirModule,
@@ -54,13 +75,18 @@ export function refineArena(
 function arenaBody(body: HirStmt[]): HirStmt[] {
   let used = false;
   const out = body.map((s): HirStmt => {
-    if (s.kind === "let" && s.init.kind === "array") {
-      used = true;
-      return {
-        ...s,
-        ty: null, // let bumpalo's `Vec<'a, T>` lifetime infer — no `'a` to write.
-        init: { kind: "bumpVec", arena: ARENA, elements: s.init.elements },
-      };
+    if (s.kind === "let") {
+      const routed = routeArena(s.init);
+      if (routed) {
+        used = true;
+        return {
+          ...s,
+          // Drop the annotation so bumpalo's `Vec<'a, T>` / `String<'a>` lifetime
+          // infers — the emitter never has to write `'a`.
+          ty: null,
+          init: routed,
+        };
+      }
     }
     return s;
   });

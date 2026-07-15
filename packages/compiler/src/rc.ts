@@ -355,13 +355,24 @@ function rcBody(
         const args = e.args.map((a, i) => {
           const expr = rewrite(a.expr);
           const pname = order[i];
-          if (
-            pname &&
-            calleePromoted.has(pname) &&
-            expr.kind === "ident" &&
-            rc.has(expr.name)
-          ) {
+          const promotedParam = pname !== undefined && calleePromoted.has(pname);
+          const isRc = expr.kind === "ident" && rc.has(expr.name);
+          if (promotedParam && isRc) {
             return { borrow: "owned" as const, expr: { kind: "rcClone" as const, expr } };
+          }
+          // Cross-call read of an rc binding into a **non-promoted** callee param
+          // (series 087): the param takes the inner class by shared ref (`x: &Box`),
+          // but the caller holds an `Rc<RefCell<Box>>`. A bare `&a` would be
+          // `&Rc<RefCell<Box>>` — an `E0308` type mismatch. Route the read through
+          // the cell: `&a.borrow()` (a `Ref<Box>` that derefs to `&Box`). Only the
+          // read (`ref`) form is faithful — a `refMut`/`owned` into a non-promoted
+          // param can't hand a `&mut`/owned `Box` out of the shared cell, so it is
+          // left as-is and the oracle (cargo) rejects it (loud, never silent).
+          if (!promotedParam && isRc && a.borrow === "ref") {
+            return {
+              borrow: "ref" as const,
+              expr: { kind: "method" as const, receiver: expr, name: "borrow", args: [] },
+            };
           }
           return { ...a, expr };
         });

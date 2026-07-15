@@ -603,6 +603,13 @@ export type HirExpr =
    */
   | { kind: "bumpVec"; arena: string; elements: HirExpr[] }
   /**
+   * `bumpalo::collections::String::from_str_in(<value>, &<arena>)` — a `String`
+   * built from a bump arena (series 087). Replaces a heap `string` literal in a
+   * `"use arena"` scope; `.len()`/`.push_str` work unchanged on it, so only
+   * construction differs. `value` is the raw string literal (rendered quoted).
+   */
+  | { kind: "bumpString"; arena: string; value: string }
+  /**
    * `std::sync::Arc::clone(&name)` — a fresh shared handle to a task-escaping
    * capture, moved into a spawned task (series 051c increment 2, the
    * inter-procedural task-escape pass). Replaces a bare-move spawn arg once the

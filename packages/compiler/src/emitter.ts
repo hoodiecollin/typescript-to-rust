@@ -1743,6 +1743,8 @@ function emitExpr(expr: HirExpr): string {
       return "bumpalo::Bump::new()";
     case "bumpVec":
       return `bumpalo::vec![in &${rid(expr.arena)}; ${expr.elements.map(emitExpr).join(", ")}]`;
+    case "bumpString":
+      return `bumpalo::collections::String::from_str_in(${JSON.stringify(expr.value)}, &${rid(expr.arena)})`;
   }
 }
 
