@@ -89,7 +89,9 @@ flip it.
   fields are `PartialEq` (so numeric records compare) but not `Eq`, so this does
   **not** unlock struct map/set keys (#21). A struct with a non-`PartialEq` field
   (an `fn`-pointer) compared with `===` is a clean `UnsupportedError`, not a
-  silent miscompile.
+  silent miscompile. The **same structural equality** applies to `===`/`!==` over a
+  **struct-instantiated generic `T`** (series 088), via the per-struct
+  `impl tslib::ops::JsEq` — see the *Generics* section.
 
 ---
 
@@ -270,11 +272,53 @@ lowers by **monomorphization**: rustc emits one specialization per instantiation
   `Box<f64>` from the ctor arg); no turbofish is emitted. A generic **struct-reference**
   annotation `const b: Box<number> = new Box(5)` lowers (`Box<f64>`).
 
-**Fail-loud residuals (slice 3, graduates with #44 — the TS type layer):**
+#### Operators over a generic `T` — the JS-operator trait layer (series 088)
+
+Inside a generic body a bare `T` is a **JS value**: when **both operands of an
+operator are the same `{kind:"param"}` T**, the operator lowers to a **tslib
+JS-operator trait method** (`this.v + o` → `self.v.js_add(&o)`), not a native Rust
+operator. This is the Rust-side mirror of the std-shim isolation boundary — every
+JS-operator quirk lives in one macro-generated tslib `ops` layer
+(`crates/tslib/src/ops.rs`) instead of being smeared across the emitter. It is
+zero-cost (rustc inlines each method) and **uniform** — one mechanism for all
+operators, no native/trait/constraint split. Concrete (non-generic) code is
+**completely untouched** (native `+`, existing string-concat path, struct-eq).
+
+- **In scope (each over a same-`T` pair):** `+ - * / %` (arithmetic; `+` is also
+  String concat), `< <= > >=` (ordering), `=== !==` (equality). Dispatch is
+  by-reference (`&self, &Self`), ownership-safe.
+- **The trait bound IS the constraint.** There is **no `<T extends number>` syntax.**
+  The author writes plain `<T>` and uses operators; legality is enforced by *which
+  types implement which trait*. A body using `-` bounds `T: tslib::ops::JsSub`, which
+  only `f64` satisfies, so a `String` instantiation fails **at the bound** (loud,
+  never miscompiled). "Numeric-only arithmetic" is encoded in the tslib impl set, not
+  the validator. Type coverage: `f64` — all; `String` — `JsAdd`(concat)/`JsOrd`/
+  `JsEq`; `bool` — `JsOrd`/`JsEq`; a `PartialEq` user struct — `JsEq` (structural).
+- **Bounds are demand-driven.** A body adds a bound only for the operators it uses
+  (`+` → `JsAdd`, `<` → `JsOrd`, `===` → `JsEq`), unioned onto the scope's generic
+  clause (reusing 081's `Clone`-bound machinery): `struct Box<T: tslib::ops::JsAdd>` /
+  `impl<T: tslib::ops::JsAdd + Clone> Box<T>`.
+- **Structural `===` over a struct-`T`.** Every `PartialEq`-deriving struct/class
+  emits `impl tslib::ops::JsEq for S { fn js_eq(&self,o) { self == o } … }`
+  (unconditionally, guarded by the derive set so it always compiles), so `===`/`!==`
+  work over a struct-instantiated `T` — **structural** (Rust) vs identity (JS), the
+  same divergence the dialect already accepts for concrete struct `===`.
+- **Documented edge:** `<`/`>` on a `String`-`T` orders by UTF-8 bytes (≡ Unicode
+  scalar); JS by UTF-16 code units — differ only for astral (non-BMP) chars.
+
+**Fail-loud residuals (still loud, a later slice):**
 
 | Form | Status | Message shape |
 |------|--------|---------------|
-| An **operator on a bare `T`** (`a + b`, `a < b`, `a === b` where `a,b: T`) | Not yet | `operator '<op>' on a generic type parameter 'T' — … the #44 type-layer wall … compute over a bounded 'T' …` |
+| **Mixed operands** — an operator with a `T` and a **non-`T`** side (`this.v + 1`, `t < 5`): the JS coercion case | Not yet | `operator '<op>' on a generic type parameter '<T>' and a non-'<T>' operand (a mixed-operand JS coercion …)` |
+| **Logical** (`&& \|\|`) over a bare `T` — truthiness of an opaque `T` isn't knowable | Not yet | `logical operator '<op>' on a generic type parameter — truthiness of an opaque 'T' isn't knowable …` |
+| **Bitwise / compound** (or a same-`T` operator on a **method's own `<U>`**) over a bare `T` | Not yet | `operator '<op>' on a generic type parameter '<T>' — only arithmetic / ordering / equality over two same-'<T>' operands … (a class-level type parameter) …` |
+| **Type-illegal use** — `String`-minus, struct arithmetic, struct-`===` without `PartialEq` | Loud (rustc) | a rustc bound error (`Js…` unmet) — documented, never a miscompile |
+
+**Other fail-loud residuals (slice 3, graduates with #44 — the TS type layer):**
+
+| Form | Status | Message shape |
+|------|--------|---------------|
 | **Explicit call-site type args** on `new` (`new Box<string>(x)`) | Not yet | `explicit type arguments on \`new Box<…>(…)\` (construction is inference-only …)` |
 | **Explicit call-site type args** on a call (`identity<number>(5)`) | Not yet | `explicit type arguments on a generic call \`f<…>(…)\` (calls are inference-only …)` |
 | A **class** as a bound (`<T extends SomeClass>`) | Not yet | `class '<C>' used as a generic bound … (a class isn't a trait bound)` |

@@ -51,9 +51,11 @@ Spec IDs map to `packages/compiler/tests/class-generics.test.ts`.
 
 ## Fail-loud residuals (guards)
 
-- **CG8** — an **operator on a bare `T`**: a method `sum(a: T, b: T): T { return a + b; }`
-  on `class Box<T>` throws `UnsupportedError` (the #44 wall — the definition site
-  can't know `T`'s runtime type). Precise message names the generic-operator wall.
+- **CG8** — *(retargeted by series 088 / #62)* an operator over a **same-`T`** pair
+  now lowers to the tslib JS-operator trait layer (`a + b` where `a,b: T`); the
+  spec retargets to the still-loud **mixed-operand** case (a `T` and a non-`T`
+  operand, e.g. `this.v + 1`), which stays `UnsupportedError` (the JS coercion the
+  definition site can't resolve). See `docs/work/_archive/088-generic-operators/`.
 - **CG9** — an **explicit call-site type arg** `new Box<string>("hi")` throws
   `UnsupportedError` (inference-only construction; explicit args unsupported).
 - **CG10** — an **explicit type arg on a generic fn call** `identity<number>(5)`
