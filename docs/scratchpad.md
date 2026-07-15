@@ -15,7 +15,7 @@ this file holds genuinely-open questions only.
   `.rs` golden files are gone.
 - **Async runtime**: **tokio**, decided. TS `async function` → Rust `async fn`;
   the generated entry point becomes `#[tokio::main]`. tokio is pinned in the
-  `.scratch` crate. The harness runs **offline-first with an online fallback**:
+  `rust-oracle` crate. The harness runs **offline-first with an online fallback**:
   it tries `--offline` (fast, warm cache) and only retries online when cargo
   fails *before emitting any diagnostic* — the signature of a cold-cache
   dependency fetch, not a code error.

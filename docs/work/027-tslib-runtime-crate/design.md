@@ -37,7 +37,7 @@ str.padStart(4, "0")      →  tslib::string::pad_start(&s, 4, "0")
 obj.hasOwnProperty("k")   →  tslib::object::has_own(&map, "k")
 ```
 
-The crate is a fixed dependency of the generated `.scratch` crate (like tokio),
+The crate is a fixed dependency of the generated `rust-oracle` crate (like tokio),
 version-pinned; its tests are ordinary `cargo test` and can assert JS parity
 directly.
 

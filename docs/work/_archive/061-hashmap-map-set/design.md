@@ -26,7 +26,7 @@
 
 **Backing type is `indexmap`.** Series 041 adopted `IndexMap` uniformly for
 `Record`/object because JS iterates in **insertion order** (`std::HashMap` doesn't),
-and `indexmap` is already a dependency (`.scratch/Cargo.toml`, `crates/tslib`).
+and `indexmap` is already a dependency (`rust-oracle/Cargo.toml`, `crates/tslib`).
 So `Map<K,V>` → `IndexMap<K,V>` and `Set<T>` → `IndexSet<T>` follow for consistency
 and JS-order fidelity.
 
@@ -68,7 +68,7 @@ and its `Hash` canonicalizes `-0.0`→`0.0` and NaN. So a number-keyed `Map` (in
   `Set<number>` → `IndexSet<OrderedFloat<f64>>`.
 - Key sites wrap: `m.insert(OrderedFloat(k), v)`, `m.get(&OrderedFloat(k))`,
   `s.insert(OrderedFloat(x))`. Iteration unwraps `k.0` (`into_inner`) back to `f64`.
-- Add `ordered-float` to `.scratch/Cargo.toml` (curated-crate precedent:
+- Add `ordered-float` to `rust-oracle/Cargo.toml` (curated-crate precedent:
   `indexmap`/`serde`/`tokio`/`bumpalo`); emitter import `use ordered_float::OrderedFloat;`.
 - A `number` key is `i64`/`usize` when integer-inference proves it integral (cheaper,
   no wrapper); it falls to `OrderedFloat` only when it is genuinely fractional/`f64`.

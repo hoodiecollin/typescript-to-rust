@@ -4,7 +4,7 @@ Status: **RED → GREEN.** Specs live in
 `packages/compiler/tests/rc-directive-next.test.ts` (R1–R3) and
 `packages/compiler/tests/arena-directive-next.test.ts` (A1–A3). Each is a
 differential (compile + cargo-run + match the TS run) or a structural /
-reject spec. Verified serially (one file at a time — the shared `.scratch`
+reject spec. Verified serially (one file at a time — the shared `rust-oracle`
 cargo target flakes under concurrency).
 
 ## R1 — method calls on an rc binding (lock-in)

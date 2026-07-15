@@ -212,7 +212,7 @@ export async function cargoRun(cwd: string): Promise<CargoResult> {
   );
   if (!checked.ok) return checked;
 
-  const bin = join(cwd, "target", "debug", "ttr_scratch");
+  const bin = join(cwd, "target", "debug", "rust_oracle");
   const { exitCode, stdout, stderr } = await spawn([bin], cwd);
   return classify(exitCode, diagnostics, stdout, stderr);
 }
@@ -250,7 +250,7 @@ interface TargetedMessage extends CargoMessage {
  * Batch-build many example programs in a single cargo invocation and run the
  * ones that compiled.
  *
- * All programs are `examples/<id>.rs` in the shared scratch crate, so the heavy
+ * All programs are `examples/<id>.rs` in the shared oracle crate, so the heavy
  * dependency rlibs are compiled **once** and reused across every example (and the
  * carve-out programs that are *expected* to fail). `--keep-going` builds every
  * example that can compile even when others fail; `--message-format=json`

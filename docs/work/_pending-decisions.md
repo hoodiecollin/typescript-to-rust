@@ -95,7 +95,7 @@ note the "one class widens everyone" tax as accepted).
 > **DECISION (2026-07-07): (c) `thiserror`-derived enum.** Collin accepts the
 > external-crate dependency for the ergonomics. Consequences to design: a
 > **Cargo-manifest / dependency-injection seam** is now in scope (the first
-> non-`tslib` dep — thread it through `.scratch/Cargo.toml` and the harness); the
+> non-`tslib` dep — thread it through `rust-oracle/Cargo.toml` and the harness); the
 > generated enum uses `#[derive(thiserror::Error, Debug)]` + `#[error("…")]`
 > attrs instead of hand-written `Display`/`Error`. Still one program-wide enum;
 > still widen fields to message + typed fields. **Design #18 → #17 together.** Open

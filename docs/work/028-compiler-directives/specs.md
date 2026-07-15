@@ -94,7 +94,7 @@ scope body. Each `array`-literal `let` init becomes `bumpalo::vec![in &arena; �
 (new `bumpVec` HIR expr) with its **type annotation dropped** so bumpalo's
 `Vec<'a, T>` lifetime is inferred — the emitter never writes `'a`. If any literal
 was routed, a synthetic `let arena = bumpalo::Bump::new();` (`bumpNew`) is
-prepended. `bumpalo` is pinned in `.scratch/Cargo.toml`.
+prepended. `bumpalo` is pinned in `rust-oracle/Cargo.toml`.
 
 **Soundness by the oracle:** an arena value that escapes the scope (returned,
 stored past the arena's lifetime) is a Rust lifetime error cargo rejects — cargo

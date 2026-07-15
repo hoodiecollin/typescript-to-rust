@@ -8,7 +8,7 @@ hybrid rule. The blocker (value-position closures) cleared in series 033. Specs:
 ## The crate
 
 `crates/tslib/` (workspace member, edition 2021), pinned in
-`packages/compiler/.scratch/Cargo.toml` alongside `ts-primitives`/`tokio`:
+`packages/compiler/rust-oracle/Cargo.toml` alongside `ts-primitives`/`tokio`:
 
 - `array::at<T: Copy>(xs, index: f64) -> T` — JS negative-from-end indexing;
   panics out of range (loud; JS `undefined` is a later `Option` refinement).

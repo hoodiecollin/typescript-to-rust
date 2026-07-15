@@ -82,11 +82,11 @@ fixture demands field-in-message rendering.
 ## The Cargo-dependency seam (first non-`tslib` crate)
 
 `AppError` is the **first generated-output dependency on an external crate**
-(`thiserror`) — every prior dep in `.scratch/Cargo.toml` (tokio, indexmap, serde,
+(`thiserror`) — every prior dep in `rust-oracle/Cargo.toml` (tokio, indexmap, serde,
 bumpalo) is present-but-unused-until-a-feature-routes-to-it; thiserror is the same
 *shape* of seam, so the mechanism is established:
 
-- **Harness / oracle:** add `thiserror = "2"` to `packages/compiler/.scratch/Cargo.toml`
+- **Harness / oracle:** add `thiserror = "2"` to `packages/compiler/rust-oracle/Cargo.toml`
   (alongside the existing present-but-unused deps — costs nothing at check time
   when no error enum is emitted). This is what makes the 049 differential specs
   compile. Pin it so the offline cache stays warm (same note as tokio).

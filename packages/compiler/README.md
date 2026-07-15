@@ -36,7 +36,7 @@ bun run check       # typecheck + rust tests + compiler tests
   module; throws `UnsupportedError` on out-of-dialect input.
 - `src/harness/` — the verification oracle: drives `cargo check`/`cargo run` and
   `rustfmt`, parsing structured diagnostics. This is what judges correctness.
-- `.scratch/` — persistent crate the harness compiles into (gitignored build
+- `rust-oracle/` — persistent crate the harness compiles into (gitignored build
   state).
 - `tests/` — `harness.test.ts` (proves the oracle), `compiler.test.ts` (fixture
   COMPILES + differential BEHAVES), `fixtures/**` (dialect targets).

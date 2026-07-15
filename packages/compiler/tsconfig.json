@@ -30,7 +30,7 @@
 
   // Fixture `.ts` files are dialect *inputs* (data), not project source. Some
   // intentionally reference undefined helpers or exercise edge cases, so they
-  // must not be type-checked as part of the compiler. The `.scratch` crate is
+  // must not be type-checked as part of the compiler. The `rust-oracle` crate is
   // disposable build state.
-  "exclude": ["node_modules", "tests/fixtures", ".scratch"]
+  "exclude": ["node_modules", "tests/fixtures", "rust-oracle"]
 }

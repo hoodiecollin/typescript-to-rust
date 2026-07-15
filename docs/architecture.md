@@ -19,7 +19,7 @@ Implementation details and decisions that aren't obvious from the code.
 │   ├── src/strings.ts             # HIR → HIR: refine read-only &String → &str
 │   ├── src/emitter.ts             # HIR → Rust module string (pure, total)
 │   ├── src/harness/               # the verification oracle (cargo + rustfmt)
-│   ├── .scratch/                  # persistent crate the harness compiles into
+│   ├── rust-oracle/                  # persistent crate the harness compiles into
 │   └── tests/
 │       ├── harness.test.ts        # proves the oracle is sound
 │       ├── compiler.test.ts       # fixture COMPILES + differential BEHAVES
@@ -46,14 +46,14 @@ programmable results instead of opaque pass/fail.
 - **`cargo.ts`** — spawns `cargo`/`rustfmt`, parses `--message-format=json` into
   typed `RustDiagnostic`s (level, error code, source spans, rendered text). This
   is the leverage: failures are explainable and can be mapped back to TS spans.
-- **`index.ts`** — `RustProject` owns the persistent `.scratch` crate. Access is
+- **`index.ts`** — `RustProject` owns the persistent `rust-oracle` crate. Access is
   serialized through a promise queue (one source file, one writer at a time).
   - `check(src)` writes `src/lib.rs` and runs `cargo check --lib` — **library**
     target, so a bare-function snippet with no `main` still verifies.
   - `run(src)` writes `src/main.rs` (and resets `lib.rs`, because a binary
     implicitly links the package lib) and runs `cargo run` for stdout.
 
-### Why a persistent scratch crate
+### Why a persistent oracle crate
 
 Reusing one crate keeps the incremental-compile cache warm, so repeated checks
 stay fast. It declares an empty `[workspace]` to isolate itself from the repo's
@@ -62,7 +62,7 @@ the harness-managed source files are gitignored.
 
 ### Offline-first, online fallback (and tokio)
 
-The scratch crate also depends on **tokio** (pinned) because async lowering
+The oracle crate also depends on **tokio** (pinned) because async lowering
 targets it (`async fn` + `#[tokio::main]`). tokio is a crates.io dependency, so
 the harness can't be purely offline. `runCargo` in `cargo.ts` runs `--offline`
 first (fast when the cache is warm) and retries **online only when cargo fails
@@ -262,7 +262,7 @@ rejects nothing, so every dialect decision has exactly one home.
    (`lowerAwait` wraps the await in a `try` when the callee ∈ `analysis.fallible`;
    the `?` sits outside the await, well-typed because the fixpoint makes the caller
    `Result`). `async` methods are still rejected fail-loud; the numeric pass
-   descends into the new `await` node. The scratch crate pins `tokio`, so the
+   descends into the new `await` node. The oracle crate pins `tokio`, so the
    runtime is present without extra plumbing.
 
 10. **A top-level `const f = (…) => …` arrow normalizes to a free `fn` before

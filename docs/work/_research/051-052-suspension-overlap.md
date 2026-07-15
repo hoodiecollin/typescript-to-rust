@@ -156,7 +156,7 @@ Worth naming precisely, because they are real — just not shared between 051 an
 | Seam | Where it lives | 051 | 052 | Note |
 |---|---|---|---|---|
 | **#9 free-var / lambda-lift** | `freeVarsOf` `lower.ts:3247`, `liftCallback` `lower.ts:3386`, `liftedFns`/`liftCounter` (`analysis.ts:187`) | **Heavy** — `.then` cb, `Promise.all(arr.map(f))`, spawn body, `setTimeout` body; 051c's task-escape reuses the free-var set | **None** — a generator body is not a lifted callback | Shared between **051 and #9/#14**, not 052 |
-| **Cargo-dep injection** | seam from 049 (`.scratch/Cargo.toml`) | **Yes** — `futures`, tokio `"time"` | **No** | Shared between **051 and #49/future async-gen**, not 052 |
+| **Cargo-dep injection** | seam from 049 (`rust-oracle/Cargo.toml`) | **Yes** — `futures`, tokio `"time"` | **No** | Shared between **051 and #49/future async-gen**, not 052 |
 | **Fallibility fixpoint** | `analyzeFallible` `analysis.ts:687`, `fallible` set | **Yes** — `try_join!`/`try_join_all`/`?` (051a/b) | **No** — generators aren't fallible in-dialect | Shared between **051 and #16**, not 052 |
 | **CFG + liveness across suspend** | *new in 052* (`analysis.ts`) | **No** | **Yes (sole owner)** | Reused only by a **future async-gen** series (Q2/§5) |
 

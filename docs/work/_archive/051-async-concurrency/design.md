@@ -10,7 +10,7 @@ which drags in the `Send + 'static + Arc<Mutex<…>>` ownership tax — the hard
 central new analysis work called out below. A rippling change, staged into three
 landable slices, each differential-green.
 
-tokio is already wired (`.scratch/Cargo.toml` pins it with `rt-multi-thread` +
+tokio is already wired (`rust-oracle/Cargo.toml` pins it with `rt-multi-thread` +
 `macros`); `join!`/`select!`/`spawn` are available today, timers need the `"time"`
 feature, and dynamic `join_all`/`allSettled` want the `futures` crate — the two
 manifest additions this series makes (§ Cargo manifest).
@@ -283,7 +283,7 @@ not compile.
 ## Cargo manifest additions
 
 This series reuses the **Cargo-dep injection seam from series 049** (the mechanism
-that lets a lowering decision add a crate/feature to the emitted `.scratch/Cargo.toml`
+that lets a lowering decision add a crate/feature to the emitted `rust-oracle/Cargo.toml`
 rather than pinning everything unconditionally). Two additions, both gated on the
 feature actually being used (present-but-unused costs nothing at check time, matching
 the existing tokio/indexmap/serde comment convention in the manifest):

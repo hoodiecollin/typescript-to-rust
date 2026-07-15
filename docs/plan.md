@@ -432,7 +432,7 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
          builds `Vec` literals from a bump arena: `let arena = bumpalo::Bump::new();`
          + `bumpalo::vec![in &arena; …]` (type annotation dropped → lifetime
          inferred, so no `'a` is written). A post-lowering `refineArena` pass
-         (`src/arena.ts`); `bumpalo` pinned in `.scratch/Cargo.toml`. **Soundness
+         (`src/arena.ts`); `bumpalo` pinned in `rust-oracle/Cargo.toml`. **Soundness
          by the oracle:** an escaping arena value is a cargo lifetime error —
          cargo *is* the escape analysis, no bespoke pass needed. Deferred: arena
          `String`/trees, arena values in signatures/fields, nested arenas. See

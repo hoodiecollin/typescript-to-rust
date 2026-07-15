@@ -91,7 +91,7 @@ Notes that make this tractable:
 3. **New HIR exprs** `bumpNew` and `bumpVec` (elements). Emitter:
    `bumpalo::Bump::new()` and `bumpalo::vec![in &arena; <elems>]`. A
    `use`-prelude scan adds nothing (bumpalo paths are fully qualified); the crate
-   dependency is pinned in `.scratch/Cargo.toml` (+ `Cargo.lock`), like `tslib`.
+   dependency is pinned in `rust-oracle/Cargo.toml` (+ `Cargo.lock`), like `tslib`.
 4. **Fail-loud residuals** (cargo-caught): an arena vec that escapes (returned,
    stored outer) → lifetime error; arena `String`/boxed nodes, arena params,
    nested arenas → not rewritten in the first slice, so they stay heap or hit

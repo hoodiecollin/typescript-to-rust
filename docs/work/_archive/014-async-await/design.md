@@ -10,7 +10,7 @@ generated entry point therefore needs `#[tokio::main]`, which wraps `main` in a
 runtime. The `07_async/01_async_await.ts` fixture is the smallest case (still
 `test.todo`).
 
-The scratch crate already pins `tokio` (see `.scratch/Cargo.toml`), so the
+The scratch crate already pins `tokio` (see `rust-oracle/Cargo.toml`), so the
 runtime is available; this slice is the lowering, not the plumbing.
 
 The targets compile and run (verified with `cargo` against the scratch crate):

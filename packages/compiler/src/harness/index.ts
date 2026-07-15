@@ -9,7 +9,7 @@
  *   - `run(src)`     — compile, run, capture stdout (behavioral oracle)
  *   - `format(src)`  — rustfmt-normalize (for human-readable snapshots)
  *
- * A single persistent scratch crate is reused so the incremental-compile cache
+ * A single persistent oracle crate is reused so the incremental-compile cache
  * stays warm. Access is serialized through a promise queue because the crate has
  * shared source files (`src/lib.rs`, `src/main.rs`); concurrent writers would
  * clobber each other.
@@ -25,14 +25,14 @@ import {
   rustfmt,
 } from "./cargo";
 
-const SCRATCH_DIR = join(import.meta.dir, "..", "..", ".scratch");
+const ORACLE_DIR = join(import.meta.dir, "..", "..", "rust-oracle");
 
 /** A cargo crate the harness can write source into and compile/run. */
 export class RustProject {
   readonly dir: string;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor(dir: string = SCRATCH_DIR) {
+  constructor(dir: string = ORACLE_DIR) {
     this.dir = dir;
     this.ensureCrate();
   }
@@ -46,7 +46,7 @@ export class RustProject {
       writeFileSync(join(srcDir, "lib.rs"), "// scratch\n");
     if (!existsSync(join(this.dir, "Cargo.toml"))) {
       throw new Error(
-        `Scratch crate missing Cargo.toml at ${this.dir}. Expected the committed .scratch crate to exist.`,
+        `Oracle crate missing Cargo.toml at ${this.dir}. Expected the committed rust-oracle crate to exist.`,
       );
     }
   }
@@ -126,7 +126,7 @@ export class RustProject {
   }
 }
 
-/** Shared instance backed by the committed `.scratch` crate. */
+/** Shared instance backed by the committed `rust-oracle` crate. */
 export const harness = new RustProject();
 
 /** Convenience: compile a Rust source string, return the cargo result. */

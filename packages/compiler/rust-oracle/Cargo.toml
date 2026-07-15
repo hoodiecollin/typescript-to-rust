@@ -1,4 +1,4 @@
-# Persistent scratch crate driven by the verification harness (src/harness).
+# Persistent oracle crate driven by the verification harness (src/harness).
 # The harness swaps source files and runs `cargo check` / `cargo run` against
 # emitted Rust. Keeping it persistent preserves the incremental-compile cache,
 # so repeated checks stay fast. An explicit empty [workspace] isolates it from
@@ -10,7 +10,7 @@
 #   - bin (src/main.rs) — used by `run`: needs a `main`, executes for the
 #                          behavioral (differential) oracle.
 [package]
-name = "ttr_scratch"
+name = "rust_oracle"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -64,11 +64,11 @@ thiserror = "2"
 ordered-float = "4"
 
 [lib]
-name = "ttr_scratch"
+name = "rust_oracle"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ttr_scratch"
+name = "rust_oracle"
 path = "src/main.rs"
 
 # Verification-harness profile (series-089 perf work). The emitted binaries exist
