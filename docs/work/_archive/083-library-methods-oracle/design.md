@@ -1,7 +1,14 @@
 # 083 — Unified receiver-type resolution + the library-method catalog
 
-> **Status: DESIGN (awaiting review). Issues #50 (broaden the oracle cut-over)
-> + #49/#44 lineage, implements the tractable surface of the 029 catalog.**
+> **Status: SHIPPED (2026-07-14). Issues #50 (broaden the oracle cut-over) + #48
+> (string-concat via method-call operands) + #49/#44 lineage. Implements the
+> tractable surface of the 029 catalog.** See `specs.md` for the scope
+> reconciliation: `find`/`Object.entries`/`Object.assign`/`JSON.stringify` were
+> already shipped by prior series (043/044/045/048/066); 083 added the
+> primitive-method backbone + String/Number/Math/Array-tail catalog rows +
+> `&str`-key fix + `flat()`/variadic-`min!`/`max!`. Residuals (`flatMap`, deep
+> `flat(n)`, `splice`, heterogeneous `Object.assign`, JSON `undefined`-omission)
+> stay fail-loud / documented-divergence.
 > Direction settled with Collin 2026-07-14 (four forks answered):
 > **(1)** scope = the **full 029 catalog** (tractable Tier-1/Tier-2 surface), not
 > just a receiver-shape patch; **(2)** unify the scattered type resolvers behind a

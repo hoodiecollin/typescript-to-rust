@@ -54,7 +54,8 @@ don't. Each row below quotes the message the compiler prints.
   `const b = true`) or a **non-empty, homogeneous scalar-literal array**
   (`const xs = [1, 2, 3]`, `["a", "b"]`, `[true, false]`) — may be left untyped
   (series 046). Builtin forms the compiler types by construction are likewise
-  exempt: a stored `Object.entries(…)`, an untyped `JSON.parse(…)` (→ `Value`),
+  exempt: a stored `Object.entries(…)`, a `parseJson<T>(…)` std-shim result
+  (→ `ParseResult<T>`, series 084 — the `<T>` carries the type),
   an `<array>.find(…)`, and a `using` resource. Everything else — a call to a
   user function, arithmetic, `-5`, `null`/`undefined`, a bare identifier, a
   member access, a template literal, an empty/mixed/nested array — must be
@@ -177,10 +178,29 @@ A **named, non-async `function*`** annotated `Generator<T>` /
 
 ## Classes
 
-Modeled: a **named** class with instance fields (all explicitly typed), an explicit
-field-initializing constructor, and instance methods. **Single-`extends` class
-inheritance** (series 053) is modeled via a composition + trait hybrid; no statics,
-no accessors, no generics.
+Modeled: a **named** class with instance fields, a constructor (explicit or
+synthesized), and instance methods. **Single-`extends` class inheritance** (series
+053) is modeled via a composition + trait hybrid; no generics.
+
+### Construction — implicit & partial constructors (series 070)
+
+A class need not have an explicit field-initializing constructor. Each field's
+construction value is resolved from one of three sources, and the class always
+lowers to a valid `struct` + associated `new`:
+
+- **Constructor-assigned** (`this.x = …`, or a `public/private x: T` parameter
+  property) → from the constructor (the existing 060 path).
+- **Field initializer** (`x = 5`) → the initializer becomes the construction
+  default (`x: 5.0`). An un-annotated initializer types via the numeric literal
+  pass (`5` → `f64`); an `Option`-typed default is `Some`-wrapped. An initializer
+  that references `this` / another field is fail-loud (not a construction constant).
+- **Neither** → the field is `Option<T>` (series 066), initialized `None`; a read
+  requires narrowing. A `class C { x: number }` with no constructor and no
+  initializer thus makes `x: Option<f64>`, `new()` setting `x: None`.
+
+A class with **no** constructor synthesizes a zero-parameter `new()` from these
+sources; a **partial** constructor fills the fields it doesn't assign the same way.
+A user `static new` that would collide with the synthesized `new()` is fail-loud.
 
 ### Inheritance (`extends`) — composition + trait
 
@@ -212,11 +232,12 @@ no accessors, no generics.
 | Subclass constructor with no `super(...)` | Not yet | `subclass constructor without a \`super(...)\` call (base field uninitialized)` |
 | Subclass-only field read through a `dyn IA` (downcast) | Not yet | `field '<name>' read through a 'dyn I<Base>' is not a shared/base field (downcast — deferred to #17)` |
 | `static` or computed-name field | Not yet | `static/computed class field` |
-| Class field without a type annotation | Not yet | `class field '<name>' without a type` |
+| Class field without a type annotation *and* no inferable initializer | Not yet | `class field '<name>' without a type (nor an inferable initializer)` |
+| Field initializer referencing `this` / another field | Not yet | `field initializer for '<name>' references \`this\` …` |
+| `static new` colliding with a synthesized constructor | Not yet | `class has a \`static new\` that collides with the synthesized zero-arg constructor` |
 | Parameter property (`constructor(public x: T)`) without a type | Not yet | `parameter property '<name>' without a type` |
 | `static` or computed-name method | Not yet | `static/computed class method` |
 | `get` / `set` accessor | Not yet | `class get accessor` / `class set accessor` |
-| Class with no explicit constructor | Not yet | `class without an explicit constructor` |
 | Method without a body | Not yet | `method without a body` |
 | `[Symbol.dispose]()` method without a body | Not yet | `[Symbol.dispose] without a body` |
 
@@ -546,14 +567,56 @@ Only single-level optional chaining (`a?.b`) is built.
 
 ---
 
-## JSON
+## The `@t2r/std` std-shim (series 084)
 
-Supported: `JSON.stringify` (JS number fidelity via `tslib`), annotation-driven
-`JSON.parse` (`from_str::<T>`), and an untyped `serde_json::Value` fallback.
+`@t2r/std` is a **third routing lane** (alongside Rust-side `tslib` and compiler
+inference): a blessed TS-side surface the developer imports *instead of* footgun
+APIs. The compiler recognizes it **by the reserved import specifier `"@t2r/std"`**
+— never a name heuristic. It is the dialect's isolation boundary for JS-divergent
+behavior: the type/policy problem moves to an explicit call-site API. The shim is
+**real, Bun-resolvable TS** (`packages/std`, a workspace package) so the
+differential oracle runs faithful behavior matching the emitted Rust.
+
+`@t2r/std` is the **only** modeled import. Tier A exports: `parseJson`,
+`stringifyJson`.
+
+- **`stringifyJson(v): string`** → the `tslib::json::stringify` writer (JS number
+  fidelity: integrals no `.0`, shortest-round-trip fractions, `Infinity`/`NaN` →
+  `null`). **Accepted divergence** (Collin, #57/#58): a `None`/optional field
+  renders `null` where JS omits the key (the 066 `null ≡ undefined` collapse) —
+  documented, not fixed (faithful omission via provenance is a future config knob).
+- **`parseJson<T>(s: string)`** → `tslib::json::ParseResult::<T>::parse(&s)`, a
+  purpose-built std-shim result type (the dialect has no generic/payload-carrying
+  enum to model a raw `{ ok, value } | { ok, error }` union). `T` must be an
+  explicit call type argument and a **modeled** struct/enum (or a
+  primitive/`Array`/`Record`/`Option` of them) — serde's structural deserialize
+  *is* the validation. Consumed via `.ok` (bool), `.value` / `.error` (accessors);
+  never throws — a parse/shape error lands in the `!ok` branch. A `parseJson<T>`
+  result binding needs no annotation (`<T>` carries the type).
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| Any `JSON.*` other than `stringify` / `parse`, or `stringify` with a replacer/space argument (wrong arity) | Not yet | `JSON.<name>` |
+| An import from any specifier other than `@t2r/std` (bare/relative modules — 050 unshipped) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module (bare/relative module imports are not yet supported)` |
+| An `@t2r/std` import of a name it does not export | Not yet | `'<name>' is not exported by "@t2r/std" (Tier A exports: parseJson, stringifyJson)` |
+| A non-named import form from `@t2r/std` (default/namespace) | Not yet | `unsupported import form from "@t2r/std" (only named imports are recognized)` |
+| `parseJson` with no explicit type argument | Not yet | `` `parseJson<T>` needs an explicit modeled type argument (`parseJson<Point>(s)`)… `` |
+| `parseJson<T>` where `T` is not a modeled struct/enum/primitive/array/record | Not yet | `` `parseJson<T>` needs a modeled struct/enum type argument… `` / `'<T>' is not a modeled struct/enum…` |
+| `.<prop>` on a `parseJson` result other than `.ok`/`.value`/`.error` | Not yet | `` `.<prop>` on a parseJson result — only `.ok`, `.value`, `.error` are available `` |
+
+## JSON (bare `JSON.*` — forbidden, redirected to `@t2r/std`)
+
+Bare `JSON.parse` **and** `JSON.stringify` are fail-loud and **redirect** to the
+shim (series 084). The type/fidelity policy moved to the blessed call-site API
+(above): `parseJson<T>` gives the emitter a concrete `from_str::<T>` target (no
+`any`), and `stringifyJson` carries the number fidelity. The old 045
+annotation-driven `JSON.parse` and untyped `serde_json::Value` fallback are
+**removed** — the only JSON entry points are the two `@t2r/std` intrinsics.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| `JSON.stringify(...)` (bare) | Not yet | `` `JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)` `` |
+| `JSON.parse(...)` (bare, any position, annotated or not) | Not yet | `` `JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)` `` |
+| Any other `JSON.*` (`JSON.rawJSON`, …) | Not yet | `JSON.<name>` |
 
 ---
 
@@ -641,14 +704,19 @@ The currently-modeled node types are:
 `TSTypeAnnotation` · `TSTypeReference` · `TSTypeParameterInstantiation` ·
 `TSNumberKeyword` · `TSStringKeyword` · `TSBooleanKeyword` · `TSVoidKeyword` ·
 `TSUnionType` · `TSUndefinedKeyword` · `TSNullKeyword` · `TSAnyKeyword` ·
-`TSUnknownKeyword`.
+`TSUnknownKeyword` · `ImportDeclaration` · `ImportSpecifier`.
+
+`ImportDeclaration`/`ImportSpecifier` are modeled **only** for the `@t2r/std`
+std-shim (series 084) — a guard rejects any other specifier and any unknown
+`@t2r/std` name. General module imports (050) remain unshipped.
 
 Notable node types **not** modeled (rejected at the gate): `LabeledStatement`,
 `EmptyStatement`, `DebuggerStatement`, `DoWhileStatement`, `WithStatement`,
 `ConditionalExpression`, `SequenceExpression`, `UpdateExpression`,
 `TaggedTemplateExpression`, `TemplateLiteral`, `TSAsExpression`,
 `TSNonNullExpression`, `ObjectPattern`, `RestElement`, `MetaProperty`,
-`ImportExpression`, and all module `import`/`export` syntax.
+`ImportExpression`, `export` syntax, and every `import` *except* the modeled
+`@t2r/std` std-shim (series 084).
 
 ---
 

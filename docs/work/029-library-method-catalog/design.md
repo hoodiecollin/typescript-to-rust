@@ -53,9 +53,9 @@ governs 027):
 | `filter` | ★5 | ★2 | N/Tf | `.iter().filter().cloned().collect()` |
 | `forEach` | ★4 | ★1 | N | `for x in &xs { … }` |
 | `reduce` | ★4 | ★3 | N/Tf | **✓ landed (039)** `.iter().fold(init, …)` (explicit init); no-init/index → later |
-| `find` | ★4 | ★2 | N | `.iter().find().cloned()` → `Option` — **deferred** (needs `undefined` fidelity, #7) |
+| `find` | ★4 | ★2 | N | **✓ landed (048/066)** `.iter().find().cloned()` → `Option<T>` (066 undefined model) |
 | `some` / `every` | ★3 | ★1 | N | **✓ landed (039)** `.iter().any()` / `.all()` |
-| `flatMap` / `flat` | ★2 | ★3 | N/Tf | `.flat_map()`; deep `flat(n)` → **Tf** |
+| `flatMap` / `flat` | ★2 | ★3 | N/Tf | **✓ `flat()` depth-1 landed (083)** `tslib::array::flat`; `flatMap` + deep `flat(n)` stay fail-loud (array-returning callback lift deferred) |
 | `sort` | ★4 | ★4 | **Tf** | **✓ landed (040)** default lexicographic **string** compare + comparator → `sort_by` |
 | `map` w/ index | ★3 | ★3 | **Tf** | `.enumerate()` under the hood |
 
@@ -67,32 +67,32 @@ governs 027):
 | `includes` / `indexOf` | ★4 | ★1 | N | `.contains()` / `.position()` |
 | `slice` | ★4 | ★3 | **Tf** | **✓ landed (040)** negative + out-of-range clamp; `slice`/`slice_from` |
 | `at` | ★3 | ★2 | **Tf** | **✓ landed (027)** negative index |
-| `splice` | ★3 | ★4 | **Tf** | remove+insert, returns removed; no direct Rust analog |
-| `join` | ★4 | ★1 | N | `.join(sep)` (after `to_string` map) |
-| `concat` / spread | ★3 | ★2 | N | `.extend()` / chained |
-| `reverse` | ★2 | ★1 | N | `.reverse()` |
+| `splice` | ★3 | ★4 | **Tf** | remove+insert, returns removed; no direct Rust analog — **still deferred (needs `&mut` receiver plumbing)** |
+| `join` | ★4 | ★1 | N/Tf | **✓ landed (083)** `tslib::array::join` — JS coerces elements to strings then joins (std `[T]::join` can't) |
+| `concat` / spread | ★3 | ★2 | N | **✓ landed (083)** `tslib::array::concat` — a fresh `Vec` (receiver unchanged) |
+| `reverse` | ★2 | ★1 | N | **✓ landed (083)** native `Vec::reverse` (in place) |
 
 ### String (Dep: —)
 | Method | Pop | Cx | Route | Notes |
 |---|---|---|---|---|
-| `split` | ★5 | ★2 | N/Tf | `.split().collect()`; empty-sep + limit → **Tf** |
-| `trim` / `trimStart/End` | ★4 | ★1 | N | `.trim()` etc. |
-| `toUpperCase`/`toLowerCase` | ★4 | ★1 | N | (Unicode-casing caveat noted) |
-| `includes`/`startsWith`/`endsWith` | ★4 | ★1 | N | direct |
-| `replace` / `replaceAll` | ★4 | ★2 | **Tf** | `replace` = **first** only (quirk) vs `replaceAll` |
-| `padStart` / `padEnd` | ★3 | ★2 | **Tf** | not in std |
-| `slice` / `substring` | ★3 | ★3 | **Tf** | negative/swapped indices, char vs byte |
-| `charAt` / `[i]` | ★3 | ★3 | **Tf** | UTF-16 code unit vs Rust `char`/byte |
-| `repeat` | ★2 | ★1 | N | `.repeat(n)` |
+| `split` | ★5 | ★2 | N/Tf | **✓ landed (083)** `tslib::string::split` (non-empty sep) / `split_chars` (empty-sep quirk) |
+| `trim` / `trimStart/End` | ★4 | ★1 | N | **✓ landed (083)** `.trim()` / `.trim_start()` / `.trim_end()` |
+| `toUpperCase`/`toLowerCase` | ★4 | ★1 | N | **✓ landed (083)** `.to_uppercase()` / `.to_lowercase()` (Unicode-casing caveat) |
+| `includes`/`startsWith`/`endsWith` | ★4 | ★1 | N | **✓ landed (083)** `.contains()` / `.starts_with()` / `.ends_with()` (`&str` pattern via `AsRef`) |
+| `replace` / `replaceAll` | ★4 | ★2 | **Tf** | **✓ landed (083)** `tslib::string::replace_first` (first-only quirk) / native `.replace` |
+| `padStart` / `padEnd` | ★3 | ★2 | **Tf** | **✓ landed** `tslib::string::pad_start`/`pad_end` |
+| `slice` / `substring` | ★3 | ★3 | **Tf** | **✓ landed (083)** `tslib::string::str_slice`/`substring` (negative/swapped, char-indexed) |
+| `charAt` / `[i]` | ★3 | ★3 | **Tf** | **✓ landed (083)** `tslib::string::char_at` (out-of-range → `""`, char-indexed) |
+| `repeat` | ★2 | ★1 | N | **✓ landed (083)** `.repeat(n as usize)` |
 
 ### Object / JSON (Dep: serde)
 | Method | Pop | Cx | Route | Notes |
 |---|---|---|---|---|
 | `Object.keys`/`values` | ★4 | ★2 | N | **✓ landed (041)** over an `IndexMap` (insertion order); `.keys()`/`.values()` |
-| `Object.entries` | ★3 | ★3 | N | **deferred** — needs pair-*array* access over a Rust tuple |
-| `Object.assign` / spread | ★3 | ★3 | N/Tf | **deferred** — merge + variadic sources + returns-target |
+| `Object.entries` | ★3 | ★3 | N | **✓ landed (043/067)** `[string, V][]` over the `IndexMap`, tuple element access |
+| `Object.assign` / spread | ★3 | ★3 | N/Tf | **✓ homogeneous landed (044)** same-shape field/`Record` merge → `mapBuild`; **heterogeneous stays fail-loud** (#43 trait epic) |
 | `hasOwnProperty` / `in` | ★3 | ★1 | N | `.contains_key()` |
-| `JSON.stringify` | ★4 | ★4 | **Tf** | JS number/formatting rules; serde + custom |
+| `JSON.stringify` | ★4 | ★4 | **Tf** | **✓ landed (045)** `tslib::json::stringify` — JS number rules, `Infinity`/`NaN`→`null`. **Divergence (083):** an `undefined` field renders `null` (JS omits it); the 066 `null≡undefined` collapse blocks omit-vs-`null` discrimination — a future dialect decision |
 | `JSON.parse` | ★4 | ★3 | Tf | serde_json → typed target |
 
 ## Tier 2 — do next (medium)
@@ -107,11 +107,11 @@ governs 027):
 ### Number / Math (Dep: —)
 | Method | Pop | Cx | Route | Notes |
 |---|---|---|---|---|
-| `Math.floor/ceil/round/abs` | ★4 | ★1 | N | `f64` methods (round: half-away vs half-even quirk → note) |
-| `Math.min/max` | ★3 | ★1 | N/Tm | binary → native `f64::min`; **variadic → `min!`/`max!` macro** (+ NaN handling) |
-| `Math.random` | ★3 | ★2 | Tf | needs an RNG dep; determinism concerns |
-| `Number.parseInt/parseFloat` | ★3 | ★3 | **Tf** | radix, trailing-garbage tolerance (quirk) |
-| `.toFixed` / `.toString(radix)` | ★3 | ★3 | **Tf** | formatting quirks |
+| `Math.floor/ceil/round/abs` | ★4 | ★1 | N | **✓ landed (083)** `f64::floor/ceil/round/abs` (literal receiver cast to `f64`) |
+| `Math.min/max` | ★3 | ★1 | N/Tm | **✓ landed (083)** binary → native `f64::min`/`max`; **variadic → `tslib::min!`/`max!` macro** (NaN-propagating) |
+| `Math.random` | ★3 | ★2 | Tf | needs an RNG dep; determinism concerns — **still deferred** |
+| `Number.parseInt/parseFloat` | ★3 | ★3 | **Tf** | **✓ landed (083)** `tslib::number::parse_int`/`parse_float` (radix, `0x`, trailing-garbage) |
+| `.toFixed` / `.toString(radix)` | ★3 | ★3 | **Tf** | **✓ landed (083)** `tslib::number::to_fixed`/`to_radix`; `toString()` → `to_js_string` |
 
 ### JS iterators / `Symbol.iterator` (Dep: 025 generators)
 | Feature | Pop | Cx | Route | Notes |
@@ -161,6 +161,8 @@ governs 027):
   semantics?~~ **Resolved (2026-07-06, series 041): adopt `IndexMap` uniformly for
   `Record`/object types** — order is observable via `Object.keys`/`values`, so the
   backing type preserves insertion order to match JS everywhere.
-- UTF-16 vs Rust `char`/byte indexing for strings: pick one model and document
-  the divergence, or emulate UTF-16 in `tslib` for fidelity? (Leaning: document
-  divergence; emulate only if a fixture demands it.)
+- ~~UTF-16 vs Rust `char`/byte indexing for strings: pick one model and document
+  the divergence, or emulate UTF-16 in `tslib` for fidelity?~~ **Resolved
+  (2026-07-14, series 083): char-indexed (`s.chars()`), divergence documented for
+  non-BMP text in `tslib::string`.** `slice`/`substring`/`charAt`/`split("")`/
+  `padStart`/`padEnd` all count Rust `char`s; UTF-16 emulation lands only on demand.
