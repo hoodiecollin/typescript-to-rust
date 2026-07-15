@@ -1,6 +1,8 @@
 # 071 — Interface/class → trait + struct model (usage-directed dual lowering)
 
-> **Status: DESIGN COMPLETE (2026-07-10). Impl pending.** This is the epic **#43**
+> **Status: SHIPPED (increments 1 + 2; #43 EPIC COMPLETE, 2026-07-14).** See the
+> two status notes near the end (Impl decomposition) for what landed each increment
+> and the sole documented residual (a capturing interface-literal method). This is the epic **#43**
 > design. Dialect calls made with Collin 2026-07-10 (`needs-user-input` cleared).
 > **Unblocks #40** (class generics — the `<T extends X>` constraint hook). Foundational
 > dialect-shape redesign: touches the validator, `lowerInterface`, `synthesizeTraits`,
@@ -165,6 +167,39 @@ written after (1) lands.
 > collections → `Vec<Box<dyn I<Name>>>`; slice (3) object-literal struct synthesis +
 > capturing; `implements` of a pure-data interface. Incidental finding filed separately: a
 > pre-existing `String + String` concat gap for field/method-result operands.
+>
+> **Status — increment 2 SHIPPED (2026-07-14): #43 EPIC COMPLETE.** The three
+> increment-1 fail-loud residuals graduated:
+> - **Heterogeneous behavioral-interface array** → `Vec<Box<dyn I<Name>>>`
+>   (`Array<Shape>` holding instances of different implementing classes). Reuses the
+>   053c `isHeterogeneous` / `Box<dyn>` path verbatim — the two gate sites in
+>   `lower.ts` (the `lowerTyped` array branch and the var-decl `letTy` rewrite) now
+>   also admit a behavioral-interface element type. Each `.method()` dispatches via the
+>   trait vtable. (BINT14, differential.)
+> - **`implements` of a pure-data interface** → **field-shape assertion**: accepted as a
+>   plain `struct` with **no trait / no `impl`** synthesized (nothing to dispatch; TS
+>   already type-checked the field shape). The former `lowerClass` fail-loud is now a
+>   `continue`. (BINT15, differential.)
+> - **Object-literal typed as a behavioral interface** (slice 3) → per-literal struct
+>   synthesis: `const s: Shape = { area: () => 5 }` synthesizes `struct Shape__litN` with
+>   **non-capturing** method literals as **`fn`-pointer fields** + `impl I<Name>`
+>   dispatching each method through the stored pointer `(self.m)(…)`; the binding is
+>   retyped to the synthesized struct. Data fields (mixed) become ordinary struct fields
+>   + by-value getters. (BINT12, differential.)
+>
+> Specs: `specs.md` increment-2 section (BINT12–BINT15) → `tests/behavioral-interface-traits.test.ts`
+> (12 green). No regressions across the interface/class/inheritance/struct/closure suites
+> (verified serially).
+>
+> **Remaining epic tail (documented residual, still fail-loud):** a **capturing** method
+> literal in an interface-typed object literal (`{ area: () => this.r * 2 }` or one closing
+> over a local) — needs a boxed `Box<dyn Fn…>` field (a later series). Guarded by **BINT13**.
+> This is the sole residual; the trait/struct dual-lowering substrate (#43) is otherwise
+> complete.
+>
+> Impl notes: `T[]` array sugar (`TSArrayType`) is still unmodeled in the validator — the
+> heterogeneous-array spec uses the modeled `Array<Shape>` form (the shipped 053c
+> convention); modeling `T[]` is orthogonal and out of scope.
 
 ## Specs sketch
 
