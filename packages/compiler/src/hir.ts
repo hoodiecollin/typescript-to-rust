@@ -147,7 +147,16 @@ export type RustType =
    * move/clone by the derive bound).
    */
   | { kind: "param"; name: string }
-  | { kind: "ref"; mut: boolean; inner: RustType };
+  | { kind: "ref"; mut: boolean; inner: RustType }
+  /**
+   * `tslib::json::JsonValue` — the opt-in dynamic JSON value (series 090, epic
+   * #59). A singleton (no inner type); the `serde(transparent)` newtype over
+   * `serde_json::Value` carries an accessor surface
+   * (`get`/`at`/`asNumber`/…/`length`). Reached only via the `@t2r/std`
+   * `parseJsonValue`/`fromJsonValue`/`toJsonValue` boundary — it does not reopen
+   * `any`. Not `Copy`, not a modeled map/set key (not hashable).
+   */
+  | { kind: "jsonValue" };
 
 /**
  * The refined type of a numeric literal node. Absent ⇒ `f64` (the default). The
@@ -330,6 +339,21 @@ export type HirExpr =
    * two streams match bit-for-bit.
    */
   | { kind: "rngNew"; seed: HirExpr }
+  /**
+   * `fromJsonValue<T>(v)` (the `@t2r/std` shim, series 090) →
+   * `tslib::json::ParseResult::<T>::from_value(<v>.0)` → a `ParseResult<T>` (the
+   * 084 surface), the dynamic→static crossing. `value` is the `JsonValue` expr
+   * (`.0` unwraps the transparent newtype into a `serde_json::Value`); `target` is
+   * the required modeled `T`, validated by `assertModeledParseTarget`.
+   */
+  | { kind: "fromJsonValue"; value: HirExpr; target: RustType }
+  /**
+   * `toJsonValue<T>(x)` (the `@t2r/std` shim, series 090) →
+   * `tslib::json::JsonValue(serde_json::to_value(&<x>).expect("toJsonValue"))` →
+   * the static→dynamic crossing. `value` is the modeled source expr (lowered with
+   * its `<T>` type so an object literal becomes a struct literal).
+   */
+  | { kind: "toJsonValue"; value: HirExpr }
   /**
    * The retired 045 `JSON.parse` node — no longer produced (bare `JSON.parse`
    * redirects to `parseJson<T>`). Kept as a variant only so the `usesJson` scan

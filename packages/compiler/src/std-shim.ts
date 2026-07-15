@@ -14,14 +14,30 @@ import type { ImportDeclaration, ImportSpecifier, Program } from "./ast";
 /** The reserved import specifier. Recognition keys off exactly this string. */
 export const STD_SHIM_SPECIFIER = "@t2r/std";
 
-/** The intrinsic names `@t2r/std` exports (the Tier-A surface). */
-export type StdShimName = "parseJson" | "stringifyJson" | "rng";
+/**
+ * The intrinsic names `@t2r/std` exports (the Tier-A surface). `JsonValue`
+ * (series 090) is a **type** intrinsic, not a callable one — it is recognized so
+ * `import { JsonValue }` validates and a `JsonValue` type reference resolves, but
+ * it is never lowered as a value call.
+ */
+export type StdShimName =
+  | "parseJson"
+  | "stringifyJson"
+  | "rng"
+  | "parseJsonValue"
+  | "fromJsonValue"
+  | "toJsonValue"
+  | "JsonValue";
 
 /** The set of exported intrinsic names, for membership + "not exported" errors. */
 export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
   "parseJson",
   "stringifyJson",
   "rng",
+  "parseJsonValue",
+  "fromJsonValue",
+  "toJsonValue",
+  "JsonValue",
 ]);
 
 /**

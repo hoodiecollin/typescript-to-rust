@@ -472,6 +472,15 @@ export interface ModuleAnalysis {
    * emitted `let mut` (the methods take `&mut self`).
    */
   rngBindings: Set<string>;
+  /**
+   * Bindings whose value is a `JsonValue` (series 090) — the opt-in dynamic JSON
+   * type. A member/method access like `.get(k)`, `.asNumber()`, or the `.length`
+   * property on such a binding routes to the JsonValue accessor surface. Populated
+   * during lowering as JsonValue-typed bindings are seen (`const v = r.value`,
+   * `const e = v.at(i)`, `const w = toJsonValue<T>(x)`). Emitted as an ordinary
+   * `let` — the accessors take `&self`.
+   */
+  jsonValueBindings: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -1570,6 +1579,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     parseResultBindings: new Map(),
     // Populated during lowering as `const r = rng(seed)` handle bindings are seen (089).
     rngBindings: new Set(),
+    jsonValueBindings: new Set(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
     structFields: new Map(),
     // Filled by `lower()` after `bindingTypes` (needs the resolved map/set types).

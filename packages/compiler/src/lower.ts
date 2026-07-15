@@ -6615,6 +6615,11 @@ function lowerVarDecl(
       // (089) is typed by the method's return (`T` / `Vec<T>`); Rust infers it, so
       // no annotation is required (like a `.map(...)` binding).
       !isRngMethodInit(d.init, analysis) &&
+      // A JSON-boundary shim call (`parseJsonValue`/`fromJsonValue`/`toJsonValue`,
+      // 090) or any statically-`JsonValue` chain (`r.value.at(i)`) is typed by
+      // construction — Rust infers it, so no annotation is required.
+      !isJsonBoundaryShimCall(d.init, analysis) &&
+      !isJsonValueExpr(d.init, analysis) &&
       !isArrayFindCall(d.init) &&
       !isAllSettledAwait(d.init) &&
       !isSpawnInit(d.init, analysis) &&
@@ -6649,11 +6654,26 @@ function lowerVarDecl(
     // `ParseResult<T>`, so a later `.ok`/`.value`/`.error` read routes to the
     // `ParseResult` surface. Recorded before those reads (statements lower
     // top-to-bottom). `d.id.name` is a plain identifier binding.
-    if (init.kind === "parseJson" && d.id.type === "Identifier") {
+    if (
+      (init.kind === "parseJson" || init.kind === "fromJsonValue") &&
+      d.id.type === "Identifier"
+    ) {
       analysis.parseResultBindings.set(
         (d.id as Identifier).name,
         init.target,
       );
+    }
+    // Track a `JsonValue` binding (series 090): a `toJsonValue<T>(x)` result, or
+    // any statically-JsonValue init (`const v = r.value`, `const e = v.at(i)`), so
+    // a later `.get`/`.asX`/`.length` routes to the accessor surface. Recorded
+    // before those reads (statements lower top-to-bottom); `r`/`v` are already in
+    // their binding sets from earlier statements, so `isJsonValueExpr` resolves.
+    if (
+      d.id.type === "Identifier" &&
+      (init.kind === "toJsonValue" ||
+        (d.init != null && isJsonValueExpr(d.init, analysis)))
+    ) {
+      analysis.jsonValueBindings.add((d.id as Identifier).name);
     }
     // Track an `rng(seed)` handle binding (series 089): a `const r = rng(seed)`
     // binds a `tslib::rng::Rng`, so a later `r.next()/.int()/.pick()/.shuffle()`
@@ -8580,6 +8600,25 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // `JsonValue` accessor methods (series 090) — `get`/`at`/`asNumber`/`asString`/
+    // `asBool`/`isNull`/`isNumber`/`isString`/`isBool`/`isArray`/`isObject` on any
+    // statically-`JsonValue` receiver (a binding, `r.value`, or a `.get(…).at(…)`
+    // chain). Each maps to its snake_case Rust inherent method (`rid` does not
+    // snake_case, so the Rust name is set here). An unknown accessor is fail-loud.
+    if (isJsonValueExpr(m.object, analysis)) {
+      const rustName = JSON_VALUE_METHODS.get(methodName);
+      if (!rustName) {
+        throw new UnsupportedError({
+          type: `\`.${methodName}\` on a JsonValue — only \`get\`, \`at\`, \`asNumber\`, \`asString\`, \`asBool\`, \`isNull\`, \`isNumber\`, \`isString\`, \`isBool\`, \`isArray\`, \`isObject\`, \`length\` are available`,
+        });
+      }
+      return {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name: rustName,
+        args: call.arguments.map((a) => lowerExpr(a as Expression, analysis)),
+      };
+    }
     // `rng` handle methods (series 089) — `r.next()/.int()/.pick()/.shuffle()`
     // where `r ∈ rngBindings`. Checked FIRST so `.next()` on an rng handle wins
     // over the 052 generator `.next()` protocol. `pick`/`shuffle` pass the array
@@ -10438,6 +10477,47 @@ function lowerStdShimCall(
   if (shim === "rng") {
     return { kind: "rngNew", seed: lowerExpr(arg, analysis) };
   }
+  // `parseJsonValue(s)` (series 090) → the dynamic parse. Reuses the 084 parse
+  // node with a `jsonValue` target, so `const r = parseJsonValue(s)` records a
+  // `ParseResult<JsonValue>` binding (its `.value` accessor yields a JsonValue).
+  // No type argument — the shape is dynamic.
+  if (shim === "parseJsonValue") {
+    return {
+      kind: "parseJson",
+      source: lowerExpr(arg, analysis),
+      target: { kind: "jsonValue" },
+    };
+  }
+  // `fromJsonValue<T>(v)` (series 090) — dynamic → static. `<T>` is required and
+  // modeled; the result is a `ParseResult<T>` (recorded in `lowerVarDecl`).
+  if (shim === "fromJsonValue") {
+    const ftargs = (call as { typeArguments?: { params?: TSType[] } })
+      .typeArguments?.params;
+    const fArg = ftargs?.[0];
+    if (!fArg) {
+      throw new UnsupportedError({
+        type: '`fromJsonValue<T>` needs an explicit modeled type argument (`fromJsonValue<Point>(v)`) — an unconstrained `T` cannot be deserialized',
+      });
+    }
+    const ftarget = lowerType(fArg, analysis.structs);
+    assertModeledParseTarget(ftarget, analysis);
+    return { kind: "fromJsonValue", value: lowerExpr(arg, analysis), target: ftarget };
+  }
+  // `toJsonValue<T>(x)` (series 090) — static → dynamic. The `<T>` types the
+  // source so an object literal (`{ x: 1 }`) lowers as its struct literal; absent,
+  // the arg is lowered by inference (a bare identifier/typed expr).
+  if (shim === "toJsonValue") {
+    const ttargs = (call as { typeArguments?: { params?: TSType[] } })
+      .typeArguments?.params;
+    const tArg2 = ttargs?.[0];
+    const ttarget = tArg2 ? lowerType(tArg2, analysis.structs) : null;
+    return {
+      kind: "toJsonValue",
+      value: ttarget
+        ? lowerTyped(arg as Expression, ttarget, analysis)
+        : lowerExpr(arg, analysis),
+    };
+  }
   // parseJson<T>(s): the type argument is required and must be modeled.
   const targs = (call as { typeArguments?: { params?: TSType[] } })
     .typeArguments?.params;
@@ -10472,6 +10552,10 @@ function assertModeledParseTarget(ty: RustType, analysis: ModuleAnalysis): void 
       return assertModeledParseTarget(ty.inner, analysis);
     case "hashmap":
       return assertModeledParseTarget(ty.value, analysis);
+    case "jsonValue":
+      // A dynamic value is serde-deserializable (`serde_json::Value`), so it is a
+      // legal `from_value`/`parseJson` target (series 090).
+      return;
     case "struct":
       if (analysis.structs.has(ty.name)) return;
       throw new UnsupportedError({
@@ -10506,7 +10590,7 @@ function redirectBareJson(e: Expression): void {
   const method = (m.property as Identifier).name;
   if (method === "parse") {
     throw new UnsupportedError({
-      type: '`JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)`',
+      type: '`JSON.parse` is not accepted — import from "@t2r/std": `parseJson<T>(s)` for a modeled shape, or `parseJsonValue(s)` for a dynamic `JsonValue` (series 090)',
     });
   }
   if (method === "stringify") {
@@ -10568,6 +10652,84 @@ function isRngShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
     callee.type === "Identifier" &&
     analysis.stdShim.get((callee as Identifier).name) === "rng"
   );
+}
+
+/**
+ * The `JsonValue` accessor surface (series 090): TS accessor name → its Rust
+ * inherent-method name. `rid` only escapes keywords (no snake_case), so the
+ * snake_case Rust name is carried on the HIR `method` node from here. `length`
+ * is a TS **property** (lowered from a member access) but a Rust method.
+ */
+const JSON_VALUE_METHODS = new Map<string, string>([
+  ["get", "get"],
+  ["at", "at"],
+  ["asNumber", "as_number"],
+  ["asString", "as_string"],
+  ["asBool", "as_bool"],
+  ["isNull", "is_null"],
+  ["isNumber", "is_number"],
+  ["isString", "is_string"],
+  ["isBool", "is_bool"],
+  ["isArray", "is_array"],
+  ["isObject", "is_object"],
+  ["length", "length"],
+]);
+
+/** Is `e` a call to one of the `@t2r/std` JSON-boundary intrinsics
+ * (`parseJsonValue`/`fromJsonValue`/`toJsonValue`, series 090)? Each is typed by
+ * construction (a `ParseResult<…>` or a `JsonValue`), so it is exempt from the
+ * binding-annotation gate. Keyed off the reserved-specifier import alias. */
+function isJsonBoundaryShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
+  if (e.type !== "CallExpression") return false;
+  const callee = (e as CallExpression).callee;
+  if (callee.type !== "Identifier") return false;
+  const shim = analysis.stdShim.get((callee as Identifier).name);
+  return (
+    shim === "parseJsonValue" ||
+    shim === "fromJsonValue" ||
+    shim === "toJsonValue"
+  );
+}
+
+/**
+ * Is `e` statically a `JsonValue` (series 090)? Recognizes the three shapes an
+ * accessor-bearing dynamic value takes, recursively so chains flow:
+ *  - an identifier recorded in `jsonValueBindings`;
+ *  - `<r>.value` where `r` is a `ParseResult<JsonValue>` binding;
+ *  - a `.get(…)` / `.at(…)` call whose receiver is itself a `JsonValue` (both
+ *    accessors return an owned `JsonValue`, so `r.value.get("a").get("b")` chains).
+ * Drives both the binding-annotation exemption and the accessor-method routing.
+ */
+function isJsonValueExpr(e: Expression, analysis: ModuleAnalysis): boolean {
+  if (e.type === "Identifier") {
+    return analysis.jsonValueBindings.has((e as Identifier).name);
+  }
+  if (e.type === "MemberExpression") {
+    const m = e as MemberExpression;
+    return (
+      !m.computed &&
+      m.property.type === "Identifier" &&
+      (m.property as Identifier).name === "value" &&
+      m.object.type === "Identifier" &&
+      analysis.parseResultBindings.get((m.object as Identifier).name)?.kind ===
+        "jsonValue"
+    );
+  }
+  if (e.type === "CallExpression") {
+    const callee = (e as CallExpression).callee;
+    if (
+      callee.type === "MemberExpression" &&
+      !(callee as MemberExpression).computed &&
+      (callee as MemberExpression).property.type === "Identifier"
+    ) {
+      const mn = ((callee as MemberExpression).property as Identifier).name;
+      return (
+        (mn === "get" || mn === "at") &&
+        isJsonValueExpr((callee as MemberExpression).object, analysis)
+      );
+    }
+  }
+  return false;
 }
 
 /** Is `e` a method call on a recorded rng handle (`r.next/int/pick/shuffle(...)`,
@@ -11244,6 +11406,23 @@ function lowerMember(
       }
       throw new UnsupportedError({
         type: `\`.${prop}\` on a parseJson result — only \`.ok\`, \`.value\`, \`.error\` are available`,
+      });
+    }
+    // A bare member access on a statically-`JsonValue` receiver (series 090). Only
+    // `.length` is a property (→ the Rust `.length()` method); every other accessor
+    // (`get`/`at`/`asX`/`isX`) is a method and must be *called* (those reach
+    // `lowerCall`). Checked before the generic `.length` (which emits `.len()`).
+    if (isJsonValueExpr(member.object, analysis)) {
+      if (prop === "length") {
+        return {
+          kind: "method",
+          receiver: lowerExpr(member.object, analysis),
+          name: "length",
+          args: [],
+        };
+      }
+      throw new UnsupportedError({
+        type: `\`.${prop}\` on a JsonValue must be called (\`get\`/\`at\`/\`asNumber\`/… are methods); only \`.length\` is a property`,
       });
     }
     // `.length` is a property in TS but a method in Rust.

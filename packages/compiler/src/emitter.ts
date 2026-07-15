@@ -157,7 +157,11 @@ export function emitModule(mod: HirModule): string {
   const usesJson =
     usesKind(mod, "jsonStringify") ||
     usesKind(mod, "jsonParse") ||
-    usesKind(mod, "parseJson");
+    usesKind(mod, "parseJson") ||
+    // The 090 JsonValue boundary deserializes (`from_value`) / serializes
+    // (`to_value`) modeled structs, so they need the serde derives too.
+    usesKind(mod, "fromJsonValue") ||
+    usesKind(mod, "toJsonValue");
   const parts = mod.items.map((item) => emitItem(item, structs, usesJson));
   if (mod.main.length > 0) {
     const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
@@ -1700,6 +1704,11 @@ function emitExpr(expr: HirExpr): string {
       return `tslib::json::ParseResult::<${emitType(expr.target)}>::parse(&${emitExpr(expr.source)})`;
     case "rngNew":
       return `tslib::rng::Rng::new(${emitExpr(expr.seed)})`;
+    case "fromJsonValue":
+      // `<JsonValue expr>.0` unwraps the transparent newtype to a `serde_json::Value`.
+      return `tslib::json::ParseResult::<${emitType(expr.target)}>::from_value(${emitExpr(expr.value)}.0)`;
+    case "toJsonValue":
+      return `tslib::json::JsonValue(serde_json::to_value(&${emitExpr(expr.value)}).expect("toJsonValue"))`;
     case "jsonParse": {
       const ty = expr.target ? emitType(expr.target) : "serde_json::Value";
       return `serde_json::from_str::<${ty}>(&${emitExpr(expr.source)}).expect("JSON.parse")`;
@@ -1985,5 +1994,7 @@ function emitType(ty: RustType): string {
         : `std::sync::Arc<${emitType(ty.inner)}>`;
     case "param":
       return rid(ty.name);
+    case "jsonValue":
+      return "tslib::json::JsonValue";
   }
 }
