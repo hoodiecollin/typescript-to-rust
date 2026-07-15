@@ -11,30 +11,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
 import { UnsupportedError } from "../src/lower";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { compile, defineDifferential } from "./_support/differential";
 
 const ANIMAL = `class Animal {
   name: string;
@@ -52,33 +30,48 @@ const CAT = `class Cat extends Animal {
   speak(): string { return "meow"; }
 }`;
 
-describe("053c: class inheritance — dyn dispatch + accessors", () => {
-  test("INH12 heterogeneous array → `Vec<Box<dyn IAnimal>>`, dispatches per element", async () => {
-    const src = `${ANIMAL}
+defineDifferential("inherit-dyn", [
+  {
+    name: "INH12 heterogeneous array → `Vec<Box<dyn IAnimal>>`, dispatches per element",
+    src: `${ANIMAL}
 ${DOG}
 ${CAT}
 const zoo: Array<Animal> = [new Dog("Rex"), new Cat("Tom")];
 for (const a of zoo) {
   console.log(a.speak());
-}`;
-    const rust = compile(src);
-    expect(rust).toContain("Box<dyn IAnimal>");
-    await behaves(src, "woof\nmeow");
-  });
-
-  test("INH13 a base-field read through a `dyn` uses the trait accessor", async () => {
-    const src = `${ANIMAL}
+}`,
+    expected: "woof\nmeow",
+    extra: ({ rust }) => expect(rust).toContain("Box<dyn IAnimal>"),
+  },
+  {
+    name: "INH13 a base-field read through a `dyn` uses the trait accessor",
+    src: `${ANIMAL}
 ${DOG}
 ${CAT}
 const zoo: Array<Animal> = [new Dog("Rex"), new Cat("Tom")];
 for (const a of zoo) {
   console.log(a.name);
-}`;
-    const rust = compile(src);
-    expect(rust).toContain("fn name(&self) -> &String");
-    await behaves(src, "Rex\nTom");
-  });
+}`,
+    expected: "Rex\nTom",
+    extra: ({ rust }) => expect(rust).toContain("fn name(&self) -> &String"),
+  },
+  // INH16 was a 053c fail-loud residual: `implements` conformance on a
+  // constructor-less class. Both halves have since graduated — behavioral-interface
+  // trait synthesis (071) and implicit constructors (070) — so this now compiles
+  // to a valid `impl ISpeaker for Robot` + synthesized `new()` and runs.
+  {
+    name: "INH16 `implements` on an implicit-ctor class behaves (071 + 070)",
+    src: `interface Speaker { speak(): string; }
+class Robot implements Speaker {
+  speak(): string { return "beep"; }
+}
+const r: Robot = new Robot();
+console.log(r.speak());`,
+    expected: "beep",
+  },
+]);
 
+describe("053c: class inheritance — dyn dispatch + accessors", () => {
   test("INH14 accessors are gated: a pure reuse+override program emits none", () => {
     const rust = compile(`${ANIMAL}
 ${DOG}
@@ -104,21 +97,5 @@ for (const a of zoo) {
   console.log(a.breed);
 }`),
     ).toThrow(UnsupportedError);
-  });
-
-  // INH16 was a 053c fail-loud residual: `implements` conformance on a
-  // constructor-less class. Both halves have since graduated — behavioral-interface
-  // trait synthesis (071) and implicit constructors (070) — so this now compiles
-  // to a valid `impl ISpeaker for Robot` + synthesized `new()` and runs.
-  test("INH16 `implements` on an implicit-ctor class behaves (071 + 070)", async () => {
-    await behaves(
-      `interface Speaker { speak(): string; }
-class Robot implements Speaker {
-  speak(): string { return "beep"; }
-}
-const r: Robot = new Robot();
-console.log(r.speak());`,
-      "beep",
-    );
   });
 });

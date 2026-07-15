@@ -20,29 +20,72 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
 import { runRust } from "../src/harness";
+import { compile, defineDifferential, runTs } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
+defineDifferential("conc-spawn", [
+  {
+    name: "CONC19 (differential) spawn a task, await its handle, print the result",
+    src: `async function work(): Promise<number> { return 7; }
+async function run(): Promise<void> {
+  const h = work();
+  const v: number = await h;
+  console.log(v);
 }
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
+await run();`,
+    expected: "7",
+  },
+  {
+    name: "CONC20 (differential) both tasks read the shared config; the derived value matches",
+    src: `interface Config { factor: number; }
+async function useConfig(cfg: Config): Promise<void> { console.log(cfg.factor * 2); }
+async function run(): Promise<void> {
+  const config: Config = { factor: 21 };
+  const h1 = useConfig(config);
+  const h2 = useConfig(config);
+  await h1;
+  await h2;
 }
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
+await run();`,
+    // Both tasks print `42`; order between the two is deterministic here because
+    // each awaits in sequence (h1 then h2), so both TS and Rust print "42\n42".
+    expected: "42\n42",
+  },
+  {
+    name: "CONC21 (differential) the parent reads the mutated shared counter",
+    src: `interface Counter { n: number; }
+async function bump(c: Counter): Promise<void> { c.n += 5; }
+async function run(): Promise<void> {
+  const counter: Counter = { n: 0 };
+  const h = bump(counter);
+  await h;
+  console.log(counter.n);
 }
+await run();`,
+    expected: "5",
+  },
+  {
+    name: "CONC22 (differential) two tasks increment a shared Arc<Mutex> counter; final total matches",
+    src: `interface Counter { n: number; }
+async function incr(c: Counter): Promise<void> { c.n += 1; }
+async function run(): Promise<void> {
+  const counter: Counter = { n: 0 };
+  const h1 = incr(counter);
+  const h2 = incr(counter);
+  await h1;
+  await h2;
+  console.log(counter.n);
+}
+await run();`,
+    // Two awaited increments on a shared object → 2 in both TS and Rust.
+    expected: "2",
+    extra: ({ rust }) => {
+      // Shape check: the shared-mutation wrap.
+      expect(rust).toContain("std::sync::Arc::new(std::sync::Mutex::new(");
+      expect(rust).toContain(".lock().unwrap()");
+    },
+  },
+]);
 
 describe("051c increment 1 — spawn + JoinHandle + setTimeout", () => {
   test("CONC17 an un-awaited async call → `tokio::spawn(do_work())`, `h` is a JoinHandle", () => {
@@ -67,17 +110,6 @@ async function run(): Promise<void> {
 await run();`;
     const rust = compile(src);
     expect(rust).toContain(".await.unwrap()");
-  });
-
-  test("CONC19 (differential) spawn a task, await its handle, print the result", async () => {
-    const src = `async function work(): Promise<number> { return 7; }
-async function run(): Promise<void> {
-  const h = work();
-  const v: number = await h;
-  console.log(v);
-}
-await run();`;
-    await behaves(src, "7");
   });
 
   test("CONC23 `setTimeout(fn, ms)` → `tokio::spawn(async move {` + `tokio::time::sleep(` before the body", () => {
@@ -108,9 +140,8 @@ await run();`;
     const rr = await runRust(rust);
     expect(rr.ok).toBe(true);
     expect(rr.stdout.trim().startsWith("before")).toBe(true);
-    expect(runTs(src).startsWith("before")).toBe(true);
+    expect((await runTs(src)).startsWith("before")).toBe(true);
   });
-
 });
 
 describe("051c increment 2 — task-escape Arc / Arc<Mutex> shared state", () => {
@@ -140,26 +171,6 @@ await run();`;
     expect(rust).toContain("std::sync::Arc<Config>");
   });
 
-  test("CONC20 (differential) both tasks read the shared config; the derived value matches", async () => {
-    const src = `interface Config { factor: number; }
-async function useConfig(cfg: Config): Promise<void> { console.log(cfg.factor * 2); }
-async function run(): Promise<void> {
-  const config: Config = { factor: 21 };
-  const h1 = useConfig(config);
-  const h2 = useConfig(config);
-  await h1;
-  await h2;
-}
-await run();`;
-    const rust = compile(src);
-    const rr = await runRust(rust);
-    expect(rr.ok).toBe(true);
-    // Both tasks print `42`; order between the two is deterministic here because
-    // each awaits in sequence (h1 then h2), so both TS and Rust print "42\n42".
-    expect(rr.stdout.trim()).toBe(runTs(src));
-    expect(rr.stdout.trim()).toBe("42\n42");
-  });
-
   // CONC21 — state MUTATED by a spawned task and read by the parent → wrapped
   // `Arc<Mutex<T>>`; the decl is `Arc::new(Mutex::new(…))`, the parent read goes
   // through `.lock().unwrap()`, and the callee mutates through the lock.
@@ -177,48 +188,6 @@ await run();`;
     expect(rust).toContain("std::sync::Arc::new(std::sync::Mutex::new(");
     expect(rust).toContain(".lock().unwrap()");
     expect(rust).toContain("std::sync::Arc<std::sync::Mutex<Counter>>");
-  });
-
-  test("CONC21 (differential) the parent reads the mutated shared counter", async () => {
-    const src = `interface Counter { n: number; }
-async function bump(c: Counter): Promise<void> { c.n += 5; }
-async function run(): Promise<void> {
-  const counter: Counter = { n: 0 };
-  const h = bump(counter);
-  await h;
-  console.log(counter.n);
-}
-await run();`;
-    const rust = compile(src);
-    const rr = await runRust(rust);
-    expect(rr.ok).toBe(true);
-    expect(rr.stdout.trim()).toBe(runTs(src));
-    expect(rr.stdout.trim()).toBe("5");
-  });
-
-  // CONC22 (differential) — two tasks incrementing a shared `Arc<Mutex<Counter>>`,
-  // both handles awaited, then the counter printed. Rust's final total === TS's.
-  test("CONC22 (differential) two tasks increment a shared Arc<Mutex> counter; final total matches", async () => {
-    const src = `interface Counter { n: number; }
-async function incr(c: Counter): Promise<void> { c.n += 1; }
-async function run(): Promise<void> {
-  const counter: Counter = { n: 0 };
-  const h1 = incr(counter);
-  const h2 = incr(counter);
-  await h1;
-  await h2;
-  console.log(counter.n);
-}
-await run();`;
-    const rust = compile(src);
-    // Shape check: the shared-mutation wrap.
-    expect(rust).toContain("std::sync::Arc::new(std::sync::Mutex::new(");
-    expect(rust).toContain(".lock().unwrap()");
-    const rr = await runRust(rust);
-    expect(rr.ok).toBe(true);
-    // Two awaited increments on a shared object → 2 in both TS and Rust.
-    expect(rr.stdout.trim()).toBe(runTs(src));
-    expect(rr.stdout.trim()).toBe("2");
   });
 
   // CONC24 (fail-loud) — a shared capture the task-escape pass cannot bound. Here

@@ -12,31 +12,9 @@
  * map to docs/work/068-owned-self/specs.md.
  */
 
-import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
+import { expect, test } from "bun:test";
 import { DialectError } from "../src/errors";
-import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { compile, defineDifferential } from "./_support/differential";
 
 const CONFIG = `class Config {
   name: string;
@@ -60,23 +38,25 @@ const HANDLE = `class Handle {
 }
 `;
 
-describe("068 owned-self (consuming methods → fn m(self))", () => {
-  test("OS1 dead-after consuming call → fn m(self), no clone", async () => {
-    const src = `${CONFIG}${BUILDER}const b: Builder = new Builder(new Config("x"));
+defineDifferential("owned-self", [
+  {
+    name: "OS1 dead-after consuming call → fn m(self), no clone",
+    src: `${CONFIG}${BUILDER}const b: Builder = new Builder(new Config("x"));
 const c: Config = b.build();
-console.log(c.name);`;
-    await behaves(src, "x");
-    const rust = compile(src);
+console.log(c.name);`,
+    expected: "x",
     // Owned receiver, and the moved-out field read drops the 038 clone.
-    expect(rust).toMatch(/fn build\(self\)/);
-    expect(rust).toContain("return self.cfg;");
-    expect(rust).not.toContain("self.cfg.clone()");
-  });
-
-  test("OS2 a non-`Clone` moved-out field compiles now (was cargo-loud)", async () => {
+    extra: ({ rust }) => {
+      expect(rust).toMatch(/fn build\(self\)/);
+      expect(rust).toContain("return self.cfg;");
+      expect(rust).not.toContain("self.cfg.clone()");
+    },
+  },
+  {
+    name: "OS2 a non-`Clone` moved-out field compiles now (was cargo-loud)",
     // `Handle` (fn-pointer field) is non-`Clone`, so the 038 path could not clone
     // `self.h` behind `&self` (E0507). Owned `self` moves it out cleanly.
-    const src = `${HANDLE}class Owner {
+    src: `${HANDLE}class Owner {
   h: Handle;
   constructor(h: Handle) { this.h = h; }
   take(): Handle { return this.h; }
@@ -85,30 +65,31 @@ function apply(cb: (x: number) => number, v: number): number { return cb(v); }
 function dbl(x: number): number { return x * 2; }
 const o: Owner = new Owner(new Handle(dbl, "h1"));
 const h: Handle = o.take();
-console.log(h.tag, apply(h.cb, 5));`;
-    await behaves(src, "h1 10");
-    expect(compile(src)).toMatch(/fn take\(self\)/);
-  });
-
-  test("OS3 an `Array` field consuming method (intoVec) — owned self", async () => {
-    const src = `class Wrapper {
+console.log(h.tag, apply(h.cb, 5));`,
+    expected: "h1 10",
+    extra: ({ rust }) => expect(rust).toMatch(/fn take\(self\)/),
+  },
+  {
+    name: "OS3 an `Array` field consuming method (intoVec) — owned self",
+    src: `class Wrapper {
   items: Array<number>;
   constructor(items: Array<number>) { this.items = items; }
   intoVec(): Array<number> { return this.items; }
 }
 const w: Wrapper = new Wrapper([1, 2, 3]);
 const v: Array<number> = w.intoVec();
-console.log(v[0], v.length);`;
-    await behaves(src, "1 3");
-    const rust = compile(src);
-    expect(rust).toMatch(/fn intoVec\(self\)/);
-    expect(rust).not.toContain("self.items.clone()");
-  });
-
-  test("OS4 reused receiver → promote to Rc<RefCell<T>>, method falls back to &self + clone", async () => {
+console.log(v[0], v.length);`,
+    expected: "1 3",
+    extra: ({ rust }) => {
+      expect(rust).toMatch(/fn intoVec\(self\)/);
+      expect(rust).not.toContain("self.items.clone()");
+    },
+  },
+  {
+    name: "OS4 reused receiver → promote to Rc<RefCell<T>>, method falls back to &self + clone",
     // `b` is reused (`b.label()`) after `b.build()`, so `b` promotes to
     // `Rc<RefCell<Builder>>` and `build` reverts to `&self` + clone.
-    const src = `${CONFIG}class Builder {
+    src: `${CONFIG}class Builder {
   cfg: Config;
   constructor(cfg: Config) { this.cfg = cfg; }
   build(): Config { return this.cfg; }
@@ -116,18 +97,54 @@ console.log(v[0], v.length);`;
 }
 const b: Builder = new Builder(new Config("x"));
 const c: Config = b.build();
-console.log(b.label(), c.name);`;
-    await behaves(src, "x x");
-    const rust = compile(src);
-    expect(rust).toContain("Rc<RefCell<Builder>>");
-    expect(rust).toContain("b.borrow().build()");
-    // Demoted: the method keeps `&self` and the 038 clone (never `fn build(self)`).
-    expect(rust).toMatch(/fn build\(&self\)/);
-    expect(rust).toContain("self.cfg.clone()");
-  });
+console.log(b.label(), c.name);`,
+    expected: "x x",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Rc<RefCell<Builder>>");
+      expect(rust).toContain("b.borrow().build()");
+      // Demoted: the method keeps `&self` and the 038 clone (never `fn build(self)`).
+      expect(rust).toMatch(/fn build\(&self\)/);
+      expect(rust).toContain("self.cfg.clone()");
+    },
+  },
+  {
+    name: "OS6 regression: a non-consuming &self method is unchanged",
+    // `area` reads a field but does not move it out → stays `&self`, no owned self.
+    src: `class Rect {
+  w: number;
+  h: number;
+  constructor(w: number, h: number) { this.w = w; this.h = h; }
+  area(): number { return this.w * this.h; }
+}
+const r: Rect = new Rect(3, 4);
+console.log(r.area());`,
+    expected: "12",
+    extra: ({ rust }) => {
+      expect(rust).toMatch(/fn area\(&self\)/);
+      expect(rust).not.toContain("fn area(self)");
+    },
+  },
+  {
+    name: "OS7 regression: a Copy-field return stays &self (no owned self)",
+    // `get(): number { return this.n }` moves out a Copy field — no move-avoidance
+    // benefit, so the non-`Copy` gate keeps it `&self` (byte-for-byte unchanged).
+    src: `class Cell {
+  n: number;
+  constructor(n: number) { this.n = n; }
+  get(): number { return this.n; }
+}
+const c: Cell = new Cell(7);
+console.log(c.get(), c.get());`,
+    expected: "7 7",
+    extra: ({ rust }) => {
+      expect(rust).toMatch(/fn get\(&self\)/);
+      expect(rust).not.toContain("fn get(self)");
+    },
+  },
+]);
 
-  test("OS5 reused receiver + non-`Clone` moved-out field → DialectError", () => {
-    const src = `${HANDLE}class Owner {
+test("OS5 reused receiver + non-`Clone` moved-out field → DialectError", () => {
+  const src = `${HANDLE}class Owner {
   h: Handle;
   constructor(h: Handle) { this.h = h; }
   take(): Handle { return this.h; }
@@ -137,38 +154,5 @@ function dbl(x: number): number { return x * 2; }
 const o: Owner = new Owner(new Handle(dbl, "h1"));
 const h: Handle = o.take();
 console.log(h.tag, o.name());`;
-    expect(() => compile(src)).toThrow(DialectError);
-  });
-
-  test("OS6 regression: a non-consuming &self method is unchanged", async () => {
-    // `area` reads a field but does not move it out → stays `&self`, no owned self.
-    const src = `class Rect {
-  w: number;
-  h: number;
-  constructor(w: number, h: number) { this.w = w; this.h = h; }
-  area(): number { return this.w * this.h; }
-}
-const r: Rect = new Rect(3, 4);
-console.log(r.area());`;
-    await behaves(src, "12");
-    const rust = compile(src);
-    expect(rust).toMatch(/fn area\(&self\)/);
-    expect(rust).not.toContain("fn area(self)");
-  });
-
-  test("OS7 regression: a Copy-field return stays &self (no owned self)", async () => {
-    // `get(): number { return this.n }` moves out a Copy field — no move-avoidance
-    // benefit, so the non-`Copy` gate keeps it `&self` (byte-for-byte unchanged).
-    const src = `class Cell {
-  n: number;
-  constructor(n: number) { this.n = n; }
-  get(): number { return this.n; }
-}
-const c: Cell = new Cell(7);
-console.log(c.get(), c.get());`;
-    await behaves(src, "7 7");
-    const rust = compile(src);
-    expect(rust).toMatch(/fn get\(&self\)/);
-    expect(rust).not.toContain("fn get(self)");
-  });
+  expect(() => compile(src)).toThrow(DialectError);
 });

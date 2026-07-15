@@ -15,33 +15,16 @@ import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import { emit } from "../src/emitter";
 import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program, src);
-}
+import { compile, defineDifferential } from "./_support/differential";
 
 function compileNoSource(src: string): string {
   return emit(parseSync("t.ts", src).program as unknown as Program);
 }
 
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
-
-describe("082 TypeOracle — collectionOf cut-over", () => {
-  test("ORAC1 `this.field` Map — read + mutate through the oracle", async () => {
-    const src = `class Store {
+defineDifferential("type-oracle", [
+  {
+    name: "ORAC1 `this.field` Map — read + mutate through the oracle",
+    src: `class Store {
   cache: Map<string, number>;
   constructor() { this.cache = new Map<string, number>(); }
   seed(): void {
@@ -58,18 +41,19 @@ describe("082 TypeOracle — collectionOf cut-over", () => {
 }
 const s: Store = new Store();
 s.seed();
-s.read();`;
-    await behaves(src, "1\ntrue false\n2");
-    const rust = compile(src);
-    expect(rust).toContain(".insert(");
-    expect(rust).toContain(".cloned()");
-    expect(rust).toContain(".contains_key(");
-    // The field-mutating method resolves to `&mut self`.
-    expect(rust).toContain("fn seed(&mut self)");
-  });
-
-  test("ORAC2 `this.field` Set<number> — OrderedFloat elem", async () => {
-    const src = `class Tags {
+s.read();`,
+    expected: "1\ntrue false\n2",
+    extra: ({ rust }) => {
+      expect(rust).toContain(".insert(");
+      expect(rust).toContain(".cloned()");
+      expect(rust).toContain(".contains_key(");
+      // The field-mutating method resolves to `&mut self`.
+      expect(rust).toContain("fn seed(&mut self)");
+    },
+  },
+  {
+    name: "ORAC2 `this.field` Set<number> — OrderedFloat elem",
+    src: `class Tags {
   tags: Set<number>;
   constructor() { this.tags = new Set<number>(); }
   add2(n: number): void { this.tags.add(n); }
@@ -81,17 +65,18 @@ s.read();`;
 const t: Tags = new Tags();
 t.add2(1);
 t.add2(2);
-t.read();`;
-    await behaves(src, "true false\n2");
-    const rust = compile(src);
-    expect(rust).toContain("IndexSet<OrderedFloat<f64>>");
-    expect(rust).toContain("OrderedFloat(");
-    // The field-mutating method resolves to `&mut self`.
-    expect(rust).toContain("fn add2(&mut self,");
-  });
-
-  test("ORAC3 `getX()` call receiver resolves", async () => {
-    const src = `class Store {
+t.read();`,
+    expected: "true false\n2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("IndexSet<OrderedFloat<f64>>");
+      expect(rust).toContain("OrderedFloat(");
+      // The field-mutating method resolves to `&mut self`.
+      expect(rust).toContain("fn add2(&mut self,");
+    },
+  },
+  {
+    name: "ORAC3 `getX()` call receiver resolves",
+    src: `class Store {
   cache: Map<string, number>;
   constructor() { this.cache = new Map<string, number>(); }
   seed(): void { this.cache.set("a", 5); }
@@ -103,15 +88,15 @@ t.read();`;
 }
 const s: Store = new Store();
 s.seed();
-s.read();`;
-    await behaves(src, "5");
-    expect(compile(src)).toContain(".cloned()");
-  });
-
-  test("ORAC4 field-of-local receiver resolves", async () => {
+s.read();`,
+    expected: "5",
+    extra: ({ rust }) => expect(rust).toContain(".cloned()"),
+  },
+  {
+    name: "ORAC4 field-of-local receiver resolves",
     // `store.cache` — a field of a local (a function parameter) is a
     // MemberExpression `bindingTypes` can't key on; the oracle resolves it.
-    const src = `class Store {
+    src: `class Store {
   cache: Map<string, number>;
   constructor() { this.cache = new Map<string, number>(); }
   seed(): void { this.cache.set("a", 7); }
@@ -119,11 +104,29 @@ s.read();`;
 function lookup(store: Store): number { return store.cache.get("a") ?? -1; }
 const s: Store = new Store();
 s.seed();
-console.log(lookup(s));`;
-    await behaves(src, "7");
-    expect(compile(src)).toContain(".cloned()");
-  });
+console.log(lookup(s));`,
+    expected: "7",
+    extra: ({ rust }) => expect(rust).toContain(".cloned()"),
+  },
+  {
+    name: "ORAC6 non-map `this.field` receiver is untouched",
+    src: `class Counter {
+  count: number;
+  constructor() { this.count = 3; }
+  show(): void { console.log(this.count + 1); }
+}
+const c: Counter = new Counter();
+c.show();`,
+    expected: "4",
+    // Not a map/set → the oracle returns null, no IndexMap/IndexSet routing.
+    extra: ({ rust }) => {
+      expect(rust).not.toContain("IndexMap");
+      expect(rust).not.toContain("IndexSet");
+    },
+  },
+]);
 
+describe("082 TypeOracle — collectionOf cut-over", () => {
   test("ORAC5 bare-identifier Map receiver is byte-for-byte unchanged", () => {
     const src = `const m: Map<string, number> = new Map<string, number>();
 m.set("a", 1);
@@ -132,21 +135,6 @@ console.log(m.get("a") ?? -1, m.has("a"), m.size);`;
     // bindingTypes path answers first for an identifier receiver, so the oracle
     // is never consulted and cannot drift the output.
     expect(compile(src)).toBe(compileNoSource(src));
-  });
-
-  test("ORAC6 non-map `this.field` receiver is untouched", async () => {
-    const src = `class Counter {
-  count: number;
-  constructor() { this.count = 3; }
-  show(): void { console.log(this.count + 1); }
-}
-const c: Counter = new Counter();
-c.show();`;
-    await behaves(src, "4");
-    // Not a map/set → the oracle returns null, no IndexMap/IndexSet routing.
-    const rust = compile(src);
-    expect(rust).not.toContain("IndexMap");
-    expect(rust).not.toContain("IndexSet");
   });
 
   test("ORAC7 no-source path still lowers a bare-identifier map", async () => {

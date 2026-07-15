@@ -8,40 +8,23 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
 import { UnsupportedError } from "../src/lower";
+import { compile, defineDifferential } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+defineDifferential("struct-eq-edge", [
+  {
+    name: "EQ8 scalars compare with == inside a use rc scope (directives only affect structs)",
+    src: `"use rc";
+console.log(1 === 1);
+console.log("a" === "b");`,
+    expected: "true\nfalse",
+    extra: ({ rust }) => {
+      expect(rust).toContain("==");
+    },
+  },
+]);
 
 describe("047c scalars unchanged + fail-loud upgrades", () => {
-  test("EQ8 scalars compare with == inside a use rc scope (directives only affect structs)", async () => {
-    const src = `"use rc";
-console.log(1 === 1);
-console.log("a" === "b");`;
-    await behaves(src, "true\nfalse");
-    expect(compile(src)).toContain("==");
-  });
-
   test("EQ9 a struct with a non-PartialEq field compared with === is a clean UnsupportedError", () => {
     const src = `function double(n: number): number { return n * 2; }
 interface Handler { fn: (n: number) => number; }

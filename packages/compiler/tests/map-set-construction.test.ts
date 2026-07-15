@@ -15,103 +15,76 @@
  * docs/work/072-map-set-construction-receivers/specs.md.
  */
 
-import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
+import { expect, test } from "bun:test";
+import { compile, defineDifferential } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program, src);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
-
-describe("072 Map / Set non-empty construction", () => {
-  test("MAPC1 `new Map([[k,v],…])` (no type args) → IndexMap::from", async () => {
-    const src = `const m: Map<string, number> = new Map([["a", 1], ["b", 2]]);
+defineDifferential("map-set-construction", [
+  {
+    name: "MAPC1 `new Map([[k,v],…])` (no type args) → IndexMap::from",
+    src: `const m: Map<string, number> = new Map([["a", 1], ["b", 2]]);
 console.log(m.size);
-console.log(m.get("a") ?? -1, m.get("b") ?? -1, m.get("z") ?? -1);`;
-    await behaves(src, "2\n1 2 -1");
-    const rust = compile(src);
-    expect(rust).toContain("IndexMap::<String, f64>::from([");
-  });
-
-  test("MAPC2 dup-key keeps last value, first position (JS-faithful)", async () => {
-    const src = `const m: Map<number, string> = new Map([[1, "a"], [1, "b"], [2, "c"]]);
+console.log(m.get("a") ?? -1, m.get("b") ?? -1, m.get("z") ?? -1);`,
+    expected: "2\n1 2 -1",
+    extra: ({ rust }) => expect(rust).toContain("IndexMap::<String, f64>::from(["),
+  },
+  {
+    name: "MAPC2 dup-key keeps last value, first position (JS-faithful)",
+    src: `const m: Map<number, string> = new Map([[1, "a"], [1, "b"], [2, "c"]]);
 console.log(m.size);
 console.log(m.get(1) ?? "?", m.get(2) ?? "?");
-for (const [k, v] of m) { console.log(k, v); }`;
-    await behaves(src, "2\nb c\n1 b\n2 c");
-  });
-
-  test("MAPC3 `new Map<number,string>([[1,'one'],[2.5,'half']])` fractional keys", async () => {
-    const src = `const m: Map<number, string> = new Map<number, string>([[1, "one"], [2.5, "half"]]);
+for (const [k, v] of m) { console.log(k, v); }`,
+    expected: "2\nb c\n1 b\n2 c",
+  },
+  {
+    name: "MAPC3 `new Map<number,string>([[1,'one'],[2.5,'half']])` fractional keys",
+    src: `const m: Map<number, string> = new Map<number, string>([[1, "one"], [2.5, "half"]]);
 console.log(m.get(1) ?? "?", m.get(2.5) ?? "?", m.get(9) ?? "?");
-console.log(m.size);`;
-    await behaves(src, "one half ?\n2");
-    expect(compile(src)).toContain("OrderedFloat");
-  });
-
-  test("SETC1 `new Set([1,1,2])` dedupes numerically → IndexSet::from", async () => {
-    const src = `const s: Set<number> = new Set([1, 1, 2]);
-console.log(s.size, s.has(1), s.has(9));`;
-    await behaves(src, "2 true false");
-    expect(compile(src)).toContain("IndexSet::");
-    expect(compile(src)).toContain("::from([");
-  });
-
-  test("SETC2 `new Set(['a','b','a'])` dedupes → IndexSet::<String>::from", async () => {
-    const src = `const s: Set<string> = new Set(["a", "b", "a"]);
-console.log(s.size, s.has("a"), s.has("z"));`;
-    await behaves(src, "2 true false");
-    expect(compile(src)).toContain("IndexSet::<String>::from([");
-  });
-
-  test("SETVAR `new Set(items)` where items is a string array variable → collect", async () => {
-    const src = `const items: Array<string> = ["a", "b", "a"];
+console.log(m.size);`,
+    expected: "one half ?\n2",
+    extra: ({ rust }) => expect(rust).toContain("OrderedFloat"),
+  },
+  {
+    name: "SETC1 `new Set([1,1,2])` dedupes numerically → IndexSet::from",
+    src: `const s: Set<number> = new Set([1, 1, 2]);
+console.log(s.size, s.has(1), s.has(9));`,
+    expected: "2 true false",
+    extra: ({ rust }) => {
+      expect(rust).toContain("IndexSet::");
+      expect(rust).toContain("::from([");
+    },
+  },
+  {
+    name: "SETC2 `new Set(['a','b','a'])` dedupes → IndexSet::<String>::from",
+    src: `const s: Set<string> = new Set(["a", "b", "a"]);
+console.log(s.size, s.has("a"), s.has("z"));`,
+    expected: "2 true false",
+    extra: ({ rust }) => expect(rust).toContain("IndexSet::<String>::from(["),
+  },
+  {
+    name: "SETVAR `new Set(items)` where items is a string array variable → collect",
+    src: `const items: Array<string> = ["a", "b", "a"];
 const s: Set<string> = new Set(items);
-console.log(s.size, s.has("a"));`;
-    await behaves(src, "2 true");
-    expect(compile(src)).toContain(".into_iter()");
-    expect(compile(src)).toContain("collect::<IndexSet<String>>()");
-  });
-
-  test("SETVARN `new Set(items)` where items is a number array → OrderedFloat wrap", async () => {
-    const src = `const items: Array<number> = [1, 1, 2];
+console.log(s.size, s.has("a"));`,
+    expected: "2 true",
+    extra: ({ rust }) => {
+      expect(rust).toContain(".into_iter()");
+      expect(rust).toContain("collect::<IndexSet<String>>()");
+    },
+  },
+  {
+    name: "SETVARN `new Set(items)` where items is a number array → OrderedFloat wrap",
+    src: `const items: Array<number> = [1, 1, 2];
 const s: Set<number> = new Set(items);
-console.log(s.size, s.has(1), s.has(9));`;
-    await behaves(src, "2 true false");
-    const rust = compile(src);
-    expect(rust).toContain("OrderedFloat");
-    expect(rust).toContain("collect::<IndexSet<OrderedFloat<f64>>>()");
-  });
-
-  test("MAPVAR `new Map(entries)` (tuple-array variable) is fail-loud (unmodeled TSTupleType)", () => {
-    // The Map variable path needs `Array<[K,V]>` element typing, but `TSTupleType`
-    // is not in the accepted dialect surface (design open detail) — so it stays
-    // fail-loud where the Set (`Array<T>`) variable path succeeds. Non-array Map
-    // args are fail-loud too (FLC2).
-    const src = `const entries: Array<[string, number]> = [["a", 1]];
-const m: Map<string, number> = new Map(entries);`;
-    expect(() => compile(src)).toThrow();
-  });
-
-  test("FLDC1 class-field map seeded non-empty in the constructor", async () => {
-    const src = `class C {
+console.log(s.size, s.has(1), s.has(9));`,
+    expected: "2 true false",
+    extra: ({ rust }) => {
+      expect(rust).toContain("OrderedFloat");
+      expect(rust).toContain("collect::<IndexSet<OrderedFloat<f64>>>()");
+    },
+  },
+  {
+    name: "FLDC1 class-field map seeded non-empty in the constructor",
+    src: `class C {
   m: Map<string, number>;
   constructor() { this.m = new Map([["a", 1], ["b", 2]]); }
   total(): number { return (this.m.get("a") ?? 0) + (this.m.get("b") ?? 0); }
@@ -119,28 +92,38 @@ const m: Map<string, number> = new Map(entries);`;
 }
 const c: C = new C();
 c.report();
-console.log(c.total());`;
-    await behaves(src, "2\n3");
-    expect(compile(src)).toContain("IndexMap::<String, f64>::from([");
-  });
+console.log(c.total());`,
+    expected: "2\n3",
+    extra: ({ rust }) => expect(rust).toContain("IndexMap::<String, f64>::from(["),
+  },
+]);
 
-  test("FLC1 `new Map([])` with no type args is fail-loud (un-inferable)", () => {
-    const src = `const m: Map<string, number> = new Map([]);`;
-    expect(() => compile(src)).toThrow();
-  });
+test("MAPVAR `new Map(entries)` (tuple-array variable) is fail-loud (unmodeled TSTupleType)", () => {
+  // The Map variable path needs `Array<[K,V]>` element typing, but `TSTupleType`
+  // is not in the accepted dialect surface (design open detail) — so it stays
+  // fail-loud where the Set (`Array<T>`) variable path succeeds. Non-array Map
+  // args are fail-loud too (FLC2).
+  const src = `const entries: Array<[string, number]> = [["a", 1]];
+const m: Map<string, number> = new Map(entries);`;
+  expect(() => compile(src)).toThrow();
+});
 
-  test("FLC2 `new Map(other)` with a non-array (Map) argument is fail-loud", () => {
-    const src = `const other: Map<string, number> = new Map<string, number>();
+test("FLC1 `new Map([])` with no type args is fail-loud (un-inferable)", () => {
+  const src = `const m: Map<string, number> = new Map([]);`;
+  expect(() => compile(src)).toThrow();
+});
+
+test("FLC2 `new Map(other)` with a non-array (Map) argument is fail-loud", () => {
+  const src = `const other: Map<string, number> = new Map<string, number>();
 const m: Map<string, number> = new Map(other);`;
-    expect(() => compile(src)).toThrow();
-  });
+  expect(() => compile(src)).toThrow();
+});
 
-  test("FLC3 empty `new Map<K,V>()` is byte-for-byte unchanged (regression)", () => {
-    const src = `const m: Map<string, number> = new Map<string, number>();
+test("FLC3 empty `new Map<K,V>()` is byte-for-byte unchanged (regression)", () => {
+  const src = `const m: Map<string, number> = new Map<string, number>();
 m.set("a", 1);
 console.log(m.size);`;
-    const rust = compile(src);
-    expect(rust).toContain("IndexMap::<String, f64>::new()");
-    expect(rust).not.toContain("::from([");
-  });
+  const rust = compile(src);
+  expect(rust).toContain("IndexMap::<String, f64>::new()");
+  expect(rust).not.toContain("::from([");
 });

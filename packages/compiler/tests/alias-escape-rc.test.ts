@@ -10,30 +10,8 @@
  * docs/work/062-alias-escape-auto-rc/specs.md.
  */
 
-import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { expect } from "bun:test";
+import { defineDifferential } from "./_support/differential";
 
 const COUNTER = `class Counter {
   n: number;
@@ -42,61 +20,63 @@ const COUNTER = `class Counter {
 }
 `;
 
-describe("062 alias-escape auto-Rc", () => {
-  test("AR1 shared-mutation through an alias observes the mutation", async () => {
-    const src = `${COUNTER}const a: Counter = new Counter(0);
+defineDifferential("alias-escape-rc", [
+  {
+    name: "AR1 shared-mutation through an alias observes the mutation",
+    src: `${COUNTER}const a: Counter = new Counter(0);
 const b: Counter = a;
 a.inc();
-console.log(b.n);`;
-    await behaves(src, "1");
-    const rust = compile(src);
-    expect(rust).toContain("Rc<RefCell<Counter>>");
-    expect(rust).toContain("Rc::clone(&a)");
-    expect(rust).toContain("a.borrow_mut().inc()");
-    expect(rust).toContain("b.borrow().n");
-  });
-
-  test("AR2 a field write through one alias is seen through the other", async () => {
-    const src = `${COUNTER}const a: Counter = new Counter(10);
+console.log(b.n);`,
+    expected: "1",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Rc<RefCell<Counter>>");
+      expect(rust).toContain("Rc::clone(&a)");
+      expect(rust).toContain("a.borrow_mut().inc()");
+      expect(rust).toContain("b.borrow().n");
+    },
+  },
+  {
+    name: "AR2 a field write through one alias is seen through the other",
+    src: `${COUNTER}const a: Counter = new Counter(10);
 const b: Counter = a;
 b.n = 99;
-console.log(a.n, b.n);`;
-    await behaves(src, "99 99");
-    expect(compile(src)).toContain("borrow_mut()");
-  });
-
-  test("AR3 a non-shared class binding stays a plain owned value (no Rc)", async () => {
-    const src = `class Box {
+console.log(a.n, b.n);`,
+    expected: "99 99",
+    extra: ({ rust }) => expect(rust).toContain("borrow_mut()"),
+  },
+  {
+    name: "AR3 a non-shared class binding stays a plain owned value (no Rc)",
+    src: `class Box {
   v: number;
   constructor(v: number) { this.v = v; }
 }
 const p: Box = new Box(3);
 const q: Box = new Box(4);
-console.log(p.v + q.v);`;
-    await behaves(src, "7");
-    expect(compile(src)).not.toContain("Rc<RefCell");
-  });
-
-  test("AR4 an aliased-but-never-mutated pair stays a plain clone (no Rc)", async () => {
-    const src = `class Point {
+console.log(p.v + q.v);`,
+    expected: "7",
+    extra: ({ rust }) => expect(rust).not.toContain("Rc<RefCell"),
+  },
+  {
+    name: "AR4 an aliased-but-never-mutated pair stays a plain clone (no Rc)",
+    src: `class Point {
   x: number;
   constructor(x: number) { this.x = x; }
 }
 const a: Point = new Point(5);
 const b: Point = a;
-console.log(a.x + b.x);`;
-    await behaves(src, "10");
-    expect(compile(src)).not.toContain("Rc<RefCell");
-  });
-
-  test("AR5 three-way alias closure all observe the mutation", async () => {
-    const src = `${COUNTER}const a: Counter = new Counter(0);
+console.log(a.x + b.x);`,
+    expected: "10",
+    extra: ({ rust }) => expect(rust).not.toContain("Rc<RefCell"),
+  },
+  {
+    name: "AR5 three-way alias closure all observe the mutation",
+    src: `${COUNTER}const a: Counter = new Counter(0);
 const b: Counter = a;
 const c: Counter = b;
 c.inc();
 c.inc();
-console.log(a.n, b.n, c.n);`;
-    await behaves(src, "2 2 2");
-    expect(compile(src)).toContain("Rc<RefCell<Counter>>");
-  });
-});
+console.log(a.n, b.n, c.n);`,
+    expected: "2 2 2",
+    extra: ({ rust }) => expect(rust).toContain("Rc<RefCell<Counter>>"),
+  },
+]);

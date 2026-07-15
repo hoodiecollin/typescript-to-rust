@@ -14,30 +14,8 @@
  * docs/work/069-alias-escape-interprocedural/specs.md.
  */
 
-import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { expect } from "bun:test";
+import { defineDifferential } from "./_support/differential";
 
 const COUNTER = `class Counter {
   n: number;
@@ -52,42 +30,44 @@ const HOLDER = `class Holder {
 }
 `;
 
-describe("069 alias-escape interprocedural / field-store", () => {
-  test("IP1 alias passed into a retaining callee propagates promotion", async () => {
+defineDifferential("alias-escape-interproc", [
+  {
+    name: "IP1 alias passed into a retaining callee propagates promotion",
     // `store` retains its arg in a field; the arg is aliased and later mutated, so
     // promotion must thread across the call boundary (param → Rc<RefCell<Counter>>).
-    const src = `${COUNTER}${HOLDER}function store(c: Counter): Holder {
+    src: `${COUNTER}${HOLDER}function store(c: Counter): Holder {
   return new Holder(c);
 }
 const a: Counter = new Counter(0);
 const b: Counter = a;
 const h: Holder = store(b);
 a.inc();
-console.log(h.c.n);`;
-    await behaves(src, "1");
-    const rust = compile(src);
-    expect(rust).toContain("Rc<RefCell<Counter>>");
-    expect(rust).toContain("Rc::clone(&");
-  });
-
-  test("IP2 the retaining callee's param is Rc<RefCell<T>>", async () => {
-    const src = `${COUNTER}${HOLDER}function store(c: Counter): Holder {
+console.log(h.c.n);`,
+    expected: "1",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Rc<RefCell<Counter>>");
+      expect(rust).toContain("Rc::clone(&");
+    },
+  },
+  {
+    name: "IP2 the retaining callee's param is Rc<RefCell<T>>",
+    src: `${COUNTER}${HOLDER}function store(c: Counter): Holder {
   return new Holder(c);
 }
 const a: Counter = new Counter(5);
 const b: Counter = a;
 const h: Holder = store(b);
 b.inc();
-console.log(a.n, h.c.n);`;
-    await behaves(src, "6 6");
-    const rust = compile(src);
+console.log(a.n, h.c.n);`,
+    expected: "6 6",
     // The callee param `c` must carry the promoted Rc handle type.
-    expect(rust).toMatch(/fn store\(\s*c:\s*Rc<RefCell<Counter>>/);
-  });
-
-  test("FS1 a field-store unions the container into the alias closure", async () => {
+    extra: ({ rust }) =>
+      expect(rust).toMatch(/fn store\(\s*c:\s*Rc<RefCell<Counter>>/),
+  },
+  {
+    name: "FS1 a field-store unions the container into the alias closure",
     // `h.c = a` after construction: mutating `a` must be observable through `h.c`.
-    const src = `${COUNTER}class Box {
+    src: `${COUNTER}class Box {
   c: Counter;
   constructor(c: Counter) { this.c = c; }
 }
@@ -96,13 +76,13 @@ const h: Box = new Box(seed);
 const a: Counter = new Counter(0);
 h.c = a;
 a.inc();
-console.log(h.c.n);`;
-    await behaves(src, "1");
-    expect(compile(src)).toContain("Rc<RefCell<Counter>>");
-  });
-
-  test("FS2 field-store closure: a three-hop container observes the mutation", async () => {
-    const src = `${COUNTER}class Box {
+console.log(h.c.n);`,
+    expected: "1",
+    extra: ({ rust }) => expect(rust).toContain("Rc<RefCell<Counter>>"),
+  },
+  {
+    name: "FS2 field-store closure: a three-hop container observes the mutation",
+    src: `${COUNTER}class Box {
   c: Counter;
   constructor(c: Counter) { this.c = c; }
 }
@@ -111,29 +91,29 @@ const b: Counter = a;
 const h: Box = new Box(a);
 h.c = b;
 b.inc();
-console.log(a.n, h.c.n);`;
-    await behaves(src, "11 11");
-    expect(compile(src)).toContain("Rc<RefCell<Counter>>");
-  });
-
-  test("IP3 a non-retaining callee does not force promotion (no Rc)", async () => {
+console.log(a.n, h.c.n);`,
+    expected: "11 11",
+    extra: ({ rust }) => expect(rust).toContain("Rc<RefCell<Counter>>"),
+  },
+  {
+    name: "IP3 a non-retaining callee does not force promotion (no Rc)",
     // `peek` only reads its arg (borrows), never retains it, and the arg is never
     // shared-mutated → stays a plain owned value, no Rc.
-    const src = `${COUNTER}function peek(c: Counter): number {
+    src: `${COUNTER}function peek(c: Counter): number {
   return c.n;
 }
 const a: Counter = new Counter(7);
-console.log(peek(a));`;
-    await behaves(src, "7");
-    expect(compile(src)).not.toContain("Rc<RefCell");
-  });
-
-  test("IP4 regression: intraprocedural aliasing still promotes (062 AR1)", async () => {
-    const src = `${COUNTER}const a: Counter = new Counter(0);
+console.log(peek(a));`,
+    expected: "7",
+    extra: ({ rust }) => expect(rust).not.toContain("Rc<RefCell"),
+  },
+  {
+    name: "IP4 regression: intraprocedural aliasing still promotes (062 AR1)",
+    src: `${COUNTER}const a: Counter = new Counter(0);
 const b: Counter = a;
 a.inc();
-console.log(b.n);`;
-    await behaves(src, "1");
-    expect(compile(src)).toContain("Rc::clone(&a)");
-  });
-});
+console.log(b.n);`,
+    expected: "1",
+    extra: ({ rust }) => expect(rust).toContain("Rc::clone(&a)"),
+  },
+]);

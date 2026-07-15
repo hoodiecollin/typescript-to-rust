@@ -16,74 +16,108 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
+import { compile, defineDifferential } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program, src);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
-
-describe("086 closure-Rc<RefCell> capture", () => {
-  test("RC1 shared/aliased Set → Rc<RefCell>, read through the alias", async () => {
-    const src = `const s: Set<number> = new Set<number>();
+defineDifferential("closure-rc-capture", [
+  {
+    name: "RC1 shared/aliased Set → Rc<RefCell>, read through the alias",
+    src: `const s: Set<number> = new Set<number>();
 const t: Set<number> = s;
 const add = (x: number): void => { s.add(x); };
 add(1);
 add(2);
 add(2);
-console.log(t.size);`;
-    await behaves(src, "2");
-    const rust = compile(src);
-    expect(rust).toContain("Rc::new(RefCell::new(");
-    expect(rust).toContain("Rc::clone(&s)");
-    expect(rust).toContain(".borrow_mut().insert(");
-    expect(rust).toContain(".borrow().len()");
-  });
-
-  test("RC2 shared/aliased array (push) → Rc<RefCell<Vec>>", async () => {
-    const src = `const a: Array<number> = [];
+console.log(t.size);`,
+    expected: "2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Rc::new(RefCell::new(");
+      expect(rust).toContain("Rc::clone(&s)");
+      expect(rust).toContain(".borrow_mut().insert(");
+      expect(rust).toContain(".borrow().len()");
+    },
+  },
+  {
+    name: "RC2 shared/aliased array (push) → Rc<RefCell<Vec>>",
+    src: `const a: Array<number> = [];
 const b: Array<number> = a;
 const push2 = (x: number): void => { a.push(x * 2); };
 push2(1);
 push2(2);
-console.log(b[0], b[1], b.length);`;
-    await behaves(src, "2 4 2");
-    expect(compile(src)).toContain("Rc::new(RefCell::new(");
-  });
-
-  test("RC3 shared/aliased Map (write-only) → Rc<RefCell<IndexMap>>", async () => {
+console.log(b[0], b[1], b.length);`,
+    expected: "2 4 2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Rc::new(RefCell::new(");
+    },
+  },
+  {
+    name: "RC3 shared/aliased Map (write-only) → Rc<RefCell<IndexMap>>",
     // A literal key sidesteps the orthogonal `&str`-param-vs-`String`-key limitation
     // (079/FC9) — the Map capture + shared promotion is what RC3 exercises. Write-only
     // (no read of the same cell inside the mutating call) — the read-in-mutate shape is
     // the 062 re-entrant residual, covered by RC3b.
-    const src = `const m: Map<string, number> = new Map<string, number>();
+    src: `const m: Map<string, number> = new Map<string, number>();
 const n: Map<string, number> = m;
 const put = (v: number): void => { m.set("k", v); };
 put(1);
 put(2);
-console.log(n.get("k") ?? -1);`;
-    await behaves(src, "2");
-    expect(compile(src)).toContain("Rc::new(RefCell::new(");
-    expect(compile(src)).toContain(".borrow_mut().insert(");
-  });
+console.log(n.get("k") ?? -1);`,
+    expected: "2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Rc::new(RefCell::new(");
+      expect(rust).toContain(".borrow_mut().insert(");
+    },
+  },
+  {
+    name: "RC4 mutate through closure, read through BOTH handles",
+    src: `const s: Set<number> = new Set<number>();
+const t: Set<number> = s;
+const add = (x: number): void => { s.add(x); };
+add(1);
+console.log(s.size, t.size);`,
+    expected: "1 1",
+  },
+  {
+    name: "RC5 regression: owned-mutable (no alias) stays `&mut` (079 CC2)",
+    src: `const s: Set<number> = new Set<number>();
+const add = (x: number): void => { s.add(x); };
+add(1);
+add(2);
+console.log(s.size);`,
+    expected: "2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("&mut");
+      expect(rust).not.toContain("Rc::new");
+    },
+  },
+  {
+    name: "RC12 regression: read-only stored capture → `&` (079 CC1)",
+    src: `const arr: Array<number> = [1, 2, 3];
+const sum3 = (): number => arr[0] + arr[1] + arr[2];
+console.log(sum3());`,
+    expected: "6",
+    extra: ({ rust }) => {
+      expect(rust).not.toContain("Rc::new");
+    },
+  },
+  {
+    name: "RC13 regression: non-capturing arrow → direct free fn (079 CC15)",
+    src: `const inc = (n: number): number => n + 1;
+console.log(inc(4));`,
+    expected: "5",
+    extra: ({ rust }) => {
+      expect(rust).toContain("fn inc(n: f64) -> f64");
+    },
+  },
+  {
+    name: "RC14 regression: `.forEach` container mutation unchanged (079 CC16)",
+    src: `const acc: Array<number> = [];
+[1, 2, 3].forEach((x: number): void => { acc.push(x); });
+console.log(acc.length);`,
+    expected: "3",
+  },
+]);
 
+describe("086 closure-Rc<RefCell> capture", () => {
   test("RC3b fail-loud: re-entrant read-in-mutate over a shared Map (062 residual)", () => {
     // Under `Rc<RefCell>` sharing, `m.set(k, m.get(k) + v)` emits
     // `m.borrow_mut().insert(k, m.borrow()…)` — the mutable borrow is held across the
@@ -96,27 +130,6 @@ const bump = (v: number): void => { m.set("k", (m.get("k") ?? 0) + v); };
 bump(1);
 console.log(n.get("k") ?? -1);`;
     expect(() => compile(src)).toThrow();
-  });
-
-  test("RC4 mutate through closure, read through BOTH handles", async () => {
-    const src = `const s: Set<number> = new Set<number>();
-const t: Set<number> = s;
-const add = (x: number): void => { s.add(x); };
-add(1);
-console.log(s.size, t.size);`;
-    await behaves(src, "1 1");
-  });
-
-  test("RC5 regression: owned-mutable (no alias) stays `&mut` (079 CC2)", async () => {
-    const src = `const s: Set<number> = new Set<number>();
-const add = (x: number): void => { s.add(x); };
-add(1);
-add(2);
-console.log(s.size);`;
-    await behaves(src, "2");
-    const rust = compile(src);
-    expect(rust).toContain("&mut");
-    expect(rust).not.toContain("Rc::new");
   });
 
   test("RC6 fail-loud: escaping captured-container closure (returned)", () => {
@@ -175,27 +188,5 @@ console.log(t.size);`;
 const lens: Array<number> = [1, 2, 3].map((x: number): number => acc.push(x * 2));
 console.log(acc.length);`;
     expect(() => compile(src)).toThrow();
-  });
-
-  test("RC12 regression: read-only stored capture → `&` (079 CC1)", async () => {
-    const src = `const arr: Array<number> = [1, 2, 3];
-const sum3 = (): number => arr[0] + arr[1] + arr[2];
-console.log(sum3());`;
-    await behaves(src, "6");
-    expect(compile(src)).not.toContain("Rc::new");
-  });
-
-  test("RC13 regression: non-capturing arrow → direct free fn (079 CC15)", async () => {
-    const src = `const inc = (n: number): number => n + 1;
-console.log(inc(4));`;
-    await behaves(src, "5");
-    expect(compile(src)).toContain("fn inc(n: f64) -> f64");
-  });
-
-  test("RC14 regression: `.forEach` container mutation unchanged (079 CC16)", async () => {
-    const src = `const acc: Array<number> = [];
-[1, 2, 3].forEach((x: number): void => { acc.push(x); });
-console.log(acc.length);`;
-    await behaves(src, "3");
   });
 });

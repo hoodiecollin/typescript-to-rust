@@ -8,29 +8,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { checkRust, runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { checkRust } from "../src/harness";
+import { compile, defineDifferential } from "./_support/differential";
 
 const CUSTOM = `class NotFoundError extends Error {
   constructor(message: string) { super(message); }
@@ -40,27 +19,16 @@ function lookup(id: number): number {
   return id;
 }`;
 
-describe("049d: catch-all + From glue", () => {
-  test("ERR17 an AppError program emits From<String> and From<&str> → Other", () => {
-    const rust = compile(CUSTOM);
-    expect(rust).toContain("impl From<String> for AppError {");
-    expect(rust).toContain("impl From<&str> for AppError {");
-    expect(rust).toContain("AppError::Other { message }");
-  });
-
-  test("ERR18 the From impls type-check (a String flows to Other via .into())", async () => {
-    const r = await checkRust(compile(CUSTOM));
-    expect(r.ok).toBe(true);
-  });
-
-  test("ERR19 (differential) a mixed custom + plain throw + opaque-Displayed catch runs end-to-end", async () => {
+defineDifferential("error-from", [
+  {
+    name: "ERR19 (differential) a mixed custom + plain throw + opaque-Displayed catch runs end-to-end",
     // NB: `throw "lit"` (not `throw new Error(...)`) for the plain path — Bun's
     // `console.log(errObj)` renders a stack trace, so it can't be a clean
     // differential; a thrown string prints bare, exactly as our AppError::Other
     // Display does (thiserror #[error("{message}")] == 021/022 Display). The
     // point stands: the custom `throw` (a variant), the plain `throw` (the Other
     // catch-all), and the opaque-Displayed catch all compose.
-    const src = `class NotFoundError extends Error {
+    src: `class NotFoundError extends Error {
   constructor(message: string) { super(message); }
 }
 function lookup(id: number): number {
@@ -76,8 +44,22 @@ function run(id: number): void {
     console.log(e);
   }
 }
-run(0);`;
-    await behaves(src, "zero not allowed");
+run(0);`,
+    expected: "zero not allowed",
+  },
+]);
+
+describe("049d: catch-all + From glue", () => {
+  test("ERR17 an AppError program emits From<String> and From<&str> → Other", () => {
+    const rust = compile(CUSTOM);
+    expect(rust).toContain("impl From<String> for AppError {");
+    expect(rust).toContain("impl From<&str> for AppError {");
+    expect(rust).toContain("AppError::Other { message }");
+  });
+
+  test("ERR18 the From impls type-check (a String flows to Other via .into())", async () => {
+    const r = await checkRust(compile(CUSTOM));
+    expect(r.ok).toBe(true);
   });
 
   test("ERR20 (series 063) a per-branch-returning discriminator lowers to a labeled block", () => {

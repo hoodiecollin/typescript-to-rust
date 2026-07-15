@@ -9,31 +9,11 @@
  * docs/work/065-yield-star-consumption/specs.md.
  */
 
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
 import { lower } from "../src/lower";
-import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { defineDifferential } from "./_support/differential";
 
 function rejects(src: string, re: RegExp): void {
   expect(() =>
@@ -41,56 +21,58 @@ function rejects(src: string, re: RegExp): void {
   ).toThrow(re);
 }
 
-describe("065 yield* delegation & collecting consumption", () => {
-  test("YS1 `yield* inner()` delegates to another generator", async () => {
-    const src = `function* inner(): Generator<number> { yield 1; yield 2; }
+defineDifferential("generator-yield-star", [
+  {
+    name: "YS1 `yield* inner()` delegates to another generator",
+    src: `function* inner(): Generator<number> { yield 1; yield 2; }
 function* outer(): Generator<number> { yield 0; yield* inner(); yield 3; }
-for (const x of outer()) { console.log(x); }`;
-    await behaves(src, "0\n1\n2\n3");
-    const rust = compile(src);
-    expect(rust).toContain("Box<dyn Iterator<Item = f64>>");
-    expect(rust).toContain("inner().into_iter()");
-  });
-
-  test("YS2 `yield* [array]` delegates to a non-generator iterable", async () => {
-    const src = `function* g(): Generator<number> { yield 10; yield* [20, 30]; yield 40; }
-for (const x of g()) { console.log(x); }`;
-    await behaves(src, "10\n20\n30\n40");
-  });
-
-  test("YS3 chained `yield*` compose", async () => {
-    const src = `function* a(): Generator<number> { yield 1; }
+for (const x of outer()) { console.log(x); }`,
+    expected: "0\n1\n2\n3",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Box<dyn Iterator<Item = f64>>");
+      expect(rust).toContain("inner().into_iter()");
+    },
+  },
+  {
+    name: "YS2 `yield* [array]` delegates to a non-generator iterable",
+    src: `function* g(): Generator<number> { yield 10; yield* [20, 30]; yield 40; }
+for (const x of g()) { console.log(x); }`,
+    expected: "10\n20\n30\n40",
+  },
+  {
+    name: "YS3 chained `yield*` compose",
+    src: `function* a(): Generator<number> { yield 1; }
 function* b(): Generator<number> { yield* a(); yield 2; }
 function* c(): Generator<number> { yield* b(); yield 3; }
 let sum: number = 0;
 for (const x of c()) { sum = sum * 10 + x; }
-console.log(sum);`;
-    await behaves(src, "123");
-  });
-
-  test("CON1 `[...g()]` collects a generator into a `Vec`", async () => {
-    const src = `function* g(): Generator<number> { yield 5; yield 6; yield 7; }
+console.log(sum);`,
+    expected: "123",
+  },
+  {
+    name: "CON1 `[...g()]` collects a generator into a `Vec`",
+    src: `function* g(): Generator<number> { yield 5; yield 6; yield 7; }
 const arr: Array<number> = [...g()];
-console.log(arr.length, arr[0], arr[2]);`;
-    await behaves(src, "3 5 7");
-    expect(compile(src)).toContain(".collect::<Vec<_>>()");
-  });
-
-  test("CON2 `Array.from(g())` collects a generator into a `Vec`", async () => {
-    const src = `function* g(): Generator<number> { yield 1; yield 2; }
+console.log(arr.length, arr[0], arr[2]);`,
+    expected: "3 5 7",
+    extra: ({ rust }) => expect(rust).toContain(".collect::<Vec<_>>()"),
+  },
+  {
+    name: "CON2 `Array.from(g())` collects a generator into a `Vec`",
+    src: `function* g(): Generator<number> { yield 1; yield 2; }
 const arr: Array<number> = Array.from(g());
 let sum: number = 0;
 for (const x of arr) { sum = sum + x; }
-console.log(arr.length, sum);`;
-    await behaves(src, "2 3");
-    expect(compile(src)).toContain(".collect::<Vec<_>>()");
-  });
+console.log(arr.length, sum);`,
+    expected: "2 3",
+    extra: ({ rust }) => expect(rust).toContain(".collect::<Vec<_>>()"),
+  },
+]);
 
-  test("FL1 manual generator `.next()` is fail-loud", () => {
-    rejects(
-      `function* g(): Generator<number> { yield 1; }
+test("FL1 manual generator `.next()` is fail-loud", () => {
+  rejects(
+    `function* g(): Generator<number> { yield 1; }
 g().next();`,
-      /next|pull-only|Iterator/i,
-    );
-  });
+    /next|pull-only|Iterator/i,
+  );
 });

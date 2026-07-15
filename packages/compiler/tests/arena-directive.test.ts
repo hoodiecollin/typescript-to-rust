@@ -11,62 +11,45 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
 import { UnsupportedError } from "../src/errors";
-import { runRust } from "../src/harness";
+import { compile, defineDifferential } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
-
-describe("028c use arena", () => {
-  const build = `"use arena";
+const build = `"use arena";
 const xs: Array<number> = [1, 2, 3];
 xs.push(4);
 console.log(xs.length);`;
 
-  test("an arena-built Vec behaves as a faithful heap drop-in (no escape)", async () => {
+defineDifferential("arena-directive", [
+  {
+    name: "an arena-built Vec behaves as a faithful heap drop-in (no escape)",
     // Same observable result as the heap version — the arena is an allocation
     // strategy, not a semantic change, for the no-escape case.
-    await behaves(build, "4");
-  });
+    src: build,
+    expected: "4",
+  },
+  {
+    name: "an escaping arena value is rejected by the oracle (cargo), not miscompiled",
+    // Returning the arena vec ties `Vec<'a>` to the local arena's lifetime — a
+    // Rust lifetime/type error. Cargo is the escape check: loud, never silent.
+    src: `function build(): Array<number> {
+  "use arena";
+  const xs: Array<number> = [1, 2, 3];
+  return xs;
+}
+console.log(build().length);`,
+    expectFail: true,
+    extra: ({ rust }) => {
+      expect(rust).toContain("bumpalo::vec!");
+    },
+  },
+]);
 
+describe("028c use arena", () => {
   test("emits the bump arena and its vec macro; no directive string leaks", () => {
     const rust = compile(build);
     expect(rust).toContain("let arena = bumpalo::Bump::new();");
     expect(rust).toContain("bumpalo::vec![in &arena; 1.0, 2.0, 3.0]");
     expect(rust).not.toContain('"use arena"');
-  });
-
-  test("an escaping arena value is rejected by the oracle (cargo), not miscompiled", async () => {
-    // Returning the arena vec ties `Vec<'a>` to the local arena's lifetime — a
-    // Rust lifetime/type error. Cargo is the escape check: loud, never silent.
-    const rust = compile(`function build(): Array<number> {
-  "use arena";
-  const xs: Array<number> = [1, 2, 3];
-  return xs;
-}
-console.log(build().length);`);
-    expect(rust).toContain("bumpalo::vec!");
-    const rr = await runRust(rust);
-    expect(rr.ok).toBe(false);
   });
 
   test("`use arena` outside a free fn / script (a method body) fails loud", () => {

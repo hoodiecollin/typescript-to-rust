@@ -9,104 +9,79 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program, src);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { compile, defineDifferential } from "./_support/differential";
 
 const STR = `import { stringifyJson } from "@t2r/std";\n`;
 const PARSE = `import { parseJson } from "@t2r/std";\n`;
 
-describe("084 stringifyJson (045 writer, behind the shim)", () => {
-  test("STD1 an integer prints without a decimal", async () => {
-    const src = `${STR}console.log(stringifyJson(5));`;
-    await behaves(src, "5");
-    expect(compile(src)).toContain("tslib::json::stringify");
-  });
-
-  test("STD2 an array", async () => {
-    await behaves(`${STR}console.log(stringifyJson([1, 2, 3]));`, "[1,2,3]");
-  });
-
-  test("STD3 a record in insertion order", async () => {
-    await behaves(
-      `${STR}const o: Record<string, number> = { "a": 1, "b": 2 };
+defineDifferential("std-shim", [
+  {
+    name: "STD1 an integer prints without a decimal",
+    src: `${STR}console.log(stringifyJson(5));`,
+    expected: "5",
+    extra: ({ rust }) => expect(rust).toContain("tslib::json::stringify"),
+  },
+  {
+    name: "STD2 an array",
+    src: `${STR}console.log(stringifyJson([1, 2, 3]));`,
+    expected: "[1,2,3]",
+  },
+  {
+    name: "STD3 a record in insertion order",
+    src: `${STR}const o: Record<string, number> = { "a": 1, "b": 2 };
 console.log(stringifyJson(o));`,
-      '{"a":1,"b":2}',
-    );
-  });
-
-  test("STD4 a struct in declaration order", async () => {
-    await behaves(
-      `${STR}interface Point { x: number; y: number; }
+    expected: '{"a":1,"b":2}',
+  },
+  {
+    name: "STD4 a struct in declaration order",
+    src: `${STR}interface Point { x: number; y: number; }
 const p: Point = { x: 1, y: 2 };
 console.log(stringifyJson(p));`,
-      '{"x":1,"y":2}',
-    );
-  });
-
-  test("STD5 a fractional number keeps decimals", async () => {
-    await behaves(`${STR}console.log(stringifyJson(1.5));`, "1.5");
-  });
-
-  test("STD6 an aliased import still routes (recognition by specifier)", async () => {
-    const src = `import { stringifyJson as sj } from "@t2r/std";
-console.log(sj(5));`;
-    await behaves(src, "5");
-    expect(compile(src)).toContain("tslib::json::stringify");
-  });
-});
-
-describe("084 parseJson<T> → ParseResult<T>", () => {
-  test("STD7 parse into a struct, read on the ok branch", async () => {
-    const src = `${PARSE}interface Point { x: number; y: number; }
+    expected: '{"x":1,"y":2}',
+  },
+  {
+    name: "STD5 a fractional number keeps decimals",
+    src: `${STR}console.log(stringifyJson(1.5));`,
+    expected: "1.5",
+  },
+  {
+    name: "STD6 an aliased import still routes (recognition by specifier)",
+    src: `import { stringifyJson as sj } from "@t2r/std";
+console.log(sj(5));`,
+    expected: "5",
+    extra: ({ rust }) => expect(rust).toContain("tslib::json::stringify"),
+  },
+  {
+    name: "STD7 parse into a struct, read on the ok branch",
+    src: `${PARSE}interface Point { x: number; y: number; }
 const r = parseJson<Point>('{"x": 3, "y": 4}');
-if (r.ok) { console.log(r.value.x, r.value.y); }`;
-    await behaves(src, "3 4");
-    expect(compile(src)).toContain("ParseResult::<Point>::parse");
-  });
-
-  test("STD8 parse into an array type", async () => {
-    const src = `${PARSE}const r = parseJson<Array<number>>("[10, 20, 30]");
-if (r.ok) { console.log(r.value[1]); }`;
-    await behaves(src, "20");
-  });
-
-  test("STD9 the error branch (no throw)", async () => {
-    const src = `${PARSE}interface Point { x: number; y: number; }
+if (r.ok) { console.log(r.value.x, r.value.y); }`,
+    expected: "3 4",
+    extra: ({ rust }) => expect(rust).toContain("ParseResult::<Point>::parse"),
+  },
+  {
+    name: "STD8 parse into an array type",
+    src: `${PARSE}const r = parseJson<Array<number>>("[10, 20, 30]");
+if (r.ok) { console.log(r.value[1]); }`,
+    expected: "20",
+  },
+  {
+    name: "STD9 the error branch (no throw)",
+    src: `${PARSE}interface Point { x: number; y: number; }
 const r = parseJson<Point>("not json");
-if (!r.ok) { console.log("bad"); }`;
-    await behaves(src, "bad");
-  });
-
-  test("STD10 round-trips through stringifyJson", async () => {
-    const src = `import { parseJson, stringifyJson } from "@t2r/std";
+if (!r.ok) { console.log("bad"); }`,
+    expected: "bad",
+  },
+  {
+    name: "STD10 round-trips through stringifyJson",
+    src: `import { parseJson, stringifyJson } from "@t2r/std";
 interface Point { x: number; y: number; }
 const p: Point = { x: 7, y: 9 };
 const r = parseJson<Point>(stringifyJson(p));
-if (r.ok) { console.log(r.value.x, r.value.y); }`;
-    await behaves(src, "7 9");
-  });
-});
+if (r.ok) { console.log(r.value.x, r.value.y); }`,
+    expected: "7 9",
+  },
+]);
 
 describe("084 fail-loud: forbid bare JSON + redirect", () => {
   test("STD11 bare JSON.stringify → redirect to stringifyJson", () => {

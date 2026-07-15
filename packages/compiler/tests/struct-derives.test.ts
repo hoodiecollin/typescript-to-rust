@@ -13,104 +13,84 @@
  * docs/work/037-ownership-cfg-liveness/specs.md.
  */
 
-import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
+import { expect, test } from "bun:test";
+import { compile, defineDifferential } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
-
-describe("037b struct derives + struct moves", () => {
-  test("D1 an interface struct moved then reused is cloned + behaves", async () => {
-    const src = `interface Point { x: number; y: number; }
+defineDifferential("struct-derives", [
+  {
+    name: "D1 an interface struct moved then reused is cloned + behaves",
+    src: `interface Point { x: number; y: number; }
 const a: Point = { x: 1, y: 2 };
 const b: Point = a;
 console.log(a.x);
-console.log(b.x);`;
-    await behaves(src, "1\n1");
-    const rust = compile(src);
-    expect(rust).toContain("#[derive(Clone, Debug, PartialEq)]");
-    expect(rust).toContain("a.clone()");
-  });
-
-  test("D2 a class instance moved then reused is cloned + behaves", async () => {
-    const src = `class Counter {
+console.log(b.x);`,
+    expected: "1\n1",
+    extra: ({ rust }) => {
+      expect(rust).toContain("#[derive(Clone, Debug, PartialEq)]");
+      expect(rust).toContain("a.clone()");
+    },
+  },
+  {
+    name: "D2 a class instance moved then reused is cloned + behaves",
+    src: `class Counter {
   count: number;
   constructor(c: number) { this.count = c; }
 }
 const a: Counter = new Counter(5);
 const b: Counter = a;
 console.log(a.count);
-console.log(b.count);`;
-    await behaves(src, "5\n5");
-    expect(compile(src)).toContain("a.clone()");
-  });
-
-  test("D3 the derive line is present on a generated class struct", () => {
-    const rust = compile(`class Counter {
-  count: number;
-  constructor(c: number) { this.count = c; }
-}
-const a: Counter = new Counter(5);
-console.log(a.count);`);
-    expect(rust).toContain("#[derive(Clone, Debug, PartialEq)]\nstruct Counter {");
-  });
-
-  test("D4 a struct last use stays bare (no needless clone)", () => {
-    const rust = compile(`interface Point { x: number; y: number; }
-const a: Point = { x: 1, y: 2 };
-const b: Point = a;
-console.log(b.x);`);
-    expect(rust).not.toContain("a.clone()");
-    expect(rust).toContain("= a;");
-  });
-
-  test("D5 a loop-carried struct move is cloned (037a engine + 037b movability)", async () => {
-    const src = `interface Point { x: number; y: number; }
+console.log(b.count);`,
+    expected: "5\n5",
+    extra: ({ rust }) => expect(rust).toContain("a.clone()"),
+  },
+  {
+    name: "D5 a loop-carried struct move is cloned (037a engine + 037b movability)",
+    src: `interface Point { x: number; y: number; }
 function px(p: Point): number { return 1; }
 const a: Point = { x: 1, y: 2 };
 let total: number = 0;
 for (let i = 0; i < 3; i = i + 1) {
   total = total + px(a);
 }
-console.log(total);`;
-    await behaves(src, "3");
-    expect(compile(src)).toContain("px(a.clone())");
-  });
+console.log(total);`,
+    expected: "3",
+    extra: ({ rust }) => expect(rust).toContain("px(a.clone())"),
+  },
+]);
 
-  test("D6 enum and error-class derives are unchanged (regression)", () => {
-    const enumRust = compile(`enum Color { Red, Green }
+test("D3 the derive line is present on a generated class struct", () => {
+  const rust = compile(`class Counter {
+  count: number;
+  constructor(c: number) { this.count = c; }
+}
+const a: Counter = new Counter(5);
+console.log(a.count);`);
+  expect(rust).toContain("#[derive(Clone, Debug, PartialEq)]\nstruct Counter {");
+});
+
+test("D4 a struct last use stays bare (no needless clone)", () => {
+  const rust = compile(`interface Point { x: number; y: number; }
+const a: Point = { x: 1, y: 2 };
+const b: Point = a;
+console.log(b.x);`);
+  expect(rust).not.toContain("a.clone()");
+  expect(rust).toContain("= a;");
+});
+
+test("D6 enum and error-class derives are unchanged (regression)", () => {
+  const enumRust = compile(`enum Color { Red, Green }
 const c: Color = Color.Red;
 console.log(c === Color.Red);`);
-    expect(enumRust).toContain("#[derive(Clone, Copy, PartialEq)]");
+  expect(enumRust).toContain("#[derive(Clone, Copy, PartialEq)]");
 
-    const errRust = compile(`class MyError extends Error {
+  const errRust = compile(`class MyError extends Error {
   constructor(message: string) { super(message); }
 }
 function boom(): void { throw new MyError("x"); }
 boom();`);
-    // A custom error class is an AppError enum variant (series 049), not a data
-    // struct — it carries no data-struct derive clause.
-    expect(errRust).toContain("enum AppError {");
-    expect(errRust).toContain("MyError { message: String },");
-    expect(errRust).not.toContain("#[derive(Clone, Debug)]\nstruct MyError");
-  });
+  // A custom error class is an AppError enum variant (series 049), not a data
+  // struct — it carries no data-struct derive clause.
+  expect(errRust).toContain("enum AppError {");
+  expect(errRust).toContain("MyError { message: String },");
+  expect(errRust).not.toContain("#[derive(Clone, Debug)]\nstruct MyError");
 });

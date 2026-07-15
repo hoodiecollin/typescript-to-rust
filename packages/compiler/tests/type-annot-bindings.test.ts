@@ -12,48 +12,40 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
 import { UnsupportedError } from "../src/lower";
+import { compile, defineDifferential } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
-
-describe("046a untyped scalar bindings lower", () => {
-  test("TYP1 an untyped number binding lowers (Rust infers f64)", async () => {
-    const src = `const n = 5;\nconsole.log(n);`;
-    await behaves(src, "5");
-    // No type annotation is emitted — Rust infers the binding.
-    expect(compile(src)).toContain("let n = 5");
-    expect(compile(src)).not.toContain("let n:");
-  });
-
-  test("TYP2 an untyped string binding lowers (String)", async () => {
-    await behaves(`const s = "hi";\nconsole.log(s);`, "hi");
-  });
-
-  test("TYP3 an untyped boolean binding lowers (bool)", async () => {
-    await behaves(`const b = true;\nconsole.log(b);`, "true");
-  });
-});
+defineDifferential("type-annot-bindings", [
+  {
+    name: "TYP1 an untyped number binding lowers (Rust infers f64)",
+    src: `const n = 5;\nconsole.log(n);`,
+    expected: "5",
+    extra: ({ rust }) => {
+      // No type annotation is emitted — Rust infers the binding.
+      expect(rust).toContain("let n = 5");
+      expect(rust).not.toContain("let n:");
+    },
+  },
+  {
+    name: "TYP2 an untyped string binding lowers (String)",
+    src: `const s = "hi";\nconsole.log(s);`,
+    expected: "hi",
+  },
+  {
+    name: "TYP3 an untyped boolean binding lowers (bool)",
+    src: `const b = true;\nconsole.log(b);`,
+    expected: "true",
+  },
+  {
+    name: "TYP8 an untyped trivial-literal index still refines to usize",
+    src: `const i = 0;\nconst arr = [10, 20];\nconsole.log(arr[i]);`,
+    expected: "10",
+    extra: ({ rust }) => {
+      // The gate left `ty = null`, so the usize fixpoint could still retype `i`.
+      expect(rust).toContain("let i: usize = 0");
+    },
+  },
+]);
 
 describe("046a untyped non-literal bindings fail loud", () => {
   test("TYP4 a call initializer with no annotation is rejected", () => {
@@ -75,14 +67,5 @@ describe("046a untyped non-literal bindings fail loud", () => {
   test("TYP7 `null`/`undefined` initializers with no annotation are rejected", () => {
     expect(() => compile(`const x = null;`)).toThrow(UnsupportedError);
     expect(() => compile(`const y = undefined;`)).toThrow(UnsupportedError);
-  });
-});
-
-describe("046a numeric-refinement interaction", () => {
-  test("TYP8 an untyped trivial-literal index still refines to usize", async () => {
-    const src = `const i = 0;\nconst arr = [10, 20];\nconsole.log(arr[i]);`;
-    await behaves(src, "10");
-    // The gate left `ty = null`, so the usize fixpoint could still retype `i`.
-    expect(compile(src)).toContain("let i: usize = 0");
   });
 });

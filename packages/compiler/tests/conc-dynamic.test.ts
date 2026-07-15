@@ -29,29 +29,50 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
 import { runRust } from "../src/harness";
+import { compile, defineDifferential, runTs } from "./_support/differential";
 
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
+defineDifferential("conc-dynamic", [
+  {
+    name: "CONC11 (differential) dynamic fan-out over `[1, 2, 3]` prints the same Vec, in order (variant 1)",
+    // Inline-closure variant.
+    src: `async function fetchRow(id: number): Promise<number> { return id + 100; }
+async function run(): Promise<void> {
+  const ids: Array<number> = [1, 2, 3];
+  const rows: Array<number> = await Promise.all(ids.map(id => fetchRow(id)));
+  console.log(rows[0], rows[1], rows[2]);
 }
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
+await run();`,
+    expected: "101 102 103",
+  },
+  {
+    name: "CONC11 (differential) dynamic fan-out over `[1, 2, 3]` prints the same Vec, in order (variant 2)",
+    // Lifted async-arrow variant — same Vec.
+    src: `async function fetchRow(id: number): Promise<number> { return id + 100; }
+async function run(): Promise<void> {
+  const ids: Array<number> = [1, 2, 3];
+  const rows: Array<number> = await Promise.all(ids.map(async id => await fetchRow(id)));
+  console.log(rows[0], rows[1], rows[2]);
 }
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
+await run();`,
+    expected: "101 102 103",
+  },
+  {
+    name: "CONC13 (differential) `allSettled` over a mix of resolve + throw yields all N (no short-circuit)",
+    src: `async function fetchRow(id: number): Promise<number> {
+  if (id < 0) { throw new Error("bad"); }
+  return id + 100;
 }
+async function run(): Promise<void> {
+  const ids: Array<number> = [1, -1, 3];
+  const settled = await Promise.allSettled(ids.map(id => fetchRow(id)));
+  console.log(settled.length);
+}
+await run();`,
+    // Nothing short-circuits: all three settle → length 3 in both runtimes.
+    expected: "3",
+  },
+]);
 
 describe("051b dynamic async concurrency + timers", () => {
   test("CONC10 `Promise.all(ids.map(id => fetchRow(id)))` (inline closure) → `join_all`", () => {
@@ -84,28 +105,6 @@ await run();`;
     expect(rust).toMatch(/async fn __cb_map_\d+\(id: f64\) -> f64/);
   });
 
-  test("CONC11 (differential) dynamic fan-out over `[1, 2, 3]` prints the same Vec, in order", async () => {
-    // Inline-closure variant.
-    const inline = `async function fetchRow(id: number): Promise<number> { return id + 100; }
-async function run(): Promise<void> {
-  const ids: Array<number> = [1, 2, 3];
-  const rows: Array<number> = await Promise.all(ids.map(id => fetchRow(id)));
-  console.log(rows[0], rows[1], rows[2]);
-}
-await run();`;
-    await behaves(inline, "101 102 103");
-
-    // Lifted async-arrow variant — same Vec.
-    const lifted = `async function fetchRow(id: number): Promise<number> { return id + 100; }
-async function run(): Promise<void> {
-  const ids: Array<number> = [1, 2, 3];
-  const rows: Array<number> = await Promise.all(ids.map(async id => await fetchRow(id)));
-  console.log(rows[0], rows[1], rows[2]);
-}
-await run();`;
-    await behaves(lifted, "101 102 103");
-  });
-
   test("CONC12 `Promise.allSettled(...)` → `join_all` yielding `Vec<Result<T, String>>`", () => {
     const src = `async function fetchRow(id: number): Promise<number> {
   if (id < 0) { throw new Error("bad"); }
@@ -123,21 +122,6 @@ await run();`;
     expect(rust).not.toContain("try_join_all");
     // The lifted element futures are `Result<T, String>`; Rust infers the Vec.
     expect(rust).toContain("async fn fetchRow(id: f64) -> Result<f64, String>");
-  });
-
-  test("CONC13 (differential) `allSettled` over a mix of resolve + throw yields all N (no short-circuit)", async () => {
-    const src = `async function fetchRow(id: number): Promise<number> {
-  if (id < 0) { throw new Error("bad"); }
-  return id + 100;
-}
-async function run(): Promise<void> {
-  const ids: Array<number> = [1, -1, 3];
-  const settled = await Promise.allSettled(ids.map(id => fetchRow(id)));
-  console.log(settled.length);
-}
-await run();`;
-    // Nothing short-circuits: all three settle → length 3 in both runtimes.
-    await behaves(src, "3");
   });
 
   test("CONC14 `await sleep(50)` → `tokio::time::sleep(std::time::Duration::from_millis(50` + `.await`", () => {
@@ -169,7 +153,7 @@ await run();`;
     const rust = compile(src);
     const rr = await runRust(rust);
     expect(rr.ok).toBe(true);
-    expect(rr.stdout.trim()).toBe(runTs(tsSrc));
+    expect(rr.stdout.trim()).toBe(await runTs(tsSrc));
     expect(rr.stdout.trim()).toBe("done");
   });
 

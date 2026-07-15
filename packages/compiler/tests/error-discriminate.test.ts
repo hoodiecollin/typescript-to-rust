@@ -7,29 +7,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { parseSync } from "oxc-parser";
-import type { Program } from "../src/ast";
-import { emit } from "../src/emitter";
-import { runRust } from "../src/harness";
-
-function compile(src: string): string {
-  return emit(parseSync("t.ts", src).program as unknown as Program);
-}
-
-function runTs(src: string): string {
-  const proc = Bun.spawnSync(["bun", "run", "-"], {
-    stdin: new TextEncoder().encode(src),
-  });
-  return new TextDecoder().decode(proc.stdout).trim();
-}
-
-async function behaves(src: string, expected: string): Promise<void> {
-  const rust = compile(src);
-  const rr = await runRust(rust);
-  expect(rr.ok).toBe(true);
-  expect(rr.stdout.trim()).toBe(runTs(src));
-  expect(rr.stdout.trim()).toBe(expected);
-}
+import { compile, defineDifferential } from "./_support/differential";
 
 const TWO_CLASSES = `class NotFoundError extends Error {
   constructor(message: string) { super(message); }
@@ -57,30 +35,20 @@ function run(id: number): void {
   }
 }`;
 
-describe("049c: instanceof → match", () => {
-  test("ERR12 an instanceof ladder → a match with a variant arm each + wildcard, no downcast_ref", () => {
-    const rust = compile(TWO_CLASSES);
-    expect(rust).toContain("match e {");
-    expect(rust).toContain("AppError::NotFoundError { .. } =>");
-    expect(rust).toContain("other =>");
-    expect(rust).not.toContain("downcast_ref");
-  });
-
-  test("ERR13 an arm reading e.field binds it owned (Foo { field, .. } => … field …)", () => {
-    const rust = compile(TWO_CLASSES);
-    expect(rust).toContain("AppError::ValidationError { field, .. } =>");
-    expect(rust).toContain('println!("{}", field)');
-  });
-
-  test("ERR14 (differential) discriminates the correct variant per branch — Rust stdout == Bun", async () => {
-    const notFound = `${TWO_CLASSES}\nrun(-1);`;
-    const validation = `${TWO_CLASSES}\nrun(0);`;
-    await behaves(notFound, "not-found");
-    await behaves(validation, "id");
-  });
-
-  test("ERR15 a ladder with no trailing else appends a `_ => {}` and compiles (JS swallow parity)", async () => {
-    const src = `class NotFoundError extends Error {
+defineDifferential("error-discriminate", [
+  {
+    name: "ERR14 (differential) discriminates the correct variant per branch — Rust stdout == Bun (variant 1)",
+    src: `${TWO_CLASSES}\nrun(-1);`,
+    expected: "not-found",
+  },
+  {
+    name: "ERR14 (differential) discriminates the correct variant per branch — Rust stdout == Bun (variant 2)",
+    src: `${TWO_CLASSES}\nrun(0);`,
+    expected: "id",
+  },
+  {
+    name: "ERR15 a ladder with no trailing else appends a `_ => {}` and compiles (JS swallow parity)",
+    src: `class NotFoundError extends Error {
   constructor(message: string) { super(message); }
 }
 function lookup(id: number): number {
@@ -97,11 +65,28 @@ function run(id: number): void {
   }
   console.log("after");
 }
-run(-1);`;
-    const rust = compile(src);
-    expect(rust).toContain("_ => {");
+run(-1);`,
     // A plain Error (Other) is swallowed by the ladder; execution continues.
-    await behaves(src, "after");
+    expected: "after",
+    extra: ({ rust }) => {
+      expect(rust).toContain("_ => {");
+    },
+  },
+]);
+
+describe("049c: instanceof → match", () => {
+  test("ERR12 an instanceof ladder → a match with a variant arm each + wildcard, no downcast_ref", () => {
+    const rust = compile(TWO_CLASSES);
+    expect(rust).toContain("match e {");
+    expect(rust).toContain("AppError::NotFoundError { .. } =>");
+    expect(rust).toContain("other =>");
+    expect(rust).not.toContain("downcast_ref");
+  });
+
+  test("ERR13 an arm reading e.field binds it owned (Foo { field, .. } => … field …)", () => {
+    const rust = compile(TWO_CLASSES);
+    expect(rust).toContain("AppError::ValidationError { field, .. } =>");
+    expect(rust).toContain('println!("{}", field)');
   });
 
   test("ERR16 a non-instanceof catch (e.message === …) keeps the opaque bind — no match", () => {
