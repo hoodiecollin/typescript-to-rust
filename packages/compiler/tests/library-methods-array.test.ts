@@ -75,19 +75,24 @@ console.log(getRows().join("+"));`;
 });
 
 describe("083 Array-access tail — fail-loud residuals", () => {
-  test("ARR-FL1 flatMap stays fail-loud (array-returning callback lift deferred)", () => {
+  // NOTE: the uniform `flatMap(U[])` callback and literal-constant `flat(k)` forms
+  // shipped in series 085 (see flatmap-flat.test.ts). The fail-loud boundary here
+  // moved to the residuals that need the recursive/dynamic value model (→ #59): a
+  // `U | U[]` union callback and a dynamic-depth `flat(n)`.
+  test("ARR-FL1 flatMap with a U | U[] union callback stays fail-loud (→ #59)", () => {
     const src = `const xs: Array<number> = [1, 2, 3];
-const ys: Array<number> = xs.flatMap((x: number): Array<number> => [x, x * 10]);
+const ys = xs.flatMap((x: number) => (x % 2 === 0 ? [x, x] : x));
 console.log(ys.length);`;
     expect(() => compile(src)).toThrow();
   });
 
-  test("ARR-FL2 deep flat(n) stays fail-loud (cargo rejects)", async () => {
-    // `flat(n)` with an explicit depth is unmodeled → generic method fallthrough
-    // emits `.flat(2.0)`, which `Vec` has no method for. Fail-loud at cargo (never
-    // a wrong value) — the depth-1 `flat()` route is deliberately not claimed.
-    const src = `const xss: Array<Array<Array<number>>> = [[[1]], [[2]]];
-const flat: Array<number> = xss.flat(2);
+  test("ARR-FL2 dynamic-depth flat(n) (variable) stays fail-loud (cargo rejects)", async () => {
+    // A non-literal depth is unmodeled → generic method fallthrough emits
+    // `.flat(n)`, which `Vec` has no method for. Fail-loud at cargo (never a wrong
+    // value) — only literal-constant `flat(k)` is claimed (series 085).
+    const src = `const n: number = 2;
+const xss: Array<Array<Array<number>>> = [[[1]], [[2]]];
+const flat: Array<number> = xss.flat(n);
 console.log(flat.length);`;
     const rr = await runRust(compile(src));
     expect(rr.ok).toBe(false);

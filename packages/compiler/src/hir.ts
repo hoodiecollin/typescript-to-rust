@@ -484,6 +484,22 @@ export type HirExpr =
       forwarded: HirExpr[];
       elemMode: ElemMode;
     }
+  /**
+   * `xs.flatMap(p => [..])` →
+   * `xs.iter().flat_map(|p| cbName(<elem>, forwarded…)).collect::<Vec<_>>()`
+   * (series 085). The callback returns a `Vec<U>` (its lifted `fn cbName -> Vec<U>`);
+   * `flat_map` flattens one level so the result is `Vec<U>`, matching JS's `U[]`
+   * result. Same shim/element shape as `iterMap` minus the index param — `flatMap`
+   * is single-param only.
+   */
+  | {
+      kind: "iterFlatMap";
+      receiver: HirExpr;
+      cbName: string;
+      elemParam: string;
+      forwarded: HirExpr[];
+      elemMode: ElemMode;
+    }
   /** `Object.keys(m)` → `m.keys().cloned().collect::<Vec<_>>()` → `Vec<String>` (041). */
   | { kind: "objectKeys"; map: HirExpr }
   /** `Object.values(m)` → `m.values().cloned().collect::<Vec<_>>()` → `Vec<V>` (041). */

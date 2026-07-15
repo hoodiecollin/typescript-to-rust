@@ -3559,10 +3559,6 @@ function lowerClass(
       staticConsts.push(lowerStaticConst(f, structs, analysis));
     }
   }
-  const ctorMember = decl.body.body.find(
-    (m): m is MethodDefinition =>
-      m.type === "MethodDefinition" && m.kind === "constructor",
-  );
   // Series 070: resolve each instance field's construction source (ctor-assigned /
   // field initializer / `None`) and its Rust type in one pass. Parameter
   // properties are folded in (marked ctor-assigned) in declaration order.
@@ -8034,6 +8030,35 @@ function lowerCall(
         ? { kind: "iterMap", ...shared, indexParam: lifted.indexParam }
         : { kind: "iterFilter", ...shared };
     }
+    // `flatMap(f)` with a uniform `U[]`-returning callback (series 085) →
+    // `iter().flat_map(f).collect::<Vec<_>>()`. The one-level element unwrap lives
+    // in `typeCbBody`'s array case: the lifted `__cb` returns `Vec<U>`, so
+    // `flat_map` flattens exactly one level → `Vec<U>` (JS's `U[]` result). A
+    // union (`U | U[]`) callback fails loud there (→ #59). Single-param only (no
+    // `(x, i)` index — that is map-only, 057).
+    if (
+      !isUserMethod &&
+      methodName === "flatMap" &&
+      call.arguments.length === 1 &&
+      call.arguments[0]?.type === "ArrowFunctionExpression"
+    ) {
+      const elemType = elementTypeOf(m.object, analysis);
+      const lifted = liftCallback(
+        call.arguments[0] as ArrowFunctionExpression,
+        analysis,
+        "flatMap",
+        elemType,
+        1,
+      );
+      return {
+        kind: "iterFlatMap",
+        receiver: lowerExpr(m.object, analysis),
+        cbName: lifted.cbName,
+        elemParam: lifted.paramNames[0] as string,
+        forwarded: lifted.forwarded,
+        elemMode: lifted.elemMode,
+      };
+    }
     // `some`/`every` → `.iter().any()`/`.all()` (series 048); same single-param
     // predicate shape as `filter`, its lifted `fn` returning `bool`.
     if (
@@ -8445,6 +8470,18 @@ function isCaptureContainerType(ty: RustType): boolean {
   );
 }
 
+/**
+ * Structural `RustType` equality over the callback-body typer's surface (series
+ * 085) — the flatMap array-uniformity check. Compares scalar kinds directly and
+ * recurses into `vec` element types; other kinds compare by `kind` only (the
+ * bounded typer produces just scalars and `vec`s here).
+ */
+function sameRustType(a: RustType, b: RustType): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "vec" && b.kind === "vec") return sameRustType(a.elem, b.elem);
+  return true;
+}
+
 /** Is a `RustType` a `Copy` scalar (forwardable by value into a lifted fn)? */
 function isCopyRustType(ty: RustType): boolean {
   return (
@@ -8498,6 +8535,28 @@ function typeCbBody(e: HirExpr, ctx: Map<string, RustType>): RustType {
       throw new UnsupportedError({
         type: "callback body too complex to lift (numeric surface only)",
       });
+    case "array": {
+      // A `flatMap` callback returns a `U[]` (series 085): type every element,
+      // require them uniform, and return `Vec<U>` — the one-level element unwrap
+      // (the lifted `fn` returns `Vec<U>`, so `flat_map` flattens to `Vec<U>`).
+      // An empty or heterogeneous array (the `U | U[]` union case) is fail-loud →
+      // the recursive/dynamic value model, epic #59.
+      if (e.elements.length === 0) {
+        throw new UnsupportedError({
+          type: "cannot lift flatMap callback: empty array-literal return (element type unknown)",
+        });
+      }
+      const elemTypes = e.elements.map((el) => typeCbBody(el, ctx));
+      const first = elemTypes[0] as RustType;
+      for (const t of elemTypes) {
+        if (!sameRustType(t, first)) {
+          throw new UnsupportedError({
+            type: "cannot lift flatMap callback: heterogeneous array-literal return (a `U | U[]` union stays fail-loud → #59)",
+          });
+        }
+      }
+      return { kind: "vec", elem: first };
+    }
     default:
       throw new UnsupportedError({
         type: "callback body too complex to lift (numeric surface only)",
@@ -9131,18 +9190,54 @@ function arrayTailMethod(
       ],
     };
   }
-  // `xss.flat()` (depth 1) — flatten one level of an array-of-arrays → a new
-  // `Vec`. Only the default depth-1 form is modeled (deep `flat(n)` is a later
-  // slice); gated on a `Vec<Vec<T>>` receiver so a flat array's `.flat()` stays
-  // fail-loud rather than mis-flattening.
-  if (methodName === "flat" && args.length === 0 && _elem.kind === "vec") {
-    return {
-      kind: "call",
-      callee: "tslib::array::flat",
-      args: [recvRef],
-    };
+  // `xss.flat()` (depth 1) / `xss.flat(k)` for a literal-constant `k` (series
+  // 085). Depth 1 flattens one level of an array-of-arrays. `flat(k)` for an
+  // integer literal `k ≥ 1` on a uniformly `k`-deep-nested array emits `k` chained
+  // depth-1 flattens (`flat(2)` → `flat(flat(x))`). The receiver's nested `vec`
+  // element type is walked exactly `k` levels — fail-loud if it isn't nested that
+  // deep (the jagged/under-nested residual → #59). A non-literal / `Infinity`
+  // depth is not claimed → generic fallthrough → cargo-loud.
+  if (methodName === "flat" && (args.length === 0 || args.length === 1)) {
+    const depth = flatLiteralDepth(args[0]);
+    if (depth === null) return null; // non-literal / Infinity → fall through (cargo-loud)
+    // Walk the receiver element type `depth` levels: each level must be a `vec`.
+    let cur: RustType = _elem;
+    for (let level = 0; level < depth; level++) {
+      if (cur.kind !== "vec") {
+        throw new UnsupportedError({
+          type: `flat(${depth}) on an array not nested ${depth} deep (walk hit a non-array level ${level + 1}; jagged/under-nested stays fail-loud → #59)`,
+        });
+      }
+      cur = cur.elem;
+    }
+    // Emit `depth` chained depth-1 flattens: flat(flat(...flat(&recv)...)).
+    let call: HirExpr = { kind: "call", callee: "tslib::array::flat", args: [recvRef] };
+    for (let level = 1; level < depth; level++) {
+      call = {
+        kind: "call",
+        callee: "tslib::array::flat",
+        args: [{ borrow: "ref", expr: call }],
+      };
+    }
+    return call;
   }
   return null;
+}
+
+/**
+ * The literal-constant depth of a `flat(k)` argument (series 085). No arg → the
+ * default depth 1. A positive **integer** numeric literal → that depth. Anything
+ * else — a variable, `Infinity`, a non-integer, or `< 1` — returns `null` so the
+ * caller declines the route (→ generic fallthrough → cargo-loud, never a wrong
+ * flatten).
+ */
+function flatLiteralDepth(arg: Expression | undefined): number | null {
+  if (arg === undefined) return 1;
+  if (arg.type !== "Literal") return null;
+  const v = (arg as Literal).value;
+  if (typeof v !== "number") return null;
+  if (!Number.isInteger(v) || v < 1) return null;
+  return v;
 }
 
 /** A `&self` shared-borrow arg of the primitive receiver (for a tslib fn). */

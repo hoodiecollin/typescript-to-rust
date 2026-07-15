@@ -404,6 +404,7 @@ function rcBody(
         return { ...e, expr: rewrite(e.expr) };
       case "iterMap":
       case "iterFilter":
+      case "iterFlatMap":
         return {
           ...e,
           receiver: rewrite(e.receiver),

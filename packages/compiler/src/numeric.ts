@@ -268,6 +268,7 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
       break;
     case "iterMap":
     case "iterFilter":
+    case "iterFlatMap":
       eachExpr(e.receiver, fn);
       for (const f of e.forwarded) eachExpr(f, fn);
       break;

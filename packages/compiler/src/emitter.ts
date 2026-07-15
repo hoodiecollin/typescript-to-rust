@@ -1694,6 +1694,15 @@ function emitExpr(expr: HirExpr): string {
       const term = expr.elemMode === "copy" ? "copied" : "cloned";
       return `${emitExpr(expr.receiver)}.iter().filter(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).${term}().collect::<Vec<_>>()`;
     }
+    case "iterFlatMap": {
+      // `.flat_map(cb)` — the lifted `cb` returns a `Vec<U>`; `flat_map` flattens
+      // one level, so the collected result is `Vec<U>` (series 085). Same element
+      // shim as `iterMap` (`.iter()` borrow, `elemSingle` deref).
+      const recv = emitExpr(expr.receiver);
+      const p = rid(expr.elemParam);
+      const elem = elemSingle(expr.elemMode, expr.elemParam);
+      return `${recv}.iter().flat_map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+    }
     case "objectKeys":
       return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
     case "objectValues":

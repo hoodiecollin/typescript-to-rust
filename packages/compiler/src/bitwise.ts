@@ -289,6 +289,7 @@ function mapChildren(e: HirExpr, f: (c: HirExpr) => HirExpr): void {
       break;
     case "iterMap":
     case "iterFilter":
+    case "iterFlatMap":
     case "iterFind":
     case "iterAny":
     case "iterAll":
