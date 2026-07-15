@@ -631,11 +631,21 @@ function emitStruct(
 ): string {
   const derive = structDeriveClause(s, structs, usesJson);
   const gen = genericClause(s.generics);
+  // An `undefined`-only field omits its JSON key when `None` (series 091) — but
+  // the `#[serde(...)]` helper attribute is only valid when serde is actually
+  // derived (else "cannot find attribute `serde`"), so gate on the derive itself.
+  const serdeDerived = derive.includes("serde::Serialize");
+  const emitField = (f: HirStruct["fields"][number]): string => {
+    const field = `${rid(f.name)}: ${emitType(f.ty)},`;
+    return serdeDerived && f.omitIfNone
+      ? indent(`#[serde(skip_serializing_if = "Option::is_none")]\n${field}`)
+      : indent(field);
+  };
   const decl =
     s.fields.length === 0
       ? `${derive}struct ${rid(s.name)}${gen} {}`
       : `${derive}struct ${rid(s.name)}${gen} {\n${s.fields
-          .map((f) => indent(`${rid(f.name)}: ${emitType(f.ty)},`))
+          .map(emitField)
           .join("\n")}\n}`;
   // Interface inheritance (series 059): a getter-trait impl per extended base. Each
   // getter clones its (flattened) field, so a base-typed `&impl IA` reads by value.

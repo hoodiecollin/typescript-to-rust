@@ -98,7 +98,10 @@ export interface ModuleAnalysis {
    * (nested literals) or a `Vec` of struct (struct literals inside an array).
    * Populated by `lower()` after analysis (needs `lowerType`); empty here.
    */
-  structFields: Map<string, { name: string; ty: RustType }[]>;
+  structFields: Map<
+    string,
+    { name: string; ty: RustType; omitIfNone?: boolean }[]
+  >;
   /**
    * Struct names used as a `Map` key / `Set` element (series 061) — they derive
    * `Hash, PartialEq, Eq` (gated on every field being `Hash+Eq` eligible; an

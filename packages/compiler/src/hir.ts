@@ -1160,7 +1160,14 @@ export interface GenericParam {
 export interface HirStruct {
   kind: "struct";
   name: string;
-  fields: { name: string; ty: RustType }[];
+  /**
+   * Each field's `omitIfNone` (series 091): its declared nullishness is
+   * `undefined`-only (`x?: T` / `x: T | undefined`, no `null` arm), so a `None`
+   * value must be omitted from JSON — the emitter adds
+   * `#[serde(skip_serializing_if = "Option::is_none")]`. A `null`-bearing field
+   * keeps the key (serializes `null`); "null wins" for `T | null | undefined`.
+   */
+  fields: { name: string; ty: RustType; omitIfNone?: boolean }[];
   /**
    * Generic type parameters (series 081) — present for a `class Box<T>`'s emitted
    * struct (`struct Box<T>` / `struct Box<T: IShape>`). Interface-lowered structs

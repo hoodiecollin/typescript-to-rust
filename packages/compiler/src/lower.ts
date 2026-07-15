@@ -3535,12 +3535,12 @@ function lowerInterface(
   // this struct (so construction + Debug work), and record it so trait synthesis
   // gives it an `impl I<Base>`. Multi-level `extends` chains via `structFields`
   // (already flattened for the base when it was itself derived).
-  const inherited: { name: string; ty: RustType }[] = [];
+  const inherited: { name: string; ty: RustType; omitIfNone?: boolean }[] = [];
   for (const h of decl.extends as { expression?: { name?: string } }[]) {
     const baseName = h.expression?.name;
     if (!baseName) continue;
     for (const f of analysis.structFields.get(baseName) ?? []) {
-      inherited.push({ name: f.name, ty: f.ty });
+      inherited.push({ name: f.name, ty: f.ty, omitIfNone: f.omitIfNone });
     }
   }
   const own = decl.body.body.map((m) => {
@@ -3552,14 +3552,14 @@ function lowerInterface(
         type: `interface field '${m.key.name}' without a type`,
       });
     }
-    // An optional field `x?: T` is `Option<T>` (series 042b).
+    // An optional field `x?: T` is `Option<T>` (series 042b); an `undefined`-only
+    // field omits its key from JSON when `None` (series 091).
+    const annotation = m.typeAnnotation.typeAnnotation;
+    const optional = m.optional === true;
     return {
       name: m.key.name,
-      ty: fieldRustType(
-        m.typeAnnotation.typeAnnotation,
-        m.optional === true,
-        structs,
-      ),
+      ty: fieldRustType(annotation, optional, structs),
+      omitIfNone: fieldOmitsUndefined(annotation, optional),
     };
   });
   // Base fields first (a derived struct reads cleanly), then own fields; a shadowed
@@ -3788,7 +3788,11 @@ function lowerClassBody(
   // field initializer / `None`) and its Rust type in one pass. Parameter
   // properties are folded in (marked ctor-assigned) in declaration order.
   const fieldPlans = planClassFields(decl, structs, analysis.typeParams);
-  const fields = fieldPlans.map((p) => ({ name: p.name, ty: p.ty }));
+  const fields = fieldPlans.map((p) => ({
+    name: p.name,
+    ty: p.ty,
+    omitIfNone: p.omitIfNone,
+  }));
   // A field initializer must be a construction constant — reject a `this`-/
   // cross-field-referencing one (design §Open sub-details: fail-loud).
   for (const p of fieldPlans) {
@@ -3799,7 +3803,7 @@ function lowerClassBody(
   // to the field list, so the struct literal, the struct definition, and the
   // derive walk all see it first (Rust field-init order, and `super(...)` runs
   // before own-field init).
-  if (base) fields.unshift({ name: base.field, ty: base.ty });
+  if (base) fields.unshift({ name: base.field, ty: base.ty, omitIfNone: false });
 
   let ctor: HirFn | null = null;
   let dispose: HirStmt[] | null = null;
@@ -7150,6 +7154,26 @@ function fieldRustType(
 }
 
 /**
+ * Does a struct field omit its key from JSON when the value is `None` (series
+ * 091)? True iff the field's nullishness is **`undefined`-only** — an optional
+ * `x?: T` or a `x: T | undefined` with **no** `null` arm. A `null`-bearing field
+ * (`T | null`, `T | null | undefined`) keeps the key and serializes `null`
+ * ("null wins"); a non-nullish field never omits. The declared annotation is the
+ * provenance signal: the runtime `Option<T>` collapses `null` and `undefined`,
+ * but the *type* still records which nullish keywords produced it.
+ */
+function fieldOmitsUndefined(annotation: TSType, optional: boolean): boolean {
+  let hasNull = annotation.type === "TSNullKeyword";
+  let hasUndef = optional || annotation.type === "TSUndefinedKeyword";
+  if (annotation.type === "TSUnionType") {
+    const members = (annotation as unknown as { types: TSType[] }).types;
+    hasNull ||= members.some((m) => m.type === "TSNullKeyword");
+    hasUndef ||= members.some((m) => m.type === "TSUndefinedKeyword");
+  }
+  return hasUndef && !hasNull;
+}
+
+/**
  * How a class field gets its value at construction (series 070). Every non-error
  * class field resolves to exactly one source: `ctor` (assigned `this.f = …` or a
  * `public/private f` parameter property — the existing 060 path), `initializer`
@@ -7165,6 +7189,12 @@ interface ClassFieldPlan {
   source: ClassFieldSource;
   /** The initializer AST node (present iff `source === "initializer"`). */
   init?: Expression;
+  /**
+   * The field omits its key from JSON when `None` (series 091): an
+   * `undefined`-only declared type, or a `source: "none"` field (implicitly
+   * `undefined` at construction — unset class fields are `undefined` in JS).
+   */
+  omitIfNone?: boolean;
 }
 
 /**
@@ -7263,16 +7293,21 @@ function planClassFields(
         type: `class field '${name}' without a type (nor an inferable initializer)`,
       });
     }
+    // JSON omission flavour (series 091) from the declared annotation, if any.
+    const omitIfNone = f.typeAnnotation
+      ? fieldOmitsUndefined(f.typeAnnotation.typeAnnotation, f.optional === true)
+      : false;
     if (assigned.has(name)) {
-      plans.push({ name, ty: declared, source: "ctor" });
+      plans.push({ name, ty: declared, source: "ctor", omitIfNone });
     } else if (init) {
-      plans.push({ name, ty: declared, source: "initializer", init });
+      plans.push({ name, ty: declared, source: "initializer", init, omitIfNone });
     } else {
       // Neither ctor-assigned nor initialized → implicitly absent: `Option<T>`,
-      // `None` at construction (design Decision, via series 066).
+      // `None` at construction (design Decision, via series 066). An unset field is
+      // `undefined` in JS, so it omits its JSON key (series 091).
       const ty: RustType =
         declared.kind === "option" ? declared : { kind: "option", inner: declared };
-      plans.push({ name, ty, source: "none" });
+      plans.push({ name, ty, source: "none", omitIfNone: true });
     }
   }
   // `public/private` parameter properties are always ctor-assigned fields.
@@ -7295,7 +7330,7 @@ function collectStructFields(
   for (const stmt of program.body) {
     if (stmt.type === "TSInterfaceDeclaration") {
       const decl = stmt as TSInterfaceDeclaration;
-      const fields: { name: string; ty: RustType }[] = [];
+      const fields: { name: string; ty: RustType; omitIfNone?: boolean }[] = [];
       // Interface inheritance (series 059): flatten each already-processed base's
       // fields first (declared earlier, so its entry is complete — including its
       // own transitive bases). A later shadowing own field wins.
@@ -7309,14 +7344,14 @@ function collectStructFields(
           !m.computed &&
           m.typeAnnotation
         ) {
-          const ty = fieldRustType(
-            m.typeAnnotation.typeAnnotation,
-            m.optional === true,
-            structs,
-          );
+          const annotation = m.typeAnnotation.typeAnnotation;
+          const optional = m.optional === true;
+          const ty = fieldRustType(annotation, optional, structs);
+          const omitIfNone = fieldOmitsUndefined(annotation, optional);
           const existing = fields.findIndex((f) => f.name === m.key.name);
-          if (existing >= 0) fields[existing] = { name: m.key.name, ty };
-          else fields.push({ name: m.key.name, ty });
+          if (existing >= 0)
+            fields[existing] = { name: m.key.name, ty, omitIfNone };
+          else fields.push({ name: m.key.name, ty, omitIfNone });
           continue;
         }
       }
@@ -7343,7 +7378,11 @@ function collectStructFields(
       }
       map.set(
         decl.id.name,
-        plans.map((p) => ({ name: p.name, ty: p.ty })),
+        plans.map((p) => ({
+          name: p.name,
+          ty: p.ty,
+          omitIfNone: p.omitIfNone,
+        })),
       );
     }
   }
