@@ -227,7 +227,7 @@ A user `static new` that would collide with the synthesized `new()` is fail-loud
 |---------|------|---------|
 | `abstract class` | Forbidden | `` `abstract` classes `` |
 | Anonymous class | Not yet | `anonymous class` |
-| `implements` / interface conformance | Not yet | `class inheritance (implements / interface conformance)` |
+| `implements` a *behavioral* interface → `impl I<Name> for C` (series 071); a *pure-data* interface → field-shape assertion (plain struct, no trait) | Modeled | — |
 | `class extends` a non-identifier / non-declared base | Not yet | `class extends a non-identifier base` / `class extends '<name>' which is not a declared class` |
 | Subclass constructor with no `super(...)` | Not yet | `subclass constructor without a \`super(...)\` call (base field uninitialized)` |
 | Subclass-only field read through a `dyn IA` (downcast) | Not yet | `field '<name>' read through a 'dyn I<Base>' is not a shared/base field (downcast — deferred to #17)` |
@@ -256,12 +256,44 @@ constructor that `throw`s becomes fallible and may carry leading guard statement
 
 ---
 
-## Interfaces
+## Interfaces — usage-directed dual lowering (series 059 + 071)
+
+An interface lowers by its *declaration shape*:
+
+- **Pure-data interface** (only property signatures) → a **`struct <Name>`**
+  (unchanged, the dominant data-record use). A getter `trait I<Name>` is
+  synthesized **only when needed** — i.e. when the interface is `extends`ed (059)
+  or used as a generic bound.
+- **Behavioral / mixed interface** (declares ≥1 method signature) → a synthesized
+  **`trait I<Name>`** carrying the method signatures, plus a **by-value getter**
+  per data field (mixed case). No canonical struct is emitted — every *value* of
+  the interface type is backed by a concrete struct.
+
+Conformance (all → `impl I<Name> for <ConcreteStruct>`):
+
+- **`class C implements I`** (behavioral `I`) → `impl I<I> for C` (method
+  forwarders to the inherent method + 059 data-field getters); propagates down
+  `extends` chains.
+- **`class C implements I`** (pure-data `I`) → a **field-shape assertion**: `C`
+  stays a plain `struct` with **no trait / no `impl`** (nothing to dispatch; TS
+  already checked the fields).
+- **Object literal typed as a behavioral `I`** → a synthesized per-literal nominal
+  struct `struct I__litN` (data fields + **non-capturing** method literals as
+  **`fn`-pointer fields**) + `impl I<I>`; the binding retypes to the synthesized
+  struct.
+
+Value representation reuses the 053c dispatch heuristic verbatim: a **monomorphic**
+param/local (`fn f(s: Shape)`) → `&impl I<Name>` (static); a **heterogeneous /
+stored** collection (`const xs: Array<Shape> = [new Circle(), new Square()]`) →
+`Vec<Box<dyn I<Name>>>` (vtable) — each `.method()` dispatches virtually.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `interface extends` (inheritance) | Not yet | `interface extends (inheritance)` |
-| A member that is not a plain (non-computed) property signature (methods, index signatures, call signatures) | Not yet | `unsupported interface member` |
+| A non-computed property signature or **method signature** | Modeled | — |
+| `interface extends` (inheritance) | Modeled (059) | — |
+| A **capturing** method literal in an interface-typed object literal (`{ area: () => this.r * 2 }` / closes over a local) | Not yet | `capturing method literal in an interface-typed object literal (…needs a boxed-closure field, a later series)` |
+| A computed / non-identifier interface method signature | Not yet | `computed / non-identifier interface method signature` |
+| A member that is not a property signature or a method signature (index / call signatures) | Not yet | `unsupported interface member` |
 | A property signature without a type annotation | Not yet | `interface field '<name>' without a type` |
 
 ---
