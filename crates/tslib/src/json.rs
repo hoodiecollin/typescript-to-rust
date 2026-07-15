@@ -6,6 +6,43 @@
 use serde::Serialize;
 use serde_json::Value;
 
+/// `parseJson<T>(s)` result (series 084, the `@t2r/std` shim). A purpose-built
+/// std-shim result type: the dialect has no generic/payload-carrying enum to
+/// model a raw `{ ok, value } | { ok, error }` union, so the compiler lowers
+/// `parseJson<T>(s)` to `ParseResult::<T>::parse(&s)` and reads the tagged
+/// surface (`.ok` field, `.value()` / `.error()` accessors). `serde`'s
+/// structural deserialize *is* the validation — an ill-shaped input yields an
+/// error result rather than a panic. Mirrors the TS `ParseResult<T>` union in
+/// `@t2r/std` so the differential oracle observes identical `.ok`/`.value`.
+pub struct ParseResult<T> {
+    /// `true` when deserialization succeeded (the discriminant).
+    pub ok: bool,
+    value: Option<T>,
+    error: Option<String>,
+}
+
+impl<T: serde::de::DeserializeOwned> ParseResult<T> {
+    /// Deserialize `s` into a `T`; never panics — a parse/shape error lands in
+    /// the `error` arm with `ok: false`.
+    pub fn parse(s: &str) -> ParseResult<T> {
+        match serde_json::from_str::<T>(s) {
+            Ok(v) => ParseResult { ok: true, value: Some(v), error: None },
+            Err(e) => ParseResult { ok: false, value: None, error: Some(e.to_string()) },
+        }
+    }
+
+    /// The deserialized value (borrowed, so it can be read repeatedly under a
+    /// proven-`ok` branch) — mirrors the TS `if (r.ok) { r.value.x; r.value.y }`.
+    pub fn value(&self) -> &T {
+        self.value.as_ref().expect("parseJson: value on an error result")
+    }
+
+    /// The error string (borrowed), read under the `!ok` branch.
+    pub fn error(&self) -> &str {
+        self.error.as_deref().expect("parseJson: error on an ok result")
+    }
+}
+
 /// `JSON.stringify(v)` — compact, JS number formatting.
 pub fn stringify<T: Serialize>(v: &T) -> String {
     let val = serde_json::to_value(v).expect("JSON.stringify: serialize");
