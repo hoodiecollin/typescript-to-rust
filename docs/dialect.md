@@ -531,6 +531,30 @@ a `fn`-pointer; a bare top-level fn or normalized arrow coerces to it
 > that is not a nameable non-capturing top-level fn, falls through to the generic
 > expression fallback (`Not yet`).
 
+**Captured containers (series 079/086).** A **stored** arrow `const add = (x) => { s.add(x); }`
+that captures a container (`Set`/`Map`/`Array`/`String`) and is **only invoked directly**
+threads the captured container as an extra leading parameter of its lifted
+`__arrow_n` fn, borrowed **by need**:
+
+- **read-only** → `&T`; **owned-mutable (non-aliased)** → `&mut T` (series 079). Each call
+  `add(a)` is rewritten to `__arrow_n(&mut s, a)`, borrowing `s` only for that call.
+- **shared / aliased** (the container also has an alias `const t: Set<number> = s`) →
+  the whole alias closure promotes to **`Rc<RefCell<T>>`** (series 086, the settled 062
+  model): the construction becomes `Rc::new(RefCell::new(…))`, the alias `Rc::clone(&s)`,
+  the closure captures a **clone** of the handle, mutations go through `.borrow_mut()`, and
+  every outer read (`t.size`) through `.borrow()`. This rides the **same** shared
+  promoted-set (`computeAutoRc`/`refineRc`) as class aliasing — containers are one more
+  alias shape, not a fork. A plain (no-closure) aliased+mutated container promotes the same
+  way (the faithful JS shared-reference semantics; previously a silent `.clone()` miscompile).
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Captured-container closure that **escapes** (returned / stored / passed as a value) | Not yet | `closure '<name>' captures a container and escapes …` |
+| Capture through **two closure levels** (a container from a scope > 1 level out) | Not yet | `closure captures container '<name>' from an enclosing scope more than one level out …` |
+| Captured **scalar** mutable capture (`n++`) / container **rebound wholesale** (`s = new Set()`) | Not yet | `mutable capture in a closure …` |
+| Owned-mutable capture in an **inline** adapter callback (numeric-surface typer) | Not yet | `cannot lift callback: free variable '<name>' …` |
+| **Re-entrant** read-in-mutate of a shared `Rc<RefCell>` container (`m.set(k, m.get(k)+v)`) | Not yet | `re-entrant mutation of a shared \`Rc<RefCell>\` container '<name>' …` |
+
 ---
 
 ## Nullability & optional chaining
