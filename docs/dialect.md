@@ -595,7 +595,10 @@ The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
 | Logical operator other than `&&`, `\|\|`, `??` | Not yet | `logical operator '<op>'` |
 | Unary operator other than `-`, `!` (i.e. `+`, `~`, `typeof`, `void`, `delete`) | Not yet | `unary operator '<op>'` |
 | A **heterogeneous** ternary (arms of different type) in an *untyped* value position with a **non-primitive** (struct/object) arm (`c ? pt : "a"`) | Not yet | `heterogeneous ternary in an untyped value position with a non-primitive arm — annotate the target with a declared union type` |
-| `UpdateExpression` (`++`/`--`), `SequenceExpression` (comma), tagged/template literals, and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
+| A `${…}` interpolation of a **nested/object-element array** (`` `${[[1],[2]]}` ``) | Not yet | `template interpolation of a nested/object array — only arrays of string/number/boolean render (JS .join(","))` |
+| A `${…}` interpolation of a **`Map`/`Set`/function** value | Not yet | `template interpolation of a <hashmap\|set\|fnPtr> value` |
+| A **tagged** template `` tag`…` `` (`TaggedTemplateExpression`) | Not yet | `TaggedTemplateExpression` |
+| `UpdateExpression` (`++`/`--`), `SequenceExpression` (comma), and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
 
 **Ternary `cond ? a : b` (series 094)** → Rust's `if`/`else` **expression**
 (emitted parenthesized). The `test` uses the same truthiness path as an `if`
@@ -607,6 +610,18 @@ homogeneous arms emit a bare `if`/`else`; **heterogeneous primitive** arms
 auto-synthesize a printable anonymous union (`c ? 1 : "a"` → `__anonymous_union_<hash>`,
 reusing 093 case F, now with a `Display`). The one residual is the fail-loud row
 above (a non-primitive arm with no type context).
+
+**Template literals `` `a${x}b` `` (series 095)** → the `strConcat` node (`format!`),
+sugar for a `+` concatenation. Each `${…}` renders **JS-faithfully** by its static
+type: a **scalar** (string/number/bool) via `Display`; an **array** of scalars via
+`Array.prototype.join(",")` (`` `${[1,2,3]}` `` → `"1,2,3"`); an **optional** via the
+`console.log` convention (`Some(v)`→`v`, `None`→`undefined`); a **plain data struct**
+→ the JS `String(object)` constant `"[object Object]"` (plain structs never derive
+`Display`); a **union enum** via its `Display` inner value (JS-faithful for
+`string|number`). The residuals are the three fail-loud rows above — a nested/object
+array, a `Map`/`Set`/function interpolation, and a tagged template. Numbers inside
+`${…}` use the same `format!("{}")` path as `+` concat (not `to_js_string`), so the
+rare `1e21`/`Infinity` divergences are inherited from series 080, not new here.
 
 ---
 
@@ -937,6 +952,7 @@ The currently-modeled node types are:
 `TSClassImplements` · `ClassDeclaration` · `ClassBody` · `PropertyDefinition` ·
 `MethodDefinition` · `FunctionExpression` · `TSParameterProperty` ·
 `TSEnumDeclaration` · `TSEnumBody` · `TSEnumMember` · `Identifier` · `Literal` ·
+`TemplateLiteral` · `TemplateElement` ·
 `BinaryExpression` · `LogicalExpression` · `UnaryExpression` ·
 `ConditionalExpression` · `AssignmentExpression` · `CallExpression` ·
 `MemberExpression` · `ArrayExpression` · `ObjectExpression` · `Property` ·
