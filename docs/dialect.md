@@ -176,12 +176,24 @@ see the JSON-divergence bullet above).
 | Trigger | Kind | Message |
 |---------|------|---------|
 | Uninitialized binding (`let x: T;` with no initializer) | Not yet | `uninitialized binding` |
-| Destructuring binding (`const {a} = …` / `const [a] = …` in a plain `let`/`const`) | Not yet | `destructuring binding` |
+| Destructuring default value (`const { x = 1 } = …` / `const [a = 0] = …`) | Not yet | `object-destructuring default value` / `array-destructuring default value` |
+| Nested destructuring pattern (`const { p: { x } } = …`) | Not yet | `object-destructuring nested pattern` |
+| Array/object destructuring over a **non-identifier** source (a call / complex expr — bind it to a variable first) | Not yet | `… over a non-identifier source` |
+| Object-rest over a non-named-struct source | Not yet | `object-rest over a non-named-struct source` |
+| Array-destructuring over a source whose element type is unknown | Not yet | `array-destructuring over a source whose element type is unknown` |
+| Rest **parameter** `(...args: T[])` (variadic — distinct from a rest *binding*) | Not yet | `rest parameter` |
 | Parameter without a type annotation | Not yet | `parameter '<name>' without a type annotation` |
 | An untyped binding outside the obvious-literal exception (scalar or homogeneous scalar-literal array), excluding the builtin `Object.entries`/`JSON.parse`/`.find`/`using` forms | Not yet | `binding '<name>' without a type annotation` |
 
-> Array-destructuring `[k, v]` *is* supported in one place only: a `for-of` head
-> over `Object.entries(...)`. See [Control flow](#control-flow--loops).
+> **Binding destructuring is supported** (series 067 + 097). Object: `const { x, y
+> } = point`, renamed `const { x: px } = point`, and rest `const { x, ...rest } =
+> point` (rest → a synthesized anonymous struct) — over a **named-struct** source.
+> Array: `const [a, b] = [1, 2]` (fixed-arity literal → plain values) and `const [a,
+> ...tail] = arr` over a **Vec/Array variable** — element slots bind `Option<T>`
+> (an out-of-bounds slot is `undefined` → `None`; consume via `??` / `!` / an `if (x
+> !== undefined)` narrow), `tail` binds the remaining `Vec<T>`. Sources must be a
+> plain identifier (array-over-Vec / rest). Array-destructuring `[k, v]` is also a
+> `for-of` head over `Object.entries(...)` — see [Control flow](#control-flow--loops).
 
 ---
 
@@ -971,7 +983,7 @@ The currently-modeled node types are:
 `ThisExpression` · `Super` · `NewExpression` · `ParenthesizedExpression` ·
 `AwaitExpression` · `ArrowFunctionExpression` · `YieldExpression` ·
 `TSNonNullExpression` · `AssignmentPattern` · `ChainExpression` · `ArrayPattern` ·
-`ObjectPattern` · `TSInterfaceHeritage` · `SpreadElement` · `TSTypeAnnotation` ·
+`ObjectPattern` · `RestElement` · `TSInterfaceHeritage` · `SpreadElement` · `TSTypeAnnotation` ·
 `TSTypeReference` · `TSTypeParameterInstantiation` · `TSTypeParameterDeclaration` ·
 `TSTypeParameter` · `TSIntersectionType` · `TSArrayType` · `TSNumberKeyword` ·
 `TSStringKeyword` · `TSBooleanKeyword` · `TSVoidKeyword` · `TSFunctionType` ·
