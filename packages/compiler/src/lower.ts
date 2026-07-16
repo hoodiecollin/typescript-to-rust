@@ -96,13 +96,26 @@ import { createTypeOracle } from "./type-oracle";
 import { validate } from "./validate";
 import {
   anonDiscUnionName,
+  anonNamedUnionName,
+  anonNonDiscUnionName,
+  anonPrimUnionName,
   anonUnionName,
   classifyDiscriminatedUnion,
   classifyLiteralUnion,
+  classifyNamedDiscriminatedUnion,
+  classifyNonDiscriminatedUnion,
+  classifyPrimitiveUnion,
   type DiscriminatedUnion,
+  extractPropSignatures,
+  isMixedLiteralObjectUnion,
   isNullishMember,
   literalVariants,
   type LiteralMember,
+  namedRef,
+  type NamedDiscriminatedUnion,
+  type NonDiscriminatedUnion,
+  type PrimitiveUnion,
+  type PropSig,
   sanitizeVariantIdent,
 } from "./unions";
 
@@ -5163,16 +5176,17 @@ function lowerStatement(
       return lowerVarDecl(stmt as VariableDeclaration, analysis, scope);
     case "ReturnStatement": {
       const arg = (stmt as { argument: Expression | null }).argument;
-      // Union coercion on return (series 093): a literal returned into a
-      // union-enum return type constructs its variant (`return "south"` in a fn
-      // `: Dir` → `Dir::South`). The scope's return annotation drives it.
+      // Union coercion on return (series 093): a value returned into a union-enum
+      // return type constructs its variant (`return "south"` in a fn `: Dir` →
+      // `Dir::South`; `return c` where `c: Circle` in a fn `: Shape` →
+      // `Shape::Circle(c)`). `lowerTyped` handles literal/object/scalar coercion and
+      // passes a value already of the union type straight through.
       if (arg) {
         const retAnn = analysis.fns.get(scope)?.retAnn;
         if (retAnn) {
           const rt = lowerType(retAnn, analysis.structs);
           if (rt.kind === "struct" && analysis.unionEnums.has(rt.name)) {
-            const variant = coerceLiteralToUnion(arg, rt.name, analysis);
-            if (variant) return [{ kind: "return", value: variant }];
+            return [{ kind: "return", value: lowerTyped(arg, rt, analysis) }];
           }
         }
       }
@@ -5231,6 +5245,12 @@ function lowerIf(
   // else if (sh.kind === "square") …` → a variant `match sh`. Runs first.
   const ladder = recognizeUnionIfLadder(stmt, analysis, scope);
   if (ladder) return ladder;
+  // `typeof`-narrowing `if`-ladder over a primitive/mixed union (series 093, 1d, F).
+  const typeofLadder = recognizeTypeofIfLadder(stmt, analysis, scope);
+  if (typeofLadder) return typeofLadder;
+  // `"field" in x` narrowing `if`-ladder over a non-discriminated union (093, 1e, E).
+  const inLadder = recognizeInIfLadder(stmt, analysis, scope);
+  if (inLadder) return inLadder;
   // Truthiness narrowing (series 066, design E/TR7): a bare `if (opt)` over an
   // `Option<T>` binding narrows on presence → `if let Some(opt) = opt { … }`
   // (absence is falsy). This is the presence-narrowing analog of the explicit
@@ -5763,6 +5783,9 @@ function lowerSwitch(
   // before the generic fold below since it needs the *raw* case bodies.
   const discSc = discriminatedScrutinee(stmt.discriminant, analysis);
   if (discSc) return lowerDiscriminatedSwitch(stmt, discSc, analysis, scope);
+  // `switch (typeof x)` over a primitive/mixed union (series 093, 1d, F) → variant match.
+  const typeofSwitch = recognizeTypeofSwitch(stmt, analysis, scope);
+  if (typeofSwitch) return typeofSwitch;
 
   const disc = lowerExpr(stmt.discriminant, analysis);
 
@@ -5939,6 +5962,7 @@ function lowerDiscriminatedSwitch(
       );
     } else {
       // Stacked variants share a body → no field binds (fields differ per variant).
+      // A newtype variant ignores its payload (`Shape::Circle(_)`).
       arms.push({
         guard: null,
         pats: variants.map((v) => ({
@@ -5947,6 +5971,7 @@ function lowerDiscriminatedSwitch(
           variant: v.name,
           binds: [],
           struct: v.fields.length > 0,
+          ...(v.newtype ? { newtypeBind: "_" } : {}),
         })),
         body: lowerSwitchCaseBody(c.consequent, isLast, analysis, scope),
       });
@@ -5976,6 +6001,40 @@ function buildDiscArm(
   rawBody: Statement[],
   lowerBody: (body: Statement[]) => HirStmt[],
 ): HirMatchArm {
+  // A newtype variant (D): bind the inner struct under the object's own name (so its
+  // `sh.field` reads resolve unchanged), cloning it to an owned value when the body
+  // reads any field. No field rewrite — the discriminant stays inside the struct.
+  if (v.newtype) {
+    const readsAny = readsAnyMemberField(rawBody, objName);
+    const clonePrelude: HirStmt[] = readsAny
+      ? [
+          {
+            kind: "let",
+            name: objName,
+            mut: false,
+            ty: null,
+            init: {
+              kind: "method",
+              receiver: { kind: "ident", name: objName },
+              name: "clone",
+              args: [],
+            },
+          },
+        ]
+      : [];
+    return {
+      guard: null,
+      pat: {
+        kind: "varPat",
+        enumName: info.name,
+        variant: v.name,
+        binds: [],
+        struct: false,
+        newtypeBind: readsAny ? objName : "_",
+      },
+      body: [...clonePrelude, ...lowerBody(rawBody)],
+    };
+  }
   const read = v.fields
     .map((f) => f.name)
     .filter((f) => readsMemberField(rawBody, objName, f));
@@ -6087,6 +6146,404 @@ function discEqTest(
   const v = (lit as Literal).value;
   if (typeof v !== "string" && typeof v !== "number") return null;
   return { objName: sc.objName, info: sc.info, value: String(v) };
+}
+
+/** The `typeof`-narrow string for a newtype inner type (F): String→`"string"`,
+ *  f64→`"number"`, bool→`"boolean"`, struct→`"object"`; null otherwise. */
+function typeofOfInner(ty: RustType): string | null {
+  switch (ty.kind) {
+    case "String":
+      return "string";
+    case "f64":
+      return "number";
+    case "bool":
+      return "boolean";
+    case "struct":
+      return "object";
+    default:
+      return null;
+  }
+}
+
+/** The primitive/mixed union (`narrow:"typeof"`) an identifier binding refers to, else null. */
+function primitiveUnionBinding(
+  name: string,
+  analysis: ModuleAnalysis,
+): HirUnionEnum | null {
+  const t = analysis.bindingTypes.get(name);
+  if (t?.kind !== "struct") return null;
+  const info = analysis.unionEnums.get(t.name);
+  return info && info.narrow === "typeof" ? info : null;
+}
+
+/** `typeof x` over a primitive-union binding → {objName, info}; else null. */
+function typeofScrutinee(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): { objName: string; info: HirUnionEnum } | null {
+  const u = e as { type?: string; operator?: string; argument?: Expression };
+  if (u.type !== "UnaryExpression" || u.operator !== "typeof" || !u.argument) {
+    return null;
+  }
+  if (u.argument.type !== "Identifier") return null;
+  const objName = (u.argument as Identifier).name;
+  const info = primitiveUnionBinding(objName, analysis);
+  return info ? { objName, info } : null;
+}
+
+/** `typeof x === "string"` over a primitive-union binding → {objName, info, typeStr}; else null. */
+function typeofEqTest(
+  test: Expression,
+  analysis: ModuleAnalysis,
+): { objName: string; info: HirUnionEnum; typeStr: string } | null {
+  if (test.type !== "BinaryExpression") return null;
+  const b = test as { operator: string; left: Expression; right: Expression };
+  if (b.operator !== "===" && b.operator !== "==") return null;
+  const [uside, lit] =
+    b.left.type === "UnaryExpression" ? [b.left, b.right] : [b.right, b.left];
+  const sc = typeofScrutinee(uside, analysis);
+  if (!sc) return null;
+  if (lit.type !== "Literal" || typeof (lit as Literal).value !== "string") {
+    return null;
+  }
+  return { objName: sc.objName, info: sc.info, typeStr: (lit as Literal).value as string };
+}
+
+/** The variant of a primitive union matched by a `typeof` string (`"string"`→`Str`). */
+function variantForTypeof(
+  info: HirUnionEnum,
+  typeStr: string,
+): HirUnionEnum["variants"][number] | null {
+  return (
+    info.variants.find((v) => v.newtype && typeofOfInner(v.newtype) === typeStr) ??
+    null
+  );
+}
+
+/** Does the AST subtree reference `<name>` as a value (not a `.field`/key position)? */
+function referencesIdent(node: unknown, name: string): boolean {
+  if (Array.isArray(node)) return node.some((n) => referencesIdent(n, name));
+  if (!node || typeof node !== "object") return false;
+  const n = node as Record<string, unknown> & {
+    type?: string;
+    computed?: boolean;
+  };
+  if (n.type === "Identifier" && (n as { name?: string }).name === name) {
+    return true;
+  }
+  for (const k in n) {
+    if (k === "type") continue;
+    // The `.property` of a non-computed member access is a field name, not a ref;
+    // likewise a non-computed object-property key. Skip them.
+    if (k === "property" && n.type === "MemberExpression" && !n.computed) continue;
+    if (k === "key" && n.type === "Property" && !n.computed) continue;
+    if (referencesIdent(n[k], name)) return true;
+  }
+  return false;
+}
+
+/**
+ * Build one `match` arm for a `typeof`-narrowed primitive-union variant (F, series
+ * 093, 1d): bind the inner value under the object's own name (`SN::Str(x)`), clone it
+ * to owned when the body uses it, and retype the binding to the narrowed inner during
+ * body lowering so `x.length` / `x + 1` / string methods resolve. Restores after.
+ */
+function buildScalarArm(
+  objName: string,
+  info: HirUnionEnum,
+  v: HirUnionEnum["variants"][number],
+  rawBody: Statement[],
+  lowerBody: (body: Statement[]) => HirStmt[],
+  analysis: ModuleAnalysis,
+): HirMatchArm {
+  const used = referencesIdent(rawBody, objName);
+  const clonePrelude: HirStmt[] = used
+    ? [
+        {
+          kind: "let",
+          name: objName,
+          mut: false,
+          ty: null,
+          init: {
+            kind: "method",
+            receiver: { kind: "ident", name: objName },
+            name: "clone",
+            args: [],
+          },
+        },
+      ]
+    : [];
+  const prev = analysis.bindingTypes.get(objName);
+  if (v.newtype) analysis.bindingTypes.set(objName, v.newtype);
+  let body: HirStmt[];
+  try {
+    body = [...clonePrelude, ...lowerBody(rawBody)];
+  } finally {
+    if (prev) analysis.bindingTypes.set(objName, prev);
+    else analysis.bindingTypes.delete(objName);
+  }
+  return {
+    guard: null,
+    pat: {
+      kind: "varPat",
+      enumName: info.name,
+      variant: v.name,
+      binds: [],
+      struct: false,
+      newtypeBind: used ? objName : "_",
+    },
+    body,
+  };
+}
+
+/**
+ * Recognize a `switch (typeof x)` over a primitive/mixed union (F) → a variant
+ * `match x`. Each `case "string"` / `case "number"` maps to the union's `Str`/`Num`
+ * variant; the narrowed value is bound + retyped in the arm. Null when not that shape.
+ */
+function recognizeTypeofSwitch(
+  stmt: SwitchStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt | null {
+  const sc = typeofScrutinee(stmt.discriminant, analysis);
+  if (!sc) return null;
+  const { objName, info } = sc;
+  const arms: HirMatchArm[] = [];
+  let defaultArm: HirMatchArm | null = null;
+  const covered = new Set<string>();
+  let pending: string[] = [];
+  const variantOf = (typeStr: string): HirUnionEnum["variants"][number] => {
+    const v = variantForTypeof(info, typeStr);
+    if (!v) {
+      throw new UnsupportedError({
+        type: `typeof-switch case '${typeStr}' is not a variant of union '${info.name}'`,
+      });
+    }
+    return v;
+  };
+  stmt.cases.forEach((c, i) => {
+    const isLast = i === stmt.cases.length - 1;
+    if (c.test === null) {
+      defaultArm = {
+        guard: null,
+        body:
+          c.consequent.length === 0
+            ? []
+            : lowerSwitchCaseBody(c.consequent, isLast, analysis, scope),
+      };
+      return;
+    }
+    if (c.test.type !== "Literal" || typeof (c.test as Literal).value !== "string") {
+      throw new UnsupportedError({ type: "typeof-switch case is not a string" });
+    }
+    const testStr = (c.test as Literal).value as string;
+    if (c.consequent.length === 0) {
+      pending.push(testStr);
+      return;
+    }
+    const tests = [...pending, testStr];
+    pending = [];
+    const variants = tests.map(variantOf);
+    variants.forEach((v) => covered.add(v.name));
+    if (variants.length === 1) {
+      arms.push(
+        buildScalarArm(
+          objName,
+          info,
+          variants[0]!,
+          c.consequent,
+          (b) => lowerSwitchCaseBody(b, isLast, analysis, scope),
+          analysis,
+        ),
+      );
+    } else {
+      arms.push({
+        guard: null,
+        pats: variants.map((v) => ({
+          kind: "varPat",
+          enumName: info.name,
+          variant: v.name,
+          binds: [],
+          struct: false,
+          newtypeBind: "_",
+        })),
+        body: lowerSwitchCaseBody(c.consequent, isLast, analysis, scope),
+      });
+    }
+  });
+  if (pending.length > 0) {
+    throw new UnsupportedError({
+      type: "trailing empty typeof-switch case with no shared body",
+    });
+  }
+  if (defaultArm) arms.push(defaultArm);
+  else if (covered.size < info.variants.length)
+    arms.push({ guard: null, body: [] });
+  return { kind: "match", disc: { kind: "ident", name: objName }, arms };
+}
+
+/**
+ * Recognize a `typeof`-narrowing `if`-ladder over a primitive/mixed union (F):
+ * `if (typeof x === "string") … else if (typeof x === "number") … [else …]` → a
+ * variant `match x`. A trailing `else` covering the one remaining variant binds it.
+ */
+function recognizeTypeofIfLadder(
+  stmt: IfStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt | null {
+  const first = typeofEqTest(stmt.test, analysis);
+  if (!first) return null;
+  const { objName, info } = first;
+  const arms: HirMatchArm[] = [];
+  const covered = new Set<string>();
+  let node: Statement | null = stmt;
+  let defaultBody: HirStmt[] | null = null;
+  while (node && node.type === "IfStatement") {
+    const iff = node as IfStatement;
+    const t = typeofEqTest(iff.test, analysis);
+    if (!t || t.objName !== objName || t.info.name !== info.name) return null;
+    const variant = variantForTypeof(info, t.typeStr);
+    if (!variant) return null;
+    covered.add(variant.name);
+    const rawBody =
+      iff.consequent.type === "BlockStatement"
+        ? (iff.consequent as BlockStatement).body
+        : [iff.consequent];
+    arms.push(
+      buildScalarArm(
+        objName,
+        info,
+        variant,
+        rawBody,
+        (b) => lowerStatements(b, analysis, scope),
+        analysis,
+      ),
+    );
+    node = iff.alternate;
+  }
+  if (node) {
+    const rawBody =
+      node.type === "BlockStatement" ? (node as BlockStatement).body : [node];
+    const uncovered = info.variants.filter((v) => !covered.has(v.name));
+    if (uncovered.length === 1) {
+      const v = uncovered[0]!;
+      covered.add(v.name);
+      arms.push(
+        buildScalarArm(
+          objName,
+          info,
+          v,
+          rawBody,
+          (b) => lowerStatements(b, analysis, scope),
+          analysis,
+        ),
+      );
+    } else {
+      defaultBody = lowerStatements(rawBody, analysis, scope);
+    }
+  }
+  if (defaultBody) arms.push({ guard: null, body: defaultBody });
+  else if (covered.size < info.variants.length)
+    arms.push({ guard: null, body: [] });
+  return { kind: "match", disc: { kind: "ident", name: objName }, arms };
+}
+
+/** The non-discriminated union (`narrow:"in"`) an identifier binding refers to, else null. */
+function inUnionBinding(
+  name: string,
+  analysis: ModuleAnalysis,
+): HirUnionEnum | null {
+  const t = analysis.bindingTypes.get(name);
+  if (t?.kind !== "struct") return null;
+  const info = analysis.unionEnums.get(t.name);
+  return info && info.narrow === "in" ? info : null;
+}
+
+/** `"field" in x` over a non-discriminated-union binding → {objName, info, field}; else null. */
+function inTest(
+  test: Expression,
+  analysis: ModuleAnalysis,
+): { objName: string; info: HirUnionEnum; field: string } | null {
+  if (test.type !== "BinaryExpression") return null;
+  const b = test as { operator: string; left: Expression; right: Expression };
+  if (b.operator !== "in") return null;
+  if (b.left.type !== "Literal" || typeof (b.left as Literal).value !== "string") {
+    return null;
+  }
+  if (b.right.type !== "Identifier") return null;
+  const objName = (b.right as Identifier).name;
+  const info = inUnionBinding(objName, analysis);
+  if (!info) return null;
+  return { objName, info, field: (b.left as Literal).value as string };
+}
+
+/** The variant that *uniquely* contains a field (E `in`-narrowing), else null (ambiguous). */
+function variantByUniqueField(
+  info: HirUnionEnum,
+  field: string,
+): HirUnionEnum["variants"][number] | null {
+  const vs = info.variants.filter((v) => v.fields.some((f) => f.name === field));
+  return vs.length === 1 ? vs[0]! : null;
+}
+
+/**
+ * Recognize an `"a" in x` narrowing `if`-ladder over a non-discriminated union (E,
+ * series 093, 1e) → a variant `match x`. Each rung tests a field present in exactly
+ * one variant; the arm binds the read fields (reusing `buildDiscArm`). A trailing
+ * `else` covering the one remaining variant binds it. Null when not that shape.
+ */
+function recognizeInIfLadder(
+  stmt: IfStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt | null {
+  const first = inTest(stmt.test, analysis);
+  if (!first) return null;
+  const { objName, info } = first;
+  const arms: HirMatchArm[] = [];
+  const covered = new Set<string>();
+  let node: Statement | null = stmt;
+  let defaultBody: HirStmt[] | null = null;
+  while (node && node.type === "IfStatement") {
+    const iff = node as IfStatement;
+    const t = inTest(iff.test, analysis);
+    if (!t || t.objName !== objName || t.info.name !== info.name) return null;
+    const variant = variantByUniqueField(info, t.field);
+    if (!variant) return null;
+    covered.add(variant.name);
+    const rawBody =
+      iff.consequent.type === "BlockStatement"
+        ? (iff.consequent as BlockStatement).body
+        : [iff.consequent];
+    arms.push(
+      buildDiscArm(objName, info, variant, rawBody, (b) =>
+        lowerStatements(b, analysis, scope),
+      ),
+    );
+    node = iff.alternate;
+  }
+  if (node) {
+    const rawBody =
+      node.type === "BlockStatement" ? (node as BlockStatement).body : [node];
+    const uncovered = info.variants.filter((v) => !covered.has(v.name));
+    if (uncovered.length === 1) {
+      const v = uncovered[0]!;
+      covered.add(v.name);
+      arms.push(
+        buildDiscArm(objName, info, v, rawBody, (b) =>
+          lowerStatements(b, analysis, scope),
+        ),
+      );
+    } else {
+      defaultBody = lowerStatements(rawBody, analysis, scope);
+    }
+  }
+  if (defaultBody) arms.push({ guard: null, body: defaultBody });
+  else if (covered.size < info.variants.length)
+    arms.push({ guard: null, body: [] });
+  return { kind: "match", disc: { kind: "ident", name: objName }, arms };
 }
 
 /** Is `e` a string-literal expression (a `case "x":` test)? */
@@ -7153,10 +7610,19 @@ function lowerTyped(
     const info = analysis.unionEnums.get(ty.name)!;
     const variant = coerceLiteralToUnion(expr, ty.name, analysis);
     if (variant) return variant;
-    if (info.discField && expr.type === "ObjectExpression") {
+    if (
+      (info.discField || info.narrow === "in") &&
+      expr.type === "ObjectExpression"
+    ) {
       const built = coerceObjectToUnion(expr as ObjectExpression, info, analysis);
       if (built) return built;
     }
+    // Scalar/named value into a newtype-variant union (D from a variable, F primitive):
+    // pick the variant whose newtype inner matches the value's static type and wrap
+    // (`const sh: Shape = c` → `Shape::Circle(c)`; `const x: string|number = "hi"` →
+    // `…::Str("hi".to_string())`).
+    const scalar = coerceScalarToUnion(expr, info, analysis);
+    if (scalar) return scalar;
   }
   if (ty?.kind === "struct" && expr.type === "ObjectExpression") {
     // Object-literal interface synthesis (series 071 increment 2): an object
@@ -8923,11 +9389,43 @@ function lowerCall(
       // (series 059) — the 032 residual: `f({x:1, y:2})` → `f(Point { x, y })`. A
       // string/number literal likewise routes through `lowerTyped` so a union-typed
       // param coerces the literal to its variant (series 093); for a non-union param
-      // `lowerTyped` falls straight through to `lowerExpr` (identical output).
-      const expr =
-        (a.type === "ObjectExpression" || a.type === "Literal") && param?.annotation
-          ? lowerTyped(a, lowerType(param.annotation, analysis.structs), analysis)
-          : lowerExpr(a, analysis);
+      // `lowerTyped` falls straight through to `lowerExpr` (identical output). An
+      // identifier / template into a *union* param also coerces (`f(c)` where
+      // `c: Circle`, param `Shape` → `Shape::Circle(c)`; a value already of the union
+      // type passes straight through).
+      let expr: HirExpr;
+      if (
+        (a.type === "ObjectExpression" || a.type === "Literal") &&
+        param?.annotation
+      ) {
+        // Object/literal arg lowers against the declared param type (series 059/093,
+        // unchanged) — a union param coerces the literal/object to its variant.
+        expr = lowerTyped(
+          a,
+          lowerType(param.annotation, analysis.structs),
+          analysis,
+        );
+      } else if (
+        (a.type === "Identifier" || a.type === "TemplateLiteral") &&
+        param?.annotation
+      ) {
+        // An identifier / template into a *union* param coerces (`f(c)` where
+        // `c: Circle`, param `Shape` → `Shape::Circle(c)`; a value already of the
+        // union type passes through). `lowerType` throws on a bare generic `T` (no
+        // `typeParams` here) — a failure just means "not a union param" → `lowerExpr`.
+        let pTy: RustType | null = null;
+        try {
+          pTy = lowerType(param.annotation, analysis.structs);
+        } catch {
+          pTy = null;
+        }
+        expr =
+          pTy?.kind === "struct" && analysis.unionEnums.has(pTy.name)
+            ? lowerTyped(a, pTy, analysis)
+            : lowerExpr(a, analysis);
+      } else {
+        expr = lowerExpr(a, analysis);
+      }
       args.push({ borrow, expr });
     }
     const callExpr: HirExpr = { kind: "call", callee: name, args };
@@ -12268,6 +12766,18 @@ function collectHashEqStructs(analysis: ModuleAnalysis): {
  */
 function collectUnions(program: Program, analysis: ModuleAnalysis): void {
   const aliasUnionNodes = new Set<TSType>();
+  // Interface name → its own property signatures, for classifying named-interface
+  // discriminated unions (D): `type Shape = Circle | Square` needs each interface's
+  // fields to find the shared discriminant. Built once from the program body.
+  const interfaceProps = new Map<string, PropSig[]>();
+  for (const stmt of program.body) {
+    if (stmt.type !== "TSInterfaceDeclaration") continue;
+    const decl = stmt as TSInterfaceDeclaration;
+    const props = extractPropSignatures(decl.body.body);
+    if (props) interfaceProps.set(decl.id.name, props);
+  }
+  const resolveInterface = (name: string): PropSig[] | null =>
+    interfaceProps.get(name) ?? null;
   // Named `type X = A | B` aliases first, so their RHS union node is claimed by
   // the alias name (not the anonymous-hash walk below).
   for (const stmt of program.body) {
@@ -12293,8 +12803,34 @@ function collectUnions(program: Program, analysis: ModuleAnalysis): void {
         registerDiscriminatedUnion(decl.id.name, disc, analysis);
         continue;
       }
-      // A non-literal, non-discriminated union (named-interface / primitive /
-      // non-discriminated) — a later stage; leave unregistered (fail-loud on use).
+      const named = classifyNamedDiscriminatedUnion(real, resolveInterface);
+      if (named) {
+        aliasUnionNodes.add(rhs);
+        registerNamedDiscriminatedUnion(decl.id.name, named, analysis);
+        continue;
+      }
+      const prim = classifyPrimitiveUnion(real, (n) => analysis.structs.has(n));
+      if (prim) {
+        aliasUnionNodes.add(rhs);
+        registerPrimitiveUnion(decl.id.name, prim, analysis);
+        continue;
+      }
+      const nondisc = classifyNonDiscriminatedUnion(real);
+      if (nondisc) {
+        aliasUnionNodes.add(rhs);
+        registerNonDiscriminatedUnion(decl.id.name, nondisc, analysis);
+        continue;
+      }
+      // Mixed literal + object members (G, `"loading" | { kind: "done" }`) —
+      // irregular two-level narrowing, a documented residual (design §9). Precise
+      // fail-loud beats a downstream "unresolved type" error.
+      if (isMixedLiteralObjectUnion(real)) {
+        throw new UnsupportedError({
+          type: `union alias '${decl.id.name}' mixes literal and object members (e.g. \`"loading" | { kind: "done" }\`) — not modeled yet (series 093 residual). Give every member a shared discriminant field, or split the object part into its own discriminated-union alias`,
+        });
+      }
+      // Another unmodeled union shape (e.g. two named structs with no discriminant)
+      // — leave unregistered (fail-loud at the use site).
       continue;
     }
     // Trivial synonyms / non-union RHSs aren't modeled yet (design §8 — a later
@@ -12315,7 +12851,24 @@ function collectUnions(program: Program, analysis: ModuleAnalysis): void {
       return;
     }
     const disc = classifyDiscriminatedUnion(real);
-    if (disc) registerDiscriminatedUnion(anonDiscUnionName(disc), disc, analysis);
+    if (disc) {
+      registerDiscriminatedUnion(anonDiscUnionName(disc), disc, analysis);
+      return;
+    }
+    const named = classifyNamedDiscriminatedUnion(real, resolveInterface);
+    if (named) {
+      const nm = anonNamedUnionName(named.members.map((m) => m.interfaceName));
+      registerNamedDiscriminatedUnion(nm, named, analysis);
+      return;
+    }
+    const prim = classifyPrimitiveUnion(real, (n) => analysis.structs.has(n));
+    if (prim) {
+      registerPrimitiveUnion(anonPrimUnionName(prim), prim, analysis);
+      return;
+    }
+    const nondisc = classifyNonDiscriminatedUnion(real);
+    if (nondisc)
+      registerNonDiscriminatedUnion(anonNonDiscUnionName(nondisc), nondisc, analysis);
   });
 }
 
@@ -12354,6 +12907,109 @@ function registerDiscriminatedUnion(
     displayImpl: false,
     derives: ["Clone", "Debug", "PartialEq"],
     discField: disc.discField,
+  });
+  analysis.structs.add(name);
+}
+
+/**
+ * Register (idempotently) a named-interface discriminated union → a **newtype**-
+ * variant enum (series 093, stage 1d, case D): `Shape::Circle(Circle)`. Each variant
+ * wraps the nominal inner struct; the discriminant field stays inside that struct
+ * (the match binds the whole struct). Derives `Clone, Debug, PartialEq` (no `Copy` —
+ * a struct payload; no `Display`).
+ */
+function registerNamedDiscriminatedUnion(
+  name: string,
+  named: NamedDiscriminatedUnion,
+  analysis: ModuleAnalysis,
+): void {
+  if (analysis.unionEnums.has(name)) return;
+  const variants = named.members.map((m) => ({
+    name: m.interfaceName,
+    fields: [],
+    newtype: { kind: "struct", name: m.interfaceName } as RustType,
+    display: null,
+    discValue: m.discValue,
+  }));
+  analysis.unionEnums.set(name, {
+    kind: "unionEnum",
+    name,
+    variants,
+    displayImpl: false,
+    derives: ["Clone", "Debug", "PartialEq"],
+    discField: named.discField,
+  });
+  analysis.structs.add(name);
+}
+
+/**
+ * Register (idempotently) a primitive/mixed union → a **newtype**-variant enum
+ * narrowed by `typeof` (series 093, stage 1d, case F): `Str(String)`, `Num(f64)`,
+ * `Bool(bool)`, `Point(Point)`. Derives `Clone, Debug, PartialEq` (a `String`/struct
+ * payload → no `Copy`; no `Display`). `narrow:"typeof"` drives the consumption path.
+ */
+function registerPrimitiveUnion(
+  name: string,
+  prim: PrimitiveUnion,
+  analysis: ModuleAnalysis,
+): void {
+  if (analysis.unionEnums.has(name)) return;
+  const inner = (m: { tag: string; name: string }): RustType => {
+    switch (m.tag) {
+      case "str":
+        return { kind: "String" };
+      case "num":
+        return { kind: "f64" };
+      case "bool":
+        return { kind: "bool" };
+      default:
+        return { kind: "struct", name: m.name };
+    }
+  };
+  const variants = prim.members.map((m) => ({
+    name: m.name,
+    fields: [],
+    newtype: inner(m),
+    display: null,
+  }));
+  analysis.unionEnums.set(name, {
+    kind: "unionEnum",
+    name,
+    variants,
+    displayImpl: false,
+    derives: ["Clone", "Debug", "PartialEq"],
+    narrow: "typeof",
+  });
+  analysis.structs.add(name);
+}
+
+/**
+ * Register (idempotently) a non-discriminated object union → a struct-variant enum
+ * narrowed by `in` (series 093, stage 1e, case E): `{a} | {b}` → `enum { A { a }, B { b } }`.
+ * Variant field types lower via `lowerType`. Derives `Clone, Debug, PartialEq`;
+ * `narrow:"in"` drives the `"field" in x` consumption path.
+ */
+function registerNonDiscriminatedUnion(
+  name: string,
+  u: NonDiscriminatedUnion,
+  analysis: ModuleAnalysis,
+): void {
+  if (analysis.unionEnums.has(name)) return;
+  const variants = u.members.map((m) => ({
+    name: m.variantName,
+    fields: m.fields.map((f) => ({
+      name: f.name,
+      ty: lowerType(f.ann, analysis.structs),
+    })),
+    display: null,
+  }));
+  analysis.unionEnums.set(name, {
+    kind: "unionEnum",
+    name,
+    variants,
+    displayImpl: false,
+    derives: ["Clone", "Debug", "PartialEq"],
+    narrow: "in",
   });
   analysis.structs.add(name);
 }
@@ -12420,20 +13076,17 @@ function unionTypeOfOperand(
 }
 
 /**
- * Coerce a discriminated object literal to its union variant (series 093, 1b):
- * `{kind:"circle", r:2}` in a `Shape` slot → `Shape::Circle { r: 2.0 }`. The
- * discriminant property selects the variant (dropped from the fields); each
- * remaining property lowers against its variant field type. Returns null when the
- * literal has a spread/computed key or names no variant.
+ * Coerce an object literal to its union variant: a discriminated union (C/D, 1b) by
+ * the discriminant value (`{kind:"circle", r:2}` in a `Shape` slot → `Shape::Circle
+ * { r: 2.0 }`, or a newtype `Shape::Circle(Circle{…})` for a named-interface member),
+ * or a non-discriminated union (E, 1e) by an exact field-name-set match. Returns null
+ * for a spread/computed key or when no variant matches.
  */
 function coerceObjectToUnion(
   obj: ObjectExpression,
   info: HirUnionEnum,
   analysis: ModuleAnalysis,
 ): HirExpr | null {
-  const discField = info.discField;
-  if (!discField) return null;
-  let discVal: string | null = null;
   const propByName = new Map<string, Expression>();
   for (const p of obj.properties) {
     if (p.type !== "Property" || p.computed) return null;
@@ -12445,26 +13098,126 @@ function coerceObjectToUnion(
           ? ((key as Literal).value as string)
           : null;
     if (name == null) return null;
-    if (name === discField) {
-      const v = (p.value as Literal).value;
-      discVal = typeof v === "string" || typeof v === "number" ? String(v) : null;
-    } else {
-      propByName.set(name, p.value as Expression);
-    }
+    propByName.set(name, p.value as Expression);
   }
-  if (discVal == null) return null;
-  const variant = info.variants.find((vt) => vt.discValue === discVal);
-  if (!variant) return null;
-  const fields = variant.fields.map((f) => {
-    const value = propByName.get(f.name);
-    // A missing optional field defaults to `None` (mirrors struct-literal coercion).
-    if (value === undefined) {
-      if (f.ty.kind === "option") return { name: f.name, value: { kind: "none" } as HirExpr };
-      return { name: f.name, value: lowerExpr({ type: "Identifier", name: "undefined" } as unknown as Expression, analysis) };
+  // Build a variant's struct fields from the collected props (a missing optional
+  // field defaults to `None`, mirroring struct-literal coercion).
+  const buildFields = (variant: HirUnionEnum["variants"][number]) =>
+    variant.fields.map((f) => {
+      const value = propByName.get(f.name);
+      if (value === undefined) {
+        if (f.ty.kind === "option")
+          return { name: f.name, value: { kind: "none" } as HirExpr };
+        return {
+          name: f.name,
+          value: lowerExpr(
+            { type: "Identifier", name: "undefined" } as unknown as Expression,
+            analysis,
+          ),
+        };
+      }
+      return { name: f.name, value: lowerTyped(value, f.ty, analysis) };
+    });
+
+  // Discriminated (C/D): the discriminant value selects the variant.
+  if (info.discField) {
+    const discExpr = propByName.get(info.discField);
+    if (!discExpr || discExpr.type !== "Literal") return null;
+    const v = (discExpr as Literal).value;
+    const discVal =
+      typeof v === "string" || typeof v === "number" ? String(v) : null;
+    if (discVal == null) return null;
+    const variant = info.variants.find((vt) => vt.discValue === discVal);
+    if (!variant) return null;
+    // A newtype variant (D): build the nominal inner struct from the *whole* object
+    // literal (the discriminant stays inside it), then wrap `Shape::Circle(<inner>)`.
+    if (variant.newtype) {
+      return {
+        kind: "enumVariant",
+        enumName: info.name,
+        variant: variant.name,
+        fields: [],
+        newtype: lowerTyped(obj, variant.newtype, analysis),
+      };
     }
-    return { name: f.name, value: lowerTyped(value, f.ty, analysis) };
-  });
-  return { kind: "enumVariant", enumName: info.name, variant: variant.name, fields };
+    return {
+      kind: "enumVariant",
+      enumName: info.name,
+      variant: variant.name,
+      fields: buildFields(variant),
+    };
+  }
+
+  // Non-discriminated (E): match the object's exact field-name set to a variant.
+  if (info.narrow === "in") {
+    const keys = [...propByName.keys()].sort();
+    const variant = info.variants.find((vt) => {
+      const set = vt.fields.map((f) => f.name).sort();
+      return set.length === keys.length && set.every((n, i) => n === keys[i]);
+    });
+    if (!variant) return null;
+    return {
+      kind: "enumVariant",
+      enumName: info.name,
+      variant: variant.name,
+      fields: buildFields(variant),
+    };
+  }
+  return null;
+}
+
+/** The static inner `RustType` of a scalar/named expression usable for union-variant
+ * selection (series 093, 1d): a string/number/boolean literal, a template literal
+ * (String), or an identifier resolved via `bindingTypes`. Null when indeterminate. */
+function inferScalarInner(
+  expr: Expression,
+  analysis: ModuleAnalysis,
+): RustType | null {
+  if (expr.type === "Literal") {
+    const v = (expr as Literal).value;
+    if (typeof v === "string") return { kind: "String" };
+    if (typeof v === "number") return { kind: "f64" };
+    if (typeof v === "boolean") return { kind: "bool" };
+    return null;
+  }
+  if (expr.type === "TemplateLiteral") return { kind: "String" };
+  if (expr.type === "Identifier") {
+    return analysis.bindingTypes.get((expr as Identifier).name) ?? null;
+  }
+  return null;
+}
+
+/** Do two newtype inner `RustType`s match (by kind, and struct name)? */
+function newtypeInnerMatches(a: RustType, b: RustType): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "struct" && b.kind === "struct") return a.name === b.name;
+  return true;
+}
+
+/**
+ * Coerce a scalar/named value into its newtype union variant (series 093, 1d): a
+ * `Circle`-typed identifier into a `Shape` slot → `Shape::Circle(c)` (D from a
+ * variable); a `string` value into `string|number` → `…::Str(v)` (F). The variant
+ * is the one whose newtype inner matches the value's static type. Null otherwise.
+ */
+function coerceScalarToUnion(
+  expr: Expression,
+  info: HirUnionEnum,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const inner = inferScalarInner(expr, analysis);
+  if (!inner) return null;
+  const variant = info.variants.find(
+    (v) => v.newtype && newtypeInnerMatches(v.newtype, inner),
+  );
+  if (!variant?.newtype) return null;
+  return {
+    kind: "enumVariant",
+    enumName: info.name,
+    variant: variant.name,
+    fields: [],
+    newtype: lowerTyped(expr, variant.newtype, analysis),
+  };
 }
 
 /**
@@ -12487,6 +13240,36 @@ function discriminatedScrutinee(
   const info = analysis.unionEnums.get(t.name);
   if (!info || info.discField !== (m.property as Identifier).name) return null;
   return { objName, info };
+}
+
+/** Does the AST subtree read `<objName>.<anything>` (any non-computed member access)? */
+function readsAnyMemberField(node: unknown, objName: string): boolean {
+  if (Array.isArray(node)) {
+    return node.some((n) => readsAnyMemberField(n, objName));
+  }
+  if (!node || typeof node !== "object") return false;
+  const n = node as {
+    type?: string;
+    computed?: boolean;
+    object?: { type?: string; name?: string };
+    property?: { type?: string };
+  };
+  if (
+    n.type === "MemberExpression" &&
+    !n.computed &&
+    n.object?.type === "Identifier" &&
+    n.object.name === objName &&
+    n.property?.type === "Identifier"
+  ) {
+    return true;
+  }
+  for (const k in node as Record<string, unknown>) {
+    if (k === "type") continue;
+    if (readsAnyMemberField((node as Record<string, unknown>)[k], objName)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Does the AST subtree read `<objName>.<field>` (a non-computed member access)? */
@@ -12648,6 +13431,18 @@ function lowerType(
       // A bare `null`/`undefined` type (not in a `T | null` union) has no `T` to
       // make `Option` over — fail-loud (series 042).
       throw new UnsupportedError(ty);
+    case "TSLiteralType": {
+      // A singleton literal *type* used as a field annotation — `kind: "circle"` on
+      // a discriminated-union member interface (series 093, 1d). We don't track
+      // singleton types at the value level, so it widens to its base primitive (the
+      // field holds that exact value at runtime; the union's variant already pins it).
+      const lit = (ty as unknown as { literal?: { value?: unknown } }).literal;
+      const v = lit?.value;
+      if (typeof v === "string") return { kind: "String" };
+      if (typeof v === "number") return { kind: "f64" };
+      if (typeof v === "boolean") return { kind: "bool" };
+      throw new UnsupportedError(ty);
+    }
     case "TSUnionType": {
       // `T | undefined` / `T | null` / `T | null | undefined` → `Option<T>`
       // (series 042). A union of two *real* types is enum territory — fail-loud.
@@ -12669,6 +13464,36 @@ function lowerType(
       const dunion = classifyDiscriminatedUnion(real);
       if (dunion) {
         const inner: RustType = { kind: "struct", name: anonDiscUnionName(dunion) };
+        return hasNullish ? { kind: "option", inner } : inner;
+      }
+      // Named-interface members (D): every member a bare `TSTypeReference`. The anon
+      // name hashes the (order-independent) interface-name set, so it matches what
+      // `collectUnions` registered — but only *if* it registered one (a discriminated
+      // named union). `structs` carries every registered union name, so gate on that:
+      // an unregistered named union (no shared discriminant) falls through to fail-loud.
+      const namedNames = real.map((m) => namedRef(m));
+      if (namedNames.every((n): n is string => n !== null)) {
+        const nm = anonNamedUnionName(namedNames);
+        if (structs.has(nm)) {
+          const inner: RustType = { kind: "struct", name: nm };
+          return hasNullish ? { kind: "option", inner } : inner;
+        }
+      }
+      // Primitive / mixed union (F): `string | number`, `string | Point`. The anon
+      // name hashes the primitive+named member set; gate on registration via `structs`.
+      const prim = classifyPrimitiveUnion(real, (n) => structs.has(n));
+      if (prim) {
+        const nm = anonPrimUnionName(prim);
+        if (structs.has(nm)) {
+          const inner: RustType = { kind: "struct", name: nm };
+          return hasNullish ? { kind: "option", inner } : inner;
+        }
+      }
+      // Non-discriminated object union (E): `{a} | {b}`. Fully determined by the
+      // type node (all inline objects, no discriminant), so no `structs` gate.
+      const nondisc = classifyNonDiscriminatedUnion(real);
+      if (nondisc) {
+        const inner: RustType = { kind: "struct", name: anonNonDiscUnionName(nondisc) };
         return hasNullish ? { kind: "option", inner } : inner;
       }
       if (hasNullish && real.length === 1 && real[0]) {
