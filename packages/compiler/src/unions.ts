@@ -36,6 +36,24 @@ export function isNullishMember(m: TSType): boolean {
 }
 
 /**
+ * Does the union mix literal member(s) with object/named member(s)? The **G** shape
+ * (`"loading" | { kind: "done" }`) — its narrowing is irregular (equality for the
+ * literal part, `.kind`/`typeof` for the object part), a documented residual
+ * (design §9) that fails loud with a precise message rather than a fragile partial.
+ */
+export function isMixedLiteralObjectUnion(members: TSType[]): boolean {
+  let hasLit = false;
+  let hasObj = false;
+  for (const m of members) {
+    if (m.type === "TSLiteralType") hasLit = true;
+    else if (m.type === "TSTypeLiteral" || m.type === "TSTypeReference") {
+      hasObj = true;
+    }
+  }
+  return hasLit && hasObj;
+}
+
+/**
  * A discriminated **object** union (series 093, stage 1b): every member is an
  * inline object type `{kind:"circle", r:number}` sharing a common literal-typed
  * discriminant field. Maps to a struct-variant `enum` (`Circle { r: f64 }`).
@@ -54,16 +72,19 @@ export interface DiscriminatedUnion {
 /** Discriminant-field name precedence when a union has more than one candidate. */
 const DISC_PREFERENCE = ["kind", "type", "tag", "_type"];
 
-interface PropSig {
+export interface PropSig {
   name: string;
   ann: TSType;
   literal: LiteralMember | null;
 }
 
-/** The property signatures of an inline object type `{ … }`, or null if `m` isn't one. */
-function objectMemberProps(m: TSType): PropSig[] | null {
-  if (m.type !== "TSTypeLiteral") return null;
-  const members = (m as unknown as { members?: unknown[] }).members ?? [];
+/**
+ * Convert a list of TS type-member nodes (an inline `{ … }` body or an interface
+ * body) to prop signatures, or null if any member isn't a plain non-computed
+ * property signature. Shared by inline object unions (C/E) and the named-interface
+ * resolver (D) so both classify against the same shape.
+ */
+export function extractPropSignatures(members: unknown[]): PropSig[] | null {
   const props: PropSig[] = [];
   for (const p of members) {
     const ps = p as {
@@ -81,21 +102,32 @@ function objectMemberProps(m: TSType): PropSig[] | null {
   return props.length > 0 ? props : null;
 }
 
+/** The property signatures of an inline object type `{ … }`, or null if `m` isn't one. */
+function objectMemberProps(m: TSType): PropSig[] | null {
+  if (m.type !== "TSTypeLiteral") return null;
+  return extractPropSignatures(
+    (m as unknown as { members?: unknown[] }).members ?? [],
+  );
+}
+
+/** The identifier name of a bare `TSTypeReference` (`Circle`), else null. */
+export function namedRef(m: TSType): string | null {
+  if (m.type !== "TSTypeReference") return null;
+  const tn = (m as unknown as { typeName?: { type?: string; name?: string } })
+    .typeName;
+  return tn?.type === "Identifier" && typeof tn.name === "string"
+    ? tn.name
+    : null;
+}
+
 /**
- * Classify a discriminated object union: every member an inline object type with a
- * common literal-typed discriminant field (distinct values across members). Returns
- * null when a member is not an inline object (named-interface / primitive → later
- * stage) or no common literal discriminant exists (non-discriminated → stage 1e).
+ * Find the discriminant field among a set of members' props: a field present in
+ * every member whose type is a single literal, with pairwise-distinct values, then
+ * the name-precedence tiebreak (`kind` > `type` > `tag` > `_type` > leftmost). Null
+ * when there is no such field (non-discriminated → case E). Shared by the inline
+ * (C) and named-interface (D) classifiers.
  */
-export function classifyDiscriminatedUnion(
-  members: TSType[],
-): DiscriminatedUnion | null {
-  const memberProps: PropSig[][] = [];
-  for (const m of members) {
-    const props = objectMemberProps(m);
-    if (!props) return null;
-    memberProps.push(props);
-  }
+function findDiscriminant(memberProps: PropSig[][]): string | null {
   if (memberProps.length < 2) return null;
   const candidates: string[] = [];
   for (const p of memberProps[0]!) {
@@ -113,8 +145,26 @@ export function classifyDiscriminatedUnion(
     if (ok && values.size === memberProps.length) candidates.push(p.name);
   }
   if (candidates.length === 0) return null;
-  const discField =
-    DISC_PREFERENCE.find((n) => candidates.includes(n)) ?? candidates[0]!;
+  return DISC_PREFERENCE.find((n) => candidates.includes(n)) ?? candidates[0]!;
+}
+
+/**
+ * Classify a discriminated object union: every member an inline object type with a
+ * common literal-typed discriminant field (distinct values across members). Returns
+ * null when a member is not an inline object (named-interface / primitive → later
+ * stage) or no common literal discriminant exists (non-discriminated → stage 1e).
+ */
+export function classifyDiscriminatedUnion(
+  members: TSType[],
+): DiscriminatedUnion | null {
+  const memberProps: PropSig[][] = [];
+  for (const m of members) {
+    const props = objectMemberProps(m);
+    if (!props) return null;
+    memberProps.push(props);
+  }
+  const discField = findDiscriminant(memberProps);
+  if (!discField) return null;
   const out: DiscObjectMember[] = memberProps.map((props) => {
     const disc = props.find((x) => x.name === discField)!;
     return {
@@ -143,6 +193,179 @@ export function anonDiscUnionName(d: DiscriminatedUnion): string {
     )
     .sort();
   return `__anonymous_union_${fnv1a(`disc:${d.discField}|${sigs.join("|")}`)}`;
+}
+
+/**
+ * A discriminated union whose members are **named interfaces** (series 093, stage
+ * 1d, case D): `type Shape = Circle | Square`, each interface carrying a shared
+ * literal discriminant. Maps to a **newtype-variant** enum `Shape::Circle(Circle)`
+ * preserving the nominal inner struct.
+ */
+export interface NamedDiscMember {
+  /** The interface name — both the variant name and the newtype's inner type. */
+  interfaceName: string;
+  /** The discriminant literal value (drives construction + `switch(x.kind)` match). */
+  discValue: string;
+}
+export interface NamedDiscriminatedUnion {
+  discField: string;
+  members: NamedDiscMember[];
+}
+
+/**
+ * Classify a named-interface discriminated union (D): every member a bare
+ * `TSTypeReference` to an interface (resolved to its props via `resolve`), the set
+ * sharing a common literal discriminant with distinct values. Returns null when a
+ * member is not a resolvable named interface or no common discriminant exists.
+ */
+export function classifyNamedDiscriminatedUnion(
+  members: TSType[],
+  resolve: (name: string) => PropSig[] | null,
+): NamedDiscriminatedUnion | null {
+  const names: string[] = [];
+  const memberProps: PropSig[][] = [];
+  for (const m of members) {
+    const name = namedRef(m);
+    if (!name) return null;
+    const props = resolve(name);
+    if (!props) return null;
+    names.push(name);
+    memberProps.push(props);
+  }
+  const discField = findDiscriminant(memberProps);
+  if (!discField) return null;
+  const out: NamedDiscMember[] = memberProps.map((props, i) => {
+    const disc = props.find((x) => x.name === discField)!;
+    return { interfaceName: names[i]!, discValue: String(disc.literal!.value) };
+  });
+  return { discField, members: out };
+}
+
+/**
+ * The order-independent canonical name for an **anonymous** named-interface union —
+ * hashes the sorted interface-name set (`nom:Circle|nom:Square`). Computable from
+ * the union type node alone (the interface names live there), so `lowerType` and
+ * `collectUnions` agree on the name without resolving the interfaces.
+ */
+export function anonNamedUnionName(names: string[]): string {
+  const sigs = names.map((n) => `nom:${n}`).sort();
+  return `__anonymous_union_${fnv1a(sigs.join("|"))}`;
+}
+
+/**
+ * A primitive / mixed-type union (series 093, stage 1d, case F): every member a
+ * primitive keyword (`string`/`number`/`boolean`) or a single named struct, narrowed
+ * at consumption by `typeof`. Maps to a **newtype-variant** enum `Str(String)`,
+ * `Num(f64)`, `Bool(bool)`, `Point(Point)`.
+ */
+export interface PrimMember {
+  tag: "str" | "num" | "bool" | "nom";
+  /** The variant name (`Str`/`Num`/`Bool` for primitives; the struct name for `nom`). */
+  name: string;
+}
+export interface PrimitiveUnion {
+  members: PrimMember[];
+}
+
+/**
+ * Classify a primitive/mixed union (F): members are `string`/`number`/`boolean`
+ * keywords and/or a **single** named struct (so `typeof x === "object"` narrows to
+ * exactly one member). Requires ≥1 primitive (an all-named union is D or fail-loud)
+ * and no duplicate member type. Returns null otherwise.
+ */
+export function classifyPrimitiveUnion(
+  members: TSType[],
+  isStruct: (name: string) => boolean,
+): PrimitiveUnion | null {
+  const out: PrimMember[] = [];
+  const seen = new Set<string>();
+  let hasPrim = false;
+  let nomCount = 0;
+  for (const m of members) {
+    let pm: PrimMember | null = null;
+    if (m.type === "TSStringKeyword") pm = { tag: "str", name: "Str" };
+    else if (m.type === "TSNumberKeyword") pm = { tag: "num", name: "Num" };
+    else if (m.type === "TSBooleanKeyword") pm = { tag: "bool", name: "Bool" };
+    else {
+      const nm = namedRef(m);
+      if (nm && isStruct(nm)) pm = { tag: "nom", name: nm };
+    }
+    if (!pm) return null;
+    if (pm.tag === "nom") nomCount++;
+    else hasPrim = true;
+    const key = pm.tag === "nom" ? `nom:${pm.name}` : `prim:${pm.tag}`;
+    if (seen.has(key)) return null;
+    seen.add(key);
+    out.push(pm);
+  }
+  if (!hasPrim || nomCount > 1 || out.length < 2) return null;
+  return { members: out };
+}
+
+/**
+ * A non-discriminated object union (series 093, stage 1e, case E): every member an
+ * inline object type with **no** common literal discriminant. Maps to a struct-variant
+ * enum whose variant names derive from each member's (sorted) field-name set, narrowed
+ * at consumption by `"field" in x`.
+ */
+export interface NonDiscMember {
+  /** PascalCased sorted field-name set (`{name,age}` → `AgeName`); collisions get an ordinal. */
+  variantName: string;
+  fields: { name: string; ann: TSType }[];
+  /** Sorted field-name set — the construction (exact-set) + `in`-narrow key. */
+  fieldSet: string[];
+}
+export interface NonDiscriminatedUnion {
+  members: NonDiscMember[];
+}
+
+/**
+ * Classify a non-discriminated object union (E): every member an inline object type,
+ * with no common literal discriminant (that would be C). Variant names come from the
+ * sorted field-name set, PascalCased; a name collision gets a stable ordinal. Returns
+ * null when a member is not an inline object or the union is actually discriminated.
+ */
+export function classifyNonDiscriminatedUnion(
+  members: TSType[],
+): NonDiscriminatedUnion | null {
+  const memberProps: PropSig[][] = [];
+  for (const m of members) {
+    const props = objectMemberProps(m);
+    if (!props) return null;
+    memberProps.push(props);
+  }
+  if (memberProps.length < 2) return null;
+  if (findDiscriminant(memberProps)) return null;
+  const seen = new Map<string, number>();
+  const out: NonDiscMember[] = memberProps.map((props) => {
+    const fieldSet = props.map((p) => p.name).sort();
+    const base =
+      fieldSet
+        .map((f) => f.charAt(0).toUpperCase() + f.slice(1))
+        .join("") || "Empty";
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return {
+      variantName: n === 1 ? base : `${base}${n}`,
+      fields: props.map((p) => ({ name: p.name, ann: p.ann })),
+      fieldSet,
+    };
+  });
+  return { members: out };
+}
+
+/** The order-independent canonical name for an anonymous non-discriminated union (E). */
+export function anonNonDiscUnionName(u: NonDiscriminatedUnion): string {
+  const sigs = u.members.map((m) => `{${m.fieldSet.join(",")}}`).sort();
+  return `__anonymous_union_${fnv1a(`nondisc:${sigs.join("|")}`)}`;
+}
+
+/** The order-independent canonical name for an anonymous primitive/mixed union (F). */
+export function anonPrimUnionName(u: PrimitiveUnion): string {
+  const sigs = u.members
+    .map((m) => (m.tag === "nom" ? `nom:${m.name}` : `prim:${m.tag}`))
+    .sort();
+  return `__anonymous_union_${fnv1a(sigs.join("|"))}`;
 }
 
 /** Extract a literal member from a `TSLiteralType`, or null if `m` is not one. */
