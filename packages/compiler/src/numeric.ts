@@ -276,6 +276,11 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
       eachExpr(e.target, fn);
       eachExpr(e.value, fn);
       break;
+    case "cond":
+      eachExpr(e.test, fn);
+      eachExpr(e.conseq, fn);
+      eachExpr(e.alt, fn);
+      break;
     case "call":
       for (const a of e.args) eachExpr(a.expr, fn);
       break;

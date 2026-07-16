@@ -234,6 +234,14 @@ export type HirExpr =
    * an operand into `i128`, or an `i128` bitwise result back out to `f64`/`usize`. */
   | { kind: "cast"; expr: HirExpr; ty: RustType }
   | { kind: "assign"; op: string; target: HirExpr; value: HirExpr }
+  /**
+   * A ternary `cond ? a : b` (series 094) → Rust's `if`/`else` **expression**
+   * (emitted parenthesized, `(if <test> { <conseq> } else { <alt> })`, since a
+   * bare `if`-expr can't be a binary-operator operand). `test` is truthiness-lowered
+   * exactly like an `if` statement (native `bool`, else `is_truthy`). The first
+   * expression-position conditional — HIR already had a *statement* `if`.
+   */
+  | { kind: "cond"; test: HirExpr; conseq: HirExpr; alt: HirExpr }
   /** Direct call to a known function; args carry their borrow. */
   | { kind: "call"; callee: string; args: HirArg[] }
   /** `console.log(...)` → `println!` with a JS-style format string. */
