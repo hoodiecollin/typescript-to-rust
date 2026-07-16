@@ -566,6 +566,16 @@ function isMutatingMethodCall(
 
 /** Is a node an assignment whose lvalue touches `target`? Returns kind of touch. */
 function assignmentTarget(node: AnyNode): string | null {
+  // `++`/`--` (series 096) mutates its argument exactly as `arg += 1` would, so it
+  // marks the same binding `mut`: an identifier, or the root of an element write.
+  if (node.type === "UpdateExpression") {
+    const arg = node.argument;
+    if (!isNode(arg)) return null;
+    if (arg.type === "Identifier") return arg.name as string;
+    if (arg.type === "MemberExpression" && arg.computed)
+      return identName(arg.object);
+    return null;
+  }
   if (node.type !== "AssignmentExpression") return null;
   const left = node.left;
   if (!isNode(left)) return null;
@@ -716,6 +726,10 @@ function mutatesRoot(node: unknown, name: string): boolean {
     if (n.type === "AssignmentExpression" && rootedAt((n as AnyNode).left)) {
       found = true;
     }
+    // `x++`/`--x` (series 096) mutates its argument's root, like an assignment.
+    if (n.type === "UpdateExpression" && rootedAt((n as AnyNode).argument)) {
+      found = true;
+    }
   });
   return found;
 }
@@ -754,6 +768,21 @@ function mutableBindings(
         (left.object as AnyNode).type === "Identifier"
       ) {
         const name = identName(left.object);
+        if (name && name !== "self" && !aliased.has(name)) mut.add(name);
+      }
+    }
+
+    // A local struct field increment `s.x++` (series 096) needs `mut s`, mirroring
+    // the `s.x = …` case above.
+    if (n.type === "UpdateExpression" && isNode(n.argument)) {
+      const arg = n.argument as AnyNode;
+      if (
+        arg.type === "MemberExpression" &&
+        !arg.computed &&
+        isNode(arg.object) &&
+        (arg.object as AnyNode).type === "Identifier"
+      ) {
+        const name = identName(arg.object);
         if (name && name !== "self" && !aliased.has(name)) mut.add(name);
       }
     }
@@ -890,6 +919,25 @@ function mutatesThis(body: unknown): boolean {
         // `this.field[i] = …` — the lvalue is a computed member over `this.field`.
         else if (
           (left as AnyNode).computed &&
+          isNode(obj) &&
+          obj.type === "MemberExpression" &&
+          isNode((obj as AnyNode).object) &&
+          ((obj as AnyNode).object as AnyNode).type === "ThisExpression"
+        ) {
+          mutates = true;
+        }
+      }
+      return;
+    }
+    // A field increment `this.n++` / `this.items[i]++` (series 096) mutates self,
+    // exactly like the `this.n = …` writes above.
+    if (n.type === "UpdateExpression") {
+      const arg = n.argument;
+      if (isNode(arg) && arg.type === "MemberExpression") {
+        const obj = (arg as AnyNode).object;
+        if (isNode(obj) && obj.type === "ThisExpression") mutates = true;
+        else if (
+          (arg as AnyNode).computed &&
           isNode(obj) &&
           obj.type === "MemberExpression" &&
           isNode((obj as AnyNode).object) &&
