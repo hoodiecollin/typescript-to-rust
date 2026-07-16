@@ -223,6 +223,15 @@ export type HirExpr =
    */
   | { kind: "jsObjectStr"; value: HirExpr }
   /**
+   * A `++`/`--` (`UpdateExpression`) used in a **value** position (series 096) —
+   * `const y = x++`, `arr[i++]`, `while (n-- > 0)`. `step` is the `+= 1`/`-= 1`
+   * `assign` node (embedded so the numeric pass types its `1` as usize/f64 like any
+   * `i += 1`). Emitted as a block-temp: postfix → `{ let __upd = <target>; <step>; __upd }`
+   * (old value), prefix → `{ <step>; <target> }` (new value). Statement-position
+   * `x++;` lowers directly to the `step` `assign` instead (no block-temp).
+   */
+  | { kind: "update"; prefix: boolean; target: HirExpr; step: HirExpr }
+  /**
    * Variadic `Math.min(...)` / `Math.max(...)` (series 083) → a `min!`/`max!`
    * **macro** (the sanctioned Tm variadic route). Binary min/max lowers to native
    * `a.min(b)` instead; this node only carries the 1-or-3+-arg variadic form.
