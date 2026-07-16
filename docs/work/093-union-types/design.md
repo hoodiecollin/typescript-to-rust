@@ -276,6 +276,13 @@ follow-up series:
   — needs `Box` insertion for the recursive field. Fail-loud → a follow-up.
 - **Generic unions** (`type Wrap<T> = {some:T} | {none:true}`) — generics × unions
   interaction. Fail-loud → a follow-up.
+- **Mixed literal + object unions** (G, `"loading" | { kind: "done" }`) — **deferred**
+  (was tentatively 1d). Its narrowing is irregular: the literal part is
+  equality-narrowed (`x === "loading"`) while the object part is `.kind`/`typeof`-
+  narrowed, so a single `match` needs a two-level split (typeof "string" vs "object",
+  then per-`.kind`). Fails loud with a precise message (`collectUnions`, alias loop) →
+  a follow-up. The common "primitive + object" case `string | Point` **is** shipped
+  (F) — G is specifically *literal* + object.
 - **Union as a Map/Set key** when any variant has fields (no `Hash`/`Eq`). Fieldless
   literal unions *are* hashable and allowed as keys.
 - **Union member that is itself an inline union / an array/Record with no name** in
@@ -296,9 +303,10 @@ the next (all under this one series, per the spec-first flow):
   construction coercion, discriminant detection, `switch(x.kind)` → variant match.
 - **1c** — **anonymous/synthesized names** (§2) across A–C + non-ident-safe literal
   hardening (§4 collisions).
-- **1d** — **named-interface members** (D), **primitive/mixed** (F/G) via `typeof`.
-- **1e** — **non-discriminated** (E) via `in`, *or* the fail-loud alternative
-  (pending the Fork-N3 decision).
+- **1d** — **named-interface members** (D, newtype variants) + **primitive/mixed**
+  (F: `string | number`, `string | Point`) via `typeof`. **Shipped.** G (mixed
+  *literal* + object) deferred to a follow-up (§9).
+- **1e** — **non-discriminated** (E, `{a} | {b}`) via `in`. **Shipped.**
 
 ---
 

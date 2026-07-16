@@ -44,22 +44,41 @@ not number fidelity, is under test. IDs group by impl stage (design §10).
 | **UN-ANON3** | `type K = ""\|"x"; const e:K=""; console.log(e==="", e);` | `true ` (trailing empty) | empty-string literal → `Empty` variant, exact round-trip |
 | **UN-ANON4** | value of anonymous `{kind:"a"}\|{kind:"b"}` returned as `{kind:"b"}\|{kind:"a"}` | `…` | order-independent hash dedup for object unions |
 
-## 1d — named-interface members (D) + primitive/mixed (F/G)
+## 1d — named-interface members (D) + primitive/mixed (F) via `typeof`
+
+Case **D** maps each named interface to a **newtype variant** `Shape::Circle(Circle)`
+preserving the nominal inner struct; the discriminant field stays inside it and the
+match binds the whole struct (`Shape::Circle(sh) => sh.r`). Case **F** maps
+`string`/`number`/`boolean` + a single named struct to newtype variants
+`Str(String)`/`Num(f64)`/`Bool(bool)`/`Point(Point)`, narrowed by `typeof`
+(`"string"`→`Str`, `"object"`→the struct). The narrowed binding is retyped in the
+arm so `x + 1` / string methods resolve. **G** (mixed literal + object) is deferred —
+see the fail-loud pins.
 
 | ID | Source (essentials) | stdout | Exercises |
 |----|--------------------|--------|-----------|
-| **UN-IFACE1** | `interface Circle {kind:"circle";r:number} interface Square {kind:"square";s:number} type Shape = Circle\|Square;` | `4` | **newtype variants** `Circle(Circle)`; narrow via shared discriminant |
-| **UN-PRIM1** | `function fmt(x: string\|number): string { if (typeof x === "string") return x; else return "num"; } console.log(fmt("hi"), fmt(5));` | `hi num` | **primitive union** synth newtype enum, `typeof` → match |
-| **UN-PRIM2** | `string\|number`, take the number branch and use it | `…` | `Num(f64)` variant binding |
-| **UN-PRIM3** | `type SP = string\|Point;` (primitive + named struct) | `…` | mixed primitive + nominal newtype variants |
-| **UN-MIXED1** | `type State = "loading"\|{kind:"done",data:number}; show(s){ if (typeof s==="string") return s; else return "done"; }` → `show("loading")`, `show({kind:"done",data:1})` | `loading done` | **mixed literal + object** (G): fieldless `Loading` + struct `Done{data}` |
+| **UN-NAMED1** | `interface Circle {kind:"circle";r:number} interface Square {kind:"square";s:number} type Shape = Circle\|Square;` `switch(sh.kind)` | `4 9` | **newtype variants** `Circle(Circle)`; discriminant inside struct; `switch(sh.kind)` → `Shape::Circle(sh)` |
+| **UN-NAMED2** | `type R = Ok\|Err;` `switch(r.kind){case "ok": return r.msg;…}` | `hi e` | `String` field read out of a newtype variant (clone-to-owned prelude) |
+| **UN-NAMED3** | `const c: Circle = {…}; const sh: Shape = c;` + `if (x.kind==="circle")` ladder | `25` | **construct from a named value** → `Shape::Circle(c)`; if-ladder |
+| **UN-NAMED4** | `function nx(n: At\|Origin)` (inline, no alias) | `7 0` | **anonymous** named-interface union → `__anonymous_union_<hash>` |
+| **UN-PRIM1** | `type SN = string\|number; if (typeof x==="string") return x; else return "n"+x;` | `hello n2` | primitive union → newtype enum, `typeof` if-ladder → match; retyped binding |
+| **UN-PRIM2** | `switch (typeof x) { case "string": …; case "number": … }` | `STR NUM` | `switch(typeof x)` → variant match |
+| **UN-PRIM3** | `type V = string\|number\|boolean;` three-way `typeof` ladder | `s n b` | three primitive variants, `Bool(bool)` |
+| **UN-PRIM4** | `type SP = string\|Point;` `if (typeof v==="string") … else v.x` | `hi 7` | mixed primitive + nominal newtype; `"object"` arm binds the struct |
+| **UN-PRIM5** | construct from identifiers into `SN[]`, consume | `hello 42` | value → variant by static type; `Vec<union>` |
 
 ## 1e — non-discriminated object unions (E) via `in`
 
+Case **E** (all inline objects, no shared discriminant) maps to struct variants whose
+names come from the **sorted field-name set** PascalCased (`{name,age}` → `AgeName`),
+narrowed by `"field" in x` where the field is present in exactly one variant.
+Construction matches an object literal's exact field-name set to a variant.
+
 | ID | Source (essentials) | stdout | Exercises |
 |----|--------------------|--------|-----------|
-| **UN-NOND1** | `type X = {a:number}\|{b:string}; get(x){ if ("a" in x) return "A"; else return x.b; } console.log(get({a:1}), get({b:"hi"}));` | `A hi` | field-set-named variants (`A`/`B`), `"a" in x` → match |
-| **UN-NOND2** | multi-field members `{name:string,age:number}\|{id:number}` | `…` | sorted field-set variant name (`AgeName`/`Id`) |
+| **UN-NONDISC1** | `type AB = {a:number}\|{b:string}; if ("a" in x) return ""+x.a; else return x.b;` | `1 hi` | field-set-named variants (`A`/`B`), `"a" in x` → struct-variant match |
+| **UN-NONDISC2** | `{name:string,age:number}\|{k:string,v:string}` | `9 kb` | sorted field-set variant name (`AgeName`/`KV`); multi-field bind |
+| **UN-NONDISC3** | `{a}\|{b}\|{c}` three-way `in`-ladder | `1 2 3` | three-way `in` narrowing, trailing-else covers last variant |
 
 ## null / undefined composition (any stage — reuses 042/091)
 
@@ -77,6 +96,7 @@ not number fidelity, is under test. IDs group by impl stage (design §10).
 | **UN-FL3** | fielded union used as a `Record`/Map key or Set element | no `Hash`/`Eq` on fielded variants (fieldless literal unions **are** allowed) |
 | **UN-FL4** | discriminated union narrowed on a **non-discriminant** field | "narrow on the discriminant `<field>`" |
 | **UN-FL5** | `type Pair = [number, number]` (non-union, non-trivial alias) | tuple alias — trivial synonyms only this series |
+| **UN-FL6** | `type S = "loading" \| { kind: "done"; data: number }` (mixed literal + object, G) | irregular two-level narrowing (equality for the literal, `.kind`/`typeof` for the object) → precise fail-loud, deferred to a follow-up |
 
 ## Rationale
 

@@ -127,9 +127,11 @@ The accepted type annotations are exactly: `number`, `string`, `boolean`, `void`
 `Array<T>` / `T[]`, `Record<string, V>`, `Promise<T>`, a declared `interface` /
 `class` name (nominal `struct`, incl. a **generic instantiation** `Box<number>` —
 series 081), an in-scope **generic type parameter** `T` (inside a generic class /
-method / fn, series 081 → the `param` type variable), and `T | undefined` /
-`T | null` (→ `Option<T>`). Everything else is fail-loud. (A bare `T` that is *not*
-an in-scope type parameter stays fail-loud as an undeclared type name.)
+method / fn, series 081 → the `param` type variable), a **union type** `A | B | …`
+(→ a Rust `enum`, series 093 — see the Union-types note below), and
+`T | undefined` / `T | null` (→ `Option<T>`). Everything else is fail-loud. (A bare
+`T` that is *not* an in-scope type parameter stays fail-loud as an undeclared type
+name.)
 
 | Trigger | Kind | Message |
 |---------|------|---------|
@@ -141,14 +143,31 @@ an in-scope type parameter stays fail-loud as an undeclared type name.)
 | `Record<number, V>` / non-string key | Not yet | `Record with a non-string key (only string keys map to HashMap)` |
 | Unknown/undeclared type name (`Map`, `Set`, `Date`, an unresolved generic, …) | Not yet | generic `Unsupported <node>` |
 | Bare `null` / `undefined` type (not inside a union) | Not yet | generic `Unsupported <node>` |
-| A union whose non-nullish member count ≠ 1 (`string \| number`, enum-like unions) | Not yet | generic `Unsupported <node>` |
-| Any other type keyword/form: `bigint`, `symbol`, tuple, function type, intersection, mapped, conditional, indexed-access, literal type, `typeof` query, type predicate | Not yet | generic `Unsupported <node>` |
+| A union of a **recursive** type (`type Tree = … \| { kids: Tree[] }`) | Not yet | fails when the recursive field lowers (needs `Box`) |
+| A **generic** union (`type Wrap<T> = {some:T} \| {none:true}`) | Not yet | generic `Unsupported <node>` |
+| A **mixed literal + object** union (`"loading" \| { kind: "done" }`, G) | Not yet | `union alias '…' mixes literal and object members …` |
+| Two named structs with **no shared discriminant** (`Point \| Circle`) | Not yet | generic `Unsupported <node>` (no `typeof`/`in` narrowing shape) |
+| Any other type keyword/form: `bigint`, `symbol`, tuple, function type, intersection, mapped, conditional, indexed-access, `typeof` query, type predicate | Not yet | generic `Unsupported <node>` |
 
-Nullability note: `T | undefined` and `T | null` lower to `Option<T>`. That is the
-*only* accepted union shape — see [Nullability & optional chaining](#nullability--optional-chaining).
-The runtime `Option` is flavourless (a `None` doesn't record `null` vs `undefined`);
-the one place the distinction is recovered — from the declared field type — is JSON
-key omission on `stringifyJson` (series 091, see the JSON-divergence bullet above).
+Union types (series 093): a union of real members lowers to a Rust `enum`.
+**Literal** unions (`"a" | "b"`, `0 | 1`) → a fieldless enum with a `Display`
+round-trip; **discriminated object** unions (`{kind:"circle",r} | {kind:"square",s}`)
+→ struct-variant enums (the discriminant is consumed into the variant name);
+**named-interface** members (`Circle | Square`) → newtype-variant enums preserving the
+inner struct; **primitive/mixed** unions (`string | number`, `string | Point`) →
+newtype variants narrowed by `typeof`; **non-discriminated** object unions
+(`{a} | {b}`) → struct variants narrowed by `"a" in x`. Anonymous/inline unions are
+named `__anonymous_union_<hash>` and structurally deduped (order-independent). A
+singleton literal *type* used as a field (`kind: "circle"`) widens to its base
+primitive (`String`/`f64`/`bool`) at the value level. The residual boundary
+(recursive, generic, and mixed literal+object unions) is the fail-loud rows above.
+
+Nullability note: `T | undefined` and `T | null` lower to `Option<T>` (a union whose
+only real member is `T`); a union carrying real members *plus* a nullish member wraps
+the synthesized `enum` in `Option`. The runtime `Option` is flavourless (a `None`
+doesn't record `null` vs `undefined`); the one place the distinction is recovered —
+from the declared field type — is JSON key omission on `stringifyJson` (series 091,
+see the JSON-divergence bullet above).
 
 ---
 
