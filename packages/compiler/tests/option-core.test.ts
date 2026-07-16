@@ -7,7 +7,6 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { UnsupportedError } from "../src/emitter";
 import { compile, defineDifferential } from "./_support/differential";
 
 defineDifferential("option-core", [
@@ -57,9 +56,9 @@ console.log(pick());`,
 ]);
 
 describe("042a Option core + ??", () => {
-  test("OPT6 a union of two real types is fail-loud", () => {
-    expect(() =>
-      compile(`const x: number | string = 5;`),
-    ).toThrow(UnsupportedError);
+  test("OPT6 a union of two real types now lowers to an enum (series 093)", () => {
+    // Once fail-loud (Option is for nullability, not arbitrary unions); series 093
+    // lowers `number | string` to a primitive/mixed union `enum` (case F).
+    expect(() => compile(`const x: number | string = 5;`)).not.toThrow();
   });
 });

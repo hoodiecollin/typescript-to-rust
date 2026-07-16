@@ -140,9 +140,10 @@ describe("lowering: fail-loud gates (L11)", () => {
     expect(() => hir(`function f(a): void {}`)).toThrow(UnsupportedError);
   });
 
-  test("a union of two real types throws (nullability is Option, not enums)", () => {
-    // `null`/`undefined` now lower to `None` (series 042); a union of two *real*
-    // types is still fail-loud (enum/union territory, a separate decision).
-    expect(() => hir(`const x: number | string = 5;`)).toThrow(UnsupportedError);
+  test("a union of two real types lowers to an enum (series 093)", () => {
+    // `null`/`undefined` lower to `None` (series 042); a union of two *real* types
+    // is now a Rust `enum` (series 093 — `number | string` is a primitive/mixed
+    // union F, narrowed by `typeof`), no longer fail-loud.
+    expect(() => hir(`const x: number | string = 5;`)).not.toThrow();
   });
 });

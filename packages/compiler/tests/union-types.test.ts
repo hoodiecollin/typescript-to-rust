@@ -5,7 +5,10 @@
  *
  * Grows stage-by-stage (design §10): a spec is added only once its stage compiles,
  * because a `compile()` throw in the shared `beforeAll` crashes the whole file.
- * Currently populated: **1a** (literal unions A/B) + fail-loud residual pins.
+ * Populated: **1a** (literal unions A/B), **1b** (discriminated inline objects C),
+ * **1c** (anonymous synthesis + non-ident literals), **1d** (named-interface D +
+ * primitive/mixed F via `typeof`), **1e** (non-discriminated E via `in`), plus
+ * fail-loud residual pins (recursive, tuple alias, mixed literal+object G).
  */
 
 import { expect, test } from "bun:test";
@@ -254,6 +257,160 @@ const m: Dir | undefined = "north";
 console.log(m);`,
     expected: "north",
   },
+  // ── 1d: named-interface discriminated unions (D) → newtype-variant enums ──────
+  {
+    name: "UN-NAMED1 named-interface members via switch → newtype variants",
+    src: `interface Circle { kind: "circle"; r: number }
+interface Square { kind: "square"; s: number }
+type Shape = Circle | Square;
+function area(sh: Shape): number {
+  switch (sh.kind) {
+    case "circle": return sh.r * sh.r;
+    case "square": return sh.s * sh.s;
+  }
+}
+console.log(area({ kind: "circle", r: 2 }), area({ kind: "square", s: 3 }));`,
+    expected: "4 9",
+    extra: ({ rust }) => expect(rust).toContain("Circle(Circle)"),
+  },
+  {
+    name: "UN-NAMED2 String field read out of a newtype variant",
+    src: `interface Ok { kind: "ok"; msg: string }
+interface Err { kind: "err"; code: number }
+type R = Ok | Err;
+function show(r: R): string {
+  switch (r.kind) {
+    case "ok": return r.msg;
+    case "err": return "e";
+  }
+}
+console.log(show({ kind: "ok", msg: "hi" }), show({ kind: "err", code: 1 }));`,
+    expected: "hi e",
+  },
+  {
+    name: "UN-NAMED3 construct from a named value + if/else-if ladder",
+    src: `interface Circle { kind: "circle"; r: number }
+interface Square { kind: "square"; s: number }
+type Shape = Circle | Square;
+const c: Circle = { kind: "circle", r: 5 };
+const sh: Shape = c;
+function area(x: Shape): number {
+  if (x.kind === "circle") return x.r * x.r;
+  else return x.s * x.s;
+}
+console.log(area(sh));`,
+    expected: "25",
+  },
+  {
+    name: "UN-NAMED4 inline (anonymous) named-interface union in a parameter",
+    src: `interface At { kind: "at"; p: number }
+interface Origin { kind: "origin" }
+function nx(n: At | Origin): number {
+  switch (n.kind) {
+    case "at": return n.p;
+    case "origin": return 0;
+  }
+}
+console.log(nx({ kind: "at", p: 7 }), nx({ kind: "origin" }));`,
+    expected: "7 0",
+    extra: ({ rust }) => expect(rust).toContain("__anonymous_union_"),
+  },
+  // ── 1d: primitive / mixed-type unions (F) → newtype variants via `typeof` ─────
+  {
+    name: "UN-PRIM1 string|number if-ladder narrows via typeof",
+    src: `type SN = string | number;
+function describe(x: SN): string {
+  if (typeof x === "string") return x;
+  else return "n" + x;
+}
+console.log(describe("hello"), describe(2));`,
+    expected: "hello n2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("Str(String)");
+      expect(rust).toContain("Num(f64)");
+    },
+  },
+  {
+    name: "UN-PRIM2 switch(typeof x) over string|number",
+    src: `type SN = string | number;
+function kind(x: SN): string {
+  switch (typeof x) {
+    case "string": return "STR";
+    case "number": return "NUM";
+  }
+}
+console.log(kind("a"), kind(1));`,
+    expected: "STR NUM",
+  },
+  {
+    name: "UN-PRIM3 three-way string|number|boolean",
+    src: `type V = string | number | boolean;
+function t(x: V): string {
+  if (typeof x === "string") return "s";
+  else if (typeof x === "number") return "n";
+  else return "b";
+}
+console.log(t("x"), t(3), t(true));`,
+    expected: "s n b",
+  },
+  {
+    name: "UN-PRIM4 mixed string|Point narrows the object arm via typeof",
+    src: `interface Point { x: number; y: number; }
+type SP = string | Point;
+function show(v: SP): string {
+  if (typeof v === "string") return v;
+  else return "" + v.x;
+}
+const p: Point = { x: 7, y: 2 };
+console.log(show("hi"), show(p));`,
+    expected: "hi 7",
+  },
+  {
+    name: "UN-PRIM5 construct from identifiers into a Vec<union>",
+    src: `type SN = string | number;
+const a: string = "hello";
+const b: number = 42;
+const xs: SN[] = [a, b];
+function pr(x: SN): string {
+  if (typeof x === "string") return x;
+  else return "" + x;
+}
+console.log(pr(xs[0]), pr(xs[1]));`,
+    expected: "hello 42",
+  },
+  // ── 1e: non-discriminated object unions (E) → struct variants via `in` ────────
+  {
+    name: "UN-NONDISC1 {a}|{b} narrows via `in`",
+    src: `type AB = { a: number } | { b: string };
+function show(x: AB): string {
+  if ("a" in x) return "" + x.a;
+  else return x.b;
+}
+console.log(show({ a: 1 }), show({ b: "hi" }));`,
+    expected: "1 hi",
+    extra: ({ rust }) => expect(rust).toContain("enum"),
+  },
+  {
+    name: "UN-NONDISC2 multi-field variant names (sorted field set)",
+    src: `type Rec = { name: string; age: number } | { k: string; v: string };
+function get(r: Rec): string {
+  if ("age" in r) return "" + r.age;
+  else return r.k + r.v;
+}
+console.log(get({ name: "x", age: 9 }), get({ k: "k", v: "b" }));`,
+    expected: "9 kb",
+  },
+  {
+    name: "UN-NONDISC3 three-way `in`-ladder",
+    src: `type T = { a: number } | { b: number } | { c: number };
+function pick(x: T): number {
+  if ("a" in x) return x.a;
+  else if ("b" in x) return x.b;
+  else return x.c;
+}
+console.log(pick({ a: 1 }), pick({ b: 2 }), pick({ c: 3 }));`,
+    expected: "1 2 3",
+  },
 ]);
 
 // ── Fail-loud residual boundary (design §9) ───────────────────────────────────
@@ -271,4 +428,13 @@ test("UN-FL5 non-union non-trivial type alias (tuple) stays fail-loud", () => {
 const p: Pair = [1, 2];
 console.log(p[0]);`;
   expect(() => compile(src)).toThrow();
+});
+
+test("UN-FL6 mixed literal + object union (G) stays fail-loud with a precise message", () => {
+  // `"loading" | { kind: "done" }` mixes an equality-narrowed literal with a
+  // `.kind`-narrowed object — irregular two-level narrowing, a design §9 residual.
+  const src = `type S = "loading" | { kind: "done"; data: number };
+const s: S = "loading";
+console.log("ok");`;
+  expect(() => compile(src)).toThrow(/mixes literal and object members/);
 });
