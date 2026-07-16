@@ -456,6 +456,10 @@ function rcBody(
         // A `${struct}` template interpolation (series 095): the borrowed value may
         // read through an rc field, so recurse (mirrors `strConcat`).
         return { ...e, value: rewrite(e.value) };
+      case "update":
+        // A value-position `++`/`--` (series 096): both the target and the embedded
+        // `+= 1` step may read through an rc handle, so recurse into each.
+        return { ...e, target: rewrite(e.target), step: rewrite(e.step) };
       case "array":
         return { ...e, elements: e.elements.map((el) => rewrite(el)) };
       case "hashmap":

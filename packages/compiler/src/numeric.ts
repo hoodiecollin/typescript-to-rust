@@ -144,6 +144,10 @@ function markContext(expr: HirExpr, visit: (e: HirExpr) => void): void {
     markContext(expr.left, visit);
     markContext(expr.right, visit);
   }
+  // A value-position `++`/`--` (series 096) in usize context (`arr[i++]`, the
+  // `update` node *is* the index) — descend to the target identifier so it joins
+  // the usize set, exactly as a bare `arr[i]` index identifier would.
+  if (expr.kind === "update") markContext(expr.target, visit);
 }
 
 // ── Conflict detection ───────────────────────────────────────────────────────
@@ -275,6 +279,12 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
     case "assign":
       eachExpr(e.target, fn);
       eachExpr(e.value, fn);
+      break;
+    case "update":
+      // A value-position `++`/`--` (series 096): the embedded `step` is an `assign`
+      // whose `1` must type as usize/f64 like any `i += 1`, so recurse into both.
+      eachExpr(e.target, fn);
+      eachExpr(e.step, fn);
       break;
     case "cond":
       eachExpr(e.test, fn);
