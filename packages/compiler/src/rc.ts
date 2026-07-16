@@ -452,6 +452,10 @@ function rcBody(
         // through an `rc` field (`a.items.len()`), so recurse or the read misses its
         // `.borrow()`. Byte-for-byte identical when no part touches an rc handle.
         return { ...e, parts: e.parts.map((p) => rewrite(p)) };
+      case "jsObjectStr":
+        // A `${struct}` template interpolation (series 095): the borrowed value may
+        // read through an rc field, so recurse (mirrors `strConcat`).
+        return { ...e, value: rewrite(e.value) };
       case "array":
         return { ...e, elements: e.elements.map((el) => rewrite(el)) };
       case "hashmap":

@@ -1624,6 +1624,11 @@ function emitExpr(expr: HirExpr): string {
       );
       return `format!(${JSON.stringify(fmt)}, ${args.join(", ")})`;
     }
+    case "jsObjectStr":
+      // A plain struct interpolated into a template (series 095) → JS
+      // `String(object)` === `"[object Object]"`. The `let _ = &(…)` evaluates an
+      // effectful `${…}` while borrowing (never moving) the value.
+      return `{ let _ = &(${emitExpr(expr.value)}); String::from("[object Object]") }`;
     case "jsMinMax":
       // Variadic `Math.min`/`Math.max` (series 083) → the `tslib` `min!`/`max!`
       // macro (the sanctioned Tm variadic route; NaN-propagating like JS).

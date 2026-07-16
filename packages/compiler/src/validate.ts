@@ -90,6 +90,11 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   // Expressions
   "Identifier",
   "Literal",
+  // A template literal `` `hi ${x}` `` (series 095) — lowered to a `strConcat`
+  // (`format!`) with JS-faithful interpolation. `TaggedTemplateExpression` is NOT
+  // listed, so a tagged template stays fail-loud.
+  "TemplateLiteral",
+  "TemplateElement",
   "BinaryExpression",
   "LogicalExpression",
   "UnaryExpression",

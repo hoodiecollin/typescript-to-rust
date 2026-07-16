@@ -8279,6 +8279,17 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         (expr as unknown as { expression: Expression }).expression,
         analysis,
       );
+    case "TemplateLiteral":
+      // A template literal `` `a${x}b` `` (series 095) → a `strConcat` (`format!`)
+      // with JS-faithful interpolation. A typed position reaches here via
+      // `lowerTyped`'s fallthrough (a template is a `String`).
+      return lowerTemplate(
+        expr as unknown as {
+          quasis: { value: { cooked?: string; raw: string } }[];
+          expressions: Expression[];
+        },
+        analysis,
+      );
     case "ConditionalExpression":
       // Ternary in an *untyped* value position (series 094) — `console.log(c ? … :
       // …)`, an operand. A typed context routes through `lowerTyped` instead (each
@@ -13294,6 +13305,96 @@ function synthPrimUnionForArms(
   const name = anonPrimUnionName(u);
   registerPrimitiveUnion(name, u, analysis);
   return analysis.unionEnums.get(name) ?? null;
+}
+
+/** Display-scalar RustType kinds — an array of these renders via `.join(",")`. */
+const TEMPLATE_SCALAR_ELEM = new Set<RustType["kind"]>([
+  "f64",
+  "i64",
+  "i128",
+  "usize",
+  "String",
+  "str",
+  "bool",
+]);
+
+/**
+ * Lower one `${…}` interpolation of a template literal (series 095) to a
+ * JS-faithful `String`-producing part (Collin's decision: match JS `String()` for
+ * arrays, objects, and optionals, not merely inherit `strConcat`'s cargo boundary).
+ * See docs/work/095-template-literals/design.md §"Interpolation classifier".
+ */
+function lowerTemplatePart(
+  expr: Expression,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  // 1. Optional → `tslib::truthy::fmt_opt` (`Some(v)`→`v`, `None`→`undefined`),
+  //    the same convention `console.log` uses for an `Option` (series 066).
+  if (optionExprType(expr, analysis)) {
+    return { kind: "optDisplay", value: lowerExpr(expr, analysis) };
+  }
+  const ty = receiverTypeOf(expr, analysis);
+  if (ty) {
+    // 2. Array → JS `Array.prototype.join(",")` over Display-scalar elements
+    //    (`${[1,2,3]}` → "1,2,3"); reuses the exact node `arr.join()` lowers to.
+    if (ty.kind === "vec") {
+      if (!TEMPLATE_SCALAR_ELEM.has(ty.elem.kind)) {
+        throw new UnsupportedError({
+          type: "template interpolation of a nested/object array — only arrays of string/number/boolean render (JS `.join(\",\")`)",
+        });
+      }
+      return {
+        kind: "call",
+        callee: "tslib::array::join",
+        args: [
+          { borrow: "ref", expr: lowerExpr(expr, analysis) },
+          { borrow: "owned", expr: { kind: "raw", text: '","' } },
+        ],
+      };
+    }
+    // 3. Plain data struct → JS `String(object)` === "[object Object]" (plain
+    //    structs derive only Clone+Debug, never Display). A union `enum` is also a
+    //    `struct` RustType but has NO field table — it falls through to (6) and
+    //    renders via its `Display` inner value (JS-faithful for `string|number`).
+    if (ty.kind === "struct" && analysis.structFields.has(ty.name)) {
+      return { kind: "jsObjectStr", value: lowerExpr(expr, analysis) };
+    }
+    // 5. Map/Set/fn-pointer → fail-loud (JS `[object Map]`/`[object Set]`/source
+    //    text — niche; a clean signal beats a guess or an opaque cargo error).
+    if (ty.kind === "hashmap" || ty.kind === "set" || ty.kind === "fnPtr") {
+      throw new UnsupportedError({
+        type: `template interpolation of a ${ty.kind} value`,
+      });
+    }
+  }
+  // 6. Scalar (String/number/bool), a union enum (Display inner), or an expression
+  //    the light typer can't resolve → a plain `Display` part (`format!("{}", x)`),
+  //    matching `strConcat`; a truly non-Display untyped part hits the cargo boundary.
+  return lowerExpr(expr, analysis);
+}
+
+/**
+ * Lower a template literal `` `a${x}b` `` (series 095) to the shipped `strConcat`
+ * node (series 080) → `format!("{}{}…", …)`. Cooked quasis become `string` parts
+ * (the emitter `JSON.stringify`s them, escaping `\n`/`"`/`\`/`{`); empty quasis
+ * (a leading/trailing/adjacent hole) are dropped. Each `${…}` is classified by
+ * `lowerTemplatePart` for its JS-faithful rendering.
+ */
+function lowerTemplate(
+  t: {
+    quasis: { value: { cooked?: string; raw: string } }[];
+    expressions: Expression[];
+  },
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const parts: HirExpr[] = [];
+  for (let i = 0; i < t.quasis.length; i += 1) {
+    const cooked = t.quasis[i]!.value.cooked ?? t.quasis[i]!.value.raw;
+    if (cooked.length > 0) parts.push({ kind: "string", value: cooked });
+    const hole = t.expressions[i];
+    if (hole) parts.push(lowerTemplatePart(hole, analysis));
+  }
+  return { kind: "strConcat", parts };
 }
 
 /**
