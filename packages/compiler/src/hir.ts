@@ -312,6 +312,12 @@ export type HirExpr =
       enumName: string;
       variant: string;
       fields: { name: string; value: HirExpr }[];
+      /**
+       * A **newtype** variant construction (series 093, stage 1d): `Shape::Circle(<expr>)`
+       * — the single positional payload (an inner struct value for D, a primitive for
+       * F/G). When set, `fields` is empty and the emitter renders `Path(<newtype>)`.
+       */
+      newtype?: HirExpr;
     }
   /**
    * A union-enum struct-variant **binding pattern** (series 093) used as a `match`
@@ -326,6 +332,12 @@ export type HirExpr =
       binds: string[];
       /** True for a struct variant (emit `{ … }`); false for a unit variant. */
       struct: boolean;
+      /**
+       * A **newtype** variant pattern (series 093, stage 1d): binds the single inner
+       * payload under this name (`Shape::Circle(sh)`), or `"_"` to ignore it. When
+       * set, `binds`/`struct` are unused.
+       */
+      newtypeBind?: string;
     }
   /**
    * `a?.b` → `a.map(|v| v.b)` → `Option<…>` (series 042d, single-level optional
@@ -1369,6 +1381,13 @@ export interface HirUnionVariant {
   name: string;
   /** Struct-variant fields; empty for a fieldless (literal / discriminant-only) variant. */
   fields: { name: string; ty: RustType }[];
+  /**
+   * A **newtype** variant's single inner type (series 093, stage 1d) — a
+   * named-interface member `Circle(Circle)` (D) or a primitive/mixed member
+   * `Str(String)` (F/G). When set, `fields` is empty and the variant emits
+   * `Name(<inner>)` instead of a struct/unit variant.
+   */
+  newtype?: RustType;
   /** The original source literal for `Display` round-trip; null for a non-literal variant. */
   display: string | null;
   /**
@@ -1393,6 +1412,13 @@ export interface HirUnionEnum {
    * `"kind"` for `{kind:"circle",…} | …`. Absent for a literal union.
    */
   discField?: string;
+  /**
+   * How a value of this union is narrowed at consumption (series 093, stage 1d/1e):
+   * `"typeof"` for a primitive/mixed union F (`typeof x === "string"`), `"in"` for a
+   * non-discriminated object union E (`"a" in x`). Absent for literal (match on the
+   * value) and discriminated (`discField`) unions.
+   */
+  narrow?: "typeof" | "in";
 }
 
 /**

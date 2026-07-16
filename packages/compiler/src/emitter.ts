@@ -540,6 +540,7 @@ function emitErrorEnum(e: HirErrorEnum): string {
 function emitUnionEnum(e: HirUnionEnum): string {
   const variants = e.variants
     .map((v) => {
+      if (v.newtype) return indent(`${rid(v.name)}(${emitType(v.newtype)}),`);
       if (v.fields.length === 0) return indent(`${rid(v.name)},`);
       const fields = v.fields
         .map((f) => `${rid(f.name)}: ${emitType(f.ty)}`)
@@ -1723,16 +1724,22 @@ function emitExpr(expr: HirExpr): string {
     }
     case "enumVariant": {
       // `AppError::Foo { f: v, … }` — a struct-variant construction (series 049).
+      const path = `${rid(expr.enumName)}::${rid(expr.variant)}`;
+      // A newtype variant (series 093, 1d): `Shape::Circle(<inner>)`.
+      if (expr.newtype) return `${path}(${emitExpr(expr.newtype)})`;
       const fields = expr.fields
         .map((f) => `${rid(f.name)}: ${emitExpr(f.value)}`)
         .join(", ");
-      const path = `${rid(expr.enumName)}::${rid(expr.variant)}`;
       return fields.length > 0 ? `${path} { ${fields} }` : path;
     }
     case "varPat": {
       // A union struct-variant binding pattern (series 093): `Shape::Circle { r, .. }`
       // binds the read fields (`..` for the rest); a unit variant is a bare path.
       const path = `${rid(expr.enumName)}::${rid(expr.variant)}`;
+      // A newtype variant (1d): `Shape::Circle(sh)` binds the inner payload (`_` ignores).
+      if (expr.newtypeBind !== undefined) {
+        return `${path}(${expr.newtypeBind === "_" ? "_" : rid(expr.newtypeBind)})`;
+      }
       if (!expr.struct) return path;
       const inner = [...expr.binds.map(rid), ".."].join(", ");
       return `${path} { ${inner} }`;
