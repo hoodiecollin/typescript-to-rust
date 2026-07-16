@@ -28,6 +28,7 @@ import type {
   HirClass,
   HirEnum,
   HirErrorEnum,
+  HirUnionEnum,
   HirExpr,
   HirFn,
   HirGenerator,
@@ -246,6 +247,8 @@ function emitItem(
       return emitErrorEnum(item);
     case "enum":
       return emitEnum(item);
+    case "unionEnum":
+      return emitUnionEnum(item);
     case "trait":
       return emitTrait(item);
     case "generator":
@@ -524,6 +527,47 @@ function emitErrorEnum(e: HirErrorEnum): string {
     `}`,
   ].join("\n");
   return [enumDecl, fromString, fromStr].join("\n\n");
+}
+
+/**
+ * A union-type enum (series 093) → its `enum` definition plus, for a **literal**
+ * union (`displayImpl`), an `impl Display` whose arms round-trip each fieldless
+ * variant to its original source literal. A struct variant (`Circle { r: f64 }`,
+ * later stages) renders its fields; a fieldless variant is a bare `North,`. The
+ * `Display` arg is a Rust string literal (`JSON.stringify`), so `{`/`"`/`\` in a
+ * source literal round-trip safely.
+ */
+function emitUnionEnum(e: HirUnionEnum): string {
+  const variants = e.variants
+    .map((v) => {
+      if (v.fields.length === 0) return indent(`${rid(v.name)},`);
+      const fields = v.fields
+        .map((f) => `${rid(f.name)}: ${emitType(f.ty)}`)
+        .join(", ");
+      return indent(`${rid(v.name)} { ${fields} },`);
+    })
+    .join("\n");
+  const decl = `#[derive(${e.derives.join(", ")})]\nenum ${rid(e.name)} {\n${variants}\n}`;
+  if (!e.displayImpl) return decl;
+  const arms = e.variants
+    .map((v) =>
+      indent(
+        indent(
+          `${rid(e.name)}::${rid(v.name)} => write!(f, "{}", ${JSON.stringify(v.display ?? "")}),`,
+        ),
+      ),
+    )
+    .join("\n");
+  const display = [
+    `impl std::fmt::Display for ${rid(e.name)} {`,
+    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {`,
+    `${INDENT}${INDENT}match self {`,
+    arms,
+    `${INDENT}${INDENT}}`,
+    `${INDENT}}`,
+    `}`,
+  ].join("\n");
+  return `${decl}\n\n${display}`;
 }
 
 /** A `class` → its `struct` definition, an `impl` block, and (if any) `Drop`. */
@@ -1684,6 +1728,14 @@ function emitExpr(expr: HirExpr): string {
         .join(", ");
       const path = `${rid(expr.enumName)}::${rid(expr.variant)}`;
       return fields.length > 0 ? `${path} { ${fields} }` : path;
+    }
+    case "varPat": {
+      // A union struct-variant binding pattern (series 093): `Shape::Circle { r, .. }`
+      // binds the read fields (`..` for the rest); a unit variant is a bare path.
+      const path = `${rid(expr.enumName)}::${rid(expr.variant)}`;
+      if (!expr.struct) return path;
+      const inner = [...expr.binds.map(rid), ".."].join(", ");
+      return `${path} { ${inner} }`;
     }
     case "call":
       return `${ridPath(expr.callee)}(${expr.args.map(emitArg).join(", ")})`;

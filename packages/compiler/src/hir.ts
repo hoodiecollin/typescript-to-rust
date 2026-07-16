@@ -314,6 +314,20 @@ export type HirExpr =
       fields: { name: string; value: HirExpr }[];
     }
   /**
+   * A union-enum struct-variant **binding pattern** (series 093) used as a `match`
+   * arm pattern: `Shape::Circle { r, .. }` (binds the read fields, `..` for the
+   * rest) or a bare `Shape::Reset` for a unit variant. Distinct from `enumVariant`
+   * (a *construction*); this is only ever a pattern.
+   */
+  | {
+      kind: "varPat";
+      enumName: string;
+      variant: string;
+      binds: string[];
+      /** True for a struct variant (emit `{ … }`); false for a unit variant. */
+      struct: boolean;
+    }
+  /**
    * `a?.b` → `a.map(|v| v.b)` → `Option<…>` (series 042d, single-level optional
    * member access). Deeper chains stay fail-loud.
    */
@@ -1342,6 +1356,46 @@ export interface HirEnum {
 }
 
 /**
+ * A union-type enum (series 093) — a TS union `A | B | …` lowered to a Rust
+ * `enum`. Distinct from the C-like {@link HirEnum} (source `enum` decls): variants
+ * may carry **struct fields** (a discriminated object union `{kind:"c",r} | …` →
+ * `Circle { r: f64 }`) and a **literal** union (`"n" | "s"`, `1 | 2`) emits a
+ * `Display` impl round-tripping each fieldless variant to its original source
+ * literal (`Dir::North => write!(f, "north")`). `name` is the `type` alias name,
+ * or `__anonymous_union_<hash>` for an inline/anonymous union (structurally deduped).
+ */
+export interface HirUnionVariant {
+  /** Sanitized Rust-ident variant name (e.g. `"has-dash"` → `HasDash`). */
+  name: string;
+  /** Struct-variant fields; empty for a fieldless (literal / discriminant-only) variant. */
+  fields: { name: string; ty: RustType }[];
+  /** The original source literal for `Display` round-trip; null for a non-literal variant. */
+  display: string | null;
+  /**
+   * The discriminant value this variant matches on (a discriminated object union,
+   * stage 1b) — the string form of `{kind:"circle"}`'s `"circle"`. Drives
+   * construction (an object literal → its variant) and `switch(x.kind)` matching.
+   * Absent for a literal union (its `display` already is the match key).
+   */
+  discValue?: string;
+}
+
+export interface HirUnionEnum {
+  kind: "unionEnum";
+  name: string;
+  variants: HirUnionVariant[];
+  /** Emit an `impl Display` round-tripping each variant to its `display` (literal unions). */
+  displayImpl: boolean;
+  /** The derive list (`["Clone", "Copy", "PartialEq"]` for a fieldless literal union). */
+  derives: string[];
+  /**
+   * The discriminant field name for a discriminated object union (stage 1b) —
+   * `"kind"` for `{kind:"circle",…} | …`. Absent for a literal union.
+   */
+  discField?: string;
+}
+
+/**
  * A generator state machine (series 052) — the resumable lowering for a
  * `function*` whose body has loops / branches / non-`yield` statements (the
  * straight-line finite-yield shape stays the 035 `vec![…].into_iter()` `HirFn`).
@@ -1426,6 +1480,7 @@ export type HirItem =
   | HirClass
   | HirErrorEnum
   | HirEnum
+  | HirUnionEnum
   | HirTrait
   | HirGenerator;
 
