@@ -215,6 +215,14 @@ export type HirExpr =
    */
   | { kind: "strConcat"; parts: HirExpr[] }
   /**
+   * A plain-data-struct value interpolated into a template literal (series 095) —
+   * `` `${point}` `` → the JS `String(object)` result `"[object Object]"`. Plain
+   * structs derive only `Clone`+`Debug` (never `Display`), so this is the JS-faithful
+   * render. Emitted as `{ let _ = &(<value>); String::from("[object Object]") }` so an
+   * effectful `${…}` still evaluates while the value is borrowed, never moved.
+   */
+  | { kind: "jsObjectStr"; value: HirExpr }
+  /**
    * Variadic `Math.min(...)` / `Math.max(...)` (series 083) → a `min!`/`max!`
    * **macro** (the sanctioned Tm variadic route). Binary min/max lowers to native
    * `a.min(b)` instead; this node only carries the 1-or-3+-arg variadic form.
