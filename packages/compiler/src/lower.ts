@@ -5198,6 +5198,20 @@ function lowerStatement(
       // `xs.forEach(p => …)` lowers to a `for` loop (a statement), not an expr.
       const forEach = tryForEach(e, analysis, scope);
       if (forEach) return forEach;
+      // A statement-position `x++;` (series 096) — including the async/generator
+      // batch for-update, which re-wraps the update as an `ExpressionStatement` —
+      // lowers to a bare `x += 1` (no block-temp), supporting field/index targets.
+      if (e.type === "UpdateExpression") {
+        return [
+          {
+            kind: "expr",
+            expr: lowerUpdateAssign(
+              e as unknown as { operator: string; argument: Expression },
+              analysis,
+            ),
+          },
+        ];
+      }
       return [{ kind: "expr", expr: lowerExpr(e, analysis) }];
     }
     case "IfStatement":
@@ -5424,7 +5438,21 @@ function lowerFor(
     : [];
 
   const update: HirStmt | null = stmt.update
-    ? { kind: "expr", expr: lowerExpr(stmt.update, analysis) }
+    ? {
+        kind: "expr",
+        // The `for` update slot is a statement position: `i++` → `i += 1` (series
+        // 096), not the value-position block-temp.
+        expr:
+          stmt.update.type === "UpdateExpression"
+            ? lowerUpdateAssign(
+                stmt.update as unknown as {
+                  operator: string;
+                  argument: Expression;
+                },
+                analysis,
+              )
+            : lowerExpr(stmt.update, analysis),
+      }
     : null;
 
   let body = lowerBlock(stmt.body, analysis, scope);
@@ -8287,6 +8315,19 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         expr as unknown as {
           quasis: { value: { cooked?: string; raw: string } }[];
           expressions: Expression[];
+        },
+        analysis,
+      );
+    case "UpdateExpression":
+      // `++`/`--` in a *value* position (series 096) — `const y = x++`, `arr[i++]`,
+      // `while (n-- > 0)`. Statement position is intercepted earlier (the
+      // `ExpressionStatement` case and the `for` update slot) and lowers to a bare
+      // `x += 1`; only value uses reach here → the block-temp `update` node.
+      return lowerUpdateValue(
+        expr as unknown as {
+          operator: string;
+          prefix: boolean;
+          argument: Expression;
         },
         analysis,
       );
@@ -13305,6 +13346,47 @@ function synthPrimUnionForArms(
   const name = anonPrimUnionName(u);
   registerPrimitiveUnion(name, u, analysis);
   return analysis.unionEnums.get(name) ?? null;
+}
+
+/**
+ * `++`/`--` in a **statement** position (series 096) → the `assign` node `arg += 1`
+ * / `arg -= 1`. Prefix/postfix collapse (the produced value is discarded). Supports
+ * every target the assign supports — local, field (`this.n++`), index (`a[i]++`).
+ */
+function lowerUpdateAssign(
+  u: { operator: string; argument: Expression },
+  analysis: ModuleAnalysis,
+): HirExpr {
+  return {
+    kind: "assign",
+    op: u.operator === "++" ? "+=" : "-=",
+    target: lowerExpr(u.argument, analysis),
+    value: { kind: "number", value: 1 },
+  };
+}
+
+/**
+ * `++`/`--` in a **value** position (series 096) → the block-temp `update` node
+ * (postfix old / prefix new). Restricted to an **identifier** target (no side-effect
+ * on the doubly-emitted place); a field/index target used as a value is fail-loud
+ * (statement position handles those). `step` embeds the `+= 1` assign so the numeric
+ * pass types its `1` as usize/f64 like any `i += 1`.
+ */
+function lowerUpdateValue(
+  u: { operator: string; prefix: boolean; argument: Expression },
+  analysis: ModuleAnalysis,
+): HirExpr {
+  if (u.argument.type !== "Identifier") {
+    throw new UnsupportedError({
+      type: "++/-- on a non-identifier target in a value position — assign in a statement",
+    });
+  }
+  return {
+    kind: "update",
+    prefix: u.prefix,
+    target: lowerExpr(u.argument, analysis),
+    step: lowerUpdateAssign(u, analysis),
+  };
 }
 
 /** Display-scalar RustType kinds — an array of these renders via `.join(",")`. */

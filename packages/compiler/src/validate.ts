@@ -102,6 +102,10 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   // `flatMap` ternary-callback shape (series 092) and fails loud elsewhere.
   "ConditionalExpression",
   "AssignmentExpression",
+  // `++`/`--` (series 096) — statement position → `x += 1`; value position →
+  // a block-temp (postfix old / prefix new). Value position on a non-identifier
+  // target is fail-loud in lowering.
+  "UpdateExpression",
   "CallExpression",
   "MemberExpression",
   "ArrayExpression",

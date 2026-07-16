@@ -1658,6 +1658,18 @@ function emitExpr(expr: HirExpr): string {
     }
     case "assign":
       return `${emitExpr(expr.target)} ${expr.op} ${emitExpr(expr.value)}`;
+    case "update": {
+      // `++`/`--` in a value position (series 096) → a block-temp. Postfix yields
+      // the old value (`{ let __upd = x; x += 1; __upd }`); prefix yields the new
+      // (`{ x += 1; x }`). `target` is an identifier (Copy), so emitting it twice
+      // has no side effect. Statement position never reaches here (it lowers to a
+      // bare `assign`).
+      const step = emitExpr(expr.step);
+      const target = emitExpr(expr.target);
+      return expr.prefix
+        ? `{ ${step}; ${target} }`
+        : `{ let __upd = ${target}; ${step}; __upd }`;
+    }
     case "array":
       return `vec![${expr.elements.map(emitExpr).join(", ")}]`;
     case "hashmap": {
