@@ -441,7 +441,7 @@ Supported: `if`, `while`, C-style `for`, `for-of`, `switch`, `break`, `continue`
 | `for-of` array-destructuring head that isn't exactly `[k, v]` plain identifiers | Not yet | `for-of destructuring must bind exactly `[k, v]` identifiers` |
 | Empty or stacked (fall-through) `switch` case | Not yet | `empty/stacked switch case (fall-through not supported)` |
 | Non-final `switch` case not ending in `break`/`return` (fall-through) | Not yet | `switch case falls through (needs break or return)` |
-| Any statement type not modeled (`LabeledStatement`, `EmptyStatement`, `DebuggerStatement`, bare nested `BlockStatement`, `with`, …) | Not yet | generic `Unsupported <node>` |
+| Any statement type not modeled (`EmptyStatement`, `DebuggerStatement`, `DoWhileStatement`, bare nested `BlockStatement`, `with`, …) | Not yet | generic `Unsupported <node>` |
 
 ---
 
@@ -890,7 +890,7 @@ Rejected wherever they appear, regardless of feature:
 
 ## The default-deny allowlist (parse gate)
 
-The validator carries a `MODELED` set of ~60 ESTree node types. **Any node whose
+The validator carries a `MODELED` set of ~80 ESTree node types. **Any node whose
 `type` is not in the set is rejected** with a generic `Unsupported <NodeType>`
 before lowering even runs — so a construct the compiler has never heard of can
 never slip through as silent wrong output. This is why the tables above end with
@@ -901,18 +901,22 @@ The currently-modeled node types are:
 `Program` · `VariableDeclaration` · `VariableDeclarator` · `FunctionDeclaration` ·
 `BlockStatement` · `ReturnStatement` · `ExpressionStatement` · `IfStatement` ·
 `WhileStatement` · `ForStatement` · `ForOfStatement` · `SwitchStatement` ·
-`SwitchCase` · `BreakStatement` · `ContinueStatement` · `ThrowStatement` ·
-`TryStatement` · `CatchClause` · `TSInterfaceDeclaration` · `TSInterfaceBody` ·
-`TSPropertySignature` · `ClassDeclaration` · `ClassBody` · `PropertyDefinition` ·
+`SwitchCase` · `BreakStatement` · `ContinueStatement` · `LabeledStatement` ·
+`ThrowStatement` · `TryStatement` · `CatchClause` · `TSInterfaceDeclaration` ·
+`TSInterfaceBody` · `TSPropertySignature` · `TSMethodSignature` ·
+`TSClassImplements` · `ClassDeclaration` · `ClassBody` · `PropertyDefinition` ·
 `MethodDefinition` · `FunctionExpression` · `TSParameterProperty` ·
 `TSEnumDeclaration` · `TSEnumBody` · `TSEnumMember` · `Identifier` · `Literal` ·
 `BinaryExpression` · `LogicalExpression` · `UnaryExpression` ·
-`AssignmentExpression` · `CallExpression` · `MemberExpression` · `ArrayExpression` ·
-`ObjectExpression` · `Property` · `ThisExpression` · `Super` · `NewExpression` ·
-`ParenthesizedExpression` · `AwaitExpression` · `ArrowFunctionExpression` ·
-`YieldExpression` · `ChainExpression` · `ArrayPattern` · `SpreadElement` ·
-`TSTypeAnnotation` · `TSTypeReference` · `TSTypeParameterInstantiation` ·
-`TSNumberKeyword` · `TSStringKeyword` · `TSBooleanKeyword` · `TSVoidKeyword` ·
+`ConditionalExpression` · `AssignmentExpression` · `CallExpression` ·
+`MemberExpression` · `ArrayExpression` · `ObjectExpression` · `Property` ·
+`ThisExpression` · `Super` · `NewExpression` · `ParenthesizedExpression` ·
+`AwaitExpression` · `ArrowFunctionExpression` · `YieldExpression` ·
+`TSNonNullExpression` · `AssignmentPattern` · `ChainExpression` · `ArrayPattern` ·
+`ObjectPattern` · `TSInterfaceHeritage` · `SpreadElement` · `TSTypeAnnotation` ·
+`TSTypeReference` · `TSTypeParameterInstantiation` · `TSTypeParameterDeclaration` ·
+`TSTypeParameter` · `TSIntersectionType` · `TSArrayType` · `TSNumberKeyword` ·
+`TSStringKeyword` · `TSBooleanKeyword` · `TSVoidKeyword` · `TSFunctionType` ·
 `TSUnionType` · `TSUndefinedKeyword` · `TSNullKeyword` · `TSAnyKeyword` ·
 `TSUnknownKeyword` · `ImportDeclaration` · `ImportSpecifier`.
 
@@ -920,13 +924,11 @@ The currently-modeled node types are:
 std-shim (series 084) — a guard rejects any other specifier and any unknown
 `@t2r/std` name. General module imports (050) remain unshipped.
 
-Notable node types **not** modeled (rejected at the gate): `LabeledStatement`,
-`EmptyStatement`, `DebuggerStatement`, `DoWhileStatement`, `WithStatement`,
-`ConditionalExpression`, `SequenceExpression`, `UpdateExpression`,
-`TaggedTemplateExpression`, `TemplateLiteral`, `TSAsExpression`,
-`TSNonNullExpression`, `ObjectPattern`, `RestElement`, `MetaProperty`,
-`ImportExpression`, `export` syntax, and every `import` *except* the modeled
-`@t2r/std` std-shim (series 084).
+Notable node types **not** modeled (rejected at the gate): `EmptyStatement`,
+`DebuggerStatement`, `DoWhileStatement`, `WithStatement`, `SequenceExpression`,
+`UpdateExpression`, `TaggedTemplateExpression`, `TemplateLiteral`,
+`TSAsExpression`, `RestElement`, `MetaProperty`, `ImportExpression`, `export`
+syntax, and every `import` *except* the modeled `@t2r/std` std-shim (series 084).
 
 ---
 
