@@ -388,6 +388,14 @@ export interface ModuleAnalysis {
    */
   litCounter: number;
   /**
+   * Anonymous structs synthesized for object-rest destructuring (series 097):
+   * `const { x, ...rest } = obj` synthesizes an `__anonymous_struct_<hash>`
+   * holding the remaining fields. Keyed by the FNV-1a canonical name so two
+   * structurally-identical rests dedupe to one definition (mirrors the 093
+   * anon-union registry). Drained into the module `items` before the refine pass.
+   */
+  restStructs: Map<string, HirStruct>;
+  /**
    * Class inheritance (series 053). Subclass name → its direct base class name
    * (from `decl.superClass`). Drives the synthetic `base: A` embed and the
    * multi-level `.base` hops for an inherited-field read.
@@ -1717,6 +1725,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     liftCounter: 0,
     litStructs: [],
     litCounter: 0,
+    restStructs: new Map(),
     superclass,
     inheritedFields,
     overrides,
