@@ -77,6 +77,10 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   "TSEnumDeclaration",
   "TSEnumBody",
   "TSEnumMember",
+  // A `type X = …` alias (series 093) — modeled for union RHSs (→ a union `enum`)
+  // and trivial synonyms; a non-union non-trivial RHS (tuple, mapped, …) is
+  // fail-loud in the `collectUnions` pre-pass, not here.
+  "TSTypeAliasDeclaration",
   // The `@t2r/std` std-shim import (series 084). ONLY an
   // `import { … } from "@t2r/std"` is modeled — a `checkStdShimImport` guard
   // below rejects any other specifier (general module imports are 050, unshipped)
@@ -149,6 +153,13 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   // union/keyword shapes are modeled; `lowerType` maps the nullable ones and
   // fails loud on a union of two real types.
   "TSUnionType",
+  // A literal type `"north"` / `0` — a union member (series 093). Its inner
+  // `Literal` node is already modeled.
+  "TSLiteralType",
+  // An inline object type `{kind:"circle",r:number}` — a discriminated-union member
+  // (series 093, 1b). Modeled at the gate; `lowerType` only handles it inside a
+  // union (else fail-loud). Its `TSPropertySignature` members are already modeled.
+  "TSTypeLiteral",
   "TSUndefinedKeyword",
   "TSNullKeyword",
   // `any`/`unknown` are modeled-but-forbidden — see FORBIDDEN_TYPES.

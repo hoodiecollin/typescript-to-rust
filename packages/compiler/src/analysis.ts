@@ -24,7 +24,7 @@
  */
 
 import type { FunctionDeclaration, Program, Statement, TSType } from "./ast";
-import type { HirFn, HirStruct, RustType } from "./hir";
+import type { HirFn, HirStruct, HirUnionEnum, RustType } from "./hir";
 import { type StdShimName, collectStdShimBindings } from "./std-shim";
 import type { TypeOracle } from "./type-oracle";
 
@@ -217,6 +217,14 @@ export interface ModuleAnalysis {
    * to a Rust path `E::Variant` (a variant), not a struct field read.
    */
   enums: Set<string>;
+  /**
+   * Union-type enums (series 093) — name → the synthesized {@link HirUnionEnum}.
+   * Populated by the `collectUnions` pre-pass over `type X = A | B` aliases and
+   * inline/anonymous unions; the names are also merged into `structs` so a
+   * reference resolves nominally. Drives construction coercion (a literal → its
+   * variant), `switch`/`===` variant matching, and the emitted enum items.
+   */
+  unionEnums: Map<string, HirUnionEnum>;
   /**
    * Scope keys (free-fn names + `SCRIPT_SCOPE`) that carry a leading `"use panic"`
    * directive (series 028a). In such a scope a `throw` becomes `panic!` and the
@@ -601,6 +609,15 @@ function isCopyType(annotation: unknown, enums: ReadonlySet<string>): boolean {
   if (t === "TSTypeReference" && isNode(inner)) {
     const name = (inner.typeName as { name?: string } | undefined)?.name;
     return typeof name === "string" && enums.has(name);
+  }
+  // A literal-union annotation `"a" | "b"` / `0 | 1` lowers to a fieldless `Copy`
+  // union `enum` (series 093), so an inline-union param passes by value.
+  if (t === "TSUnionType" && isNode(inner)) {
+    const members = (inner as { types?: { type: string }[] }).types ?? [];
+    const real = members.filter(
+      (m) => m.type !== "TSUndefinedKeyword" && m.type !== "TSNullKeyword",
+    );
+    return real.length > 0 && real.every((m) => m.type === "TSLiteralType");
   }
   return false;
 }
@@ -1583,6 +1600,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // Populated during lowering as `const r = rng(seed)` handle bindings are seen (089).
     rngBindings: new Set(),
     jsonValueBindings: new Set(),
+    // Union-type enums (093) — filled by the `collectUnions` pre-pass in `lower()`.
+    unionEnums: new Map(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
     structFields: new Map(),
     // Filled by `lower()` after `bindingTypes` (needs the resolved map/set types).
