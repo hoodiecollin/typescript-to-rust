@@ -107,6 +107,7 @@ import {
   classifyPrimitiveUnion,
   type DiscriminatedUnion,
   extractPropSignatures,
+  fnv1a,
   isMixedLiteralObjectUnion,
   isNullishMember,
   literalVariants,
@@ -398,6 +399,10 @@ export function lower(program: Program, source?: string): HirModule {
   // `struct <Interface>__litN` + its `impl I<Interface>` synthesized when an
   // object literal was typed as a behavioral interface during lowering.
   items.push(...analysis.litStructs);
+  // Anonymous object-rest structs (series 097): one `HirStruct` per distinct
+  // remaining-field shape (`__anonymous_struct_<hash>`), synthesized when a
+  // `const { x, ...rest } = obj` was lowered.
+  items.push(...analysis.restStructs.values());
 
   // Class inheritance (series 053b/c): synthesize the shared `trait IA` for each
   // extended base and rewire each participating class's `impl IA` (overrides +
@@ -5039,6 +5044,15 @@ function lowerParam(
     const ty: RustType = inner.kind === "option" ? inner : { kind: "option", inner };
     return { name: left.name, ty };
   }
+  // A rest parameter `(...args: T[])` is variadic — not modeled (series 097
+  // allowlists `RestElement` for binding destructures only; a rest *param* stays
+  // fail-loud). Guard here so it never falls through to the scalar-param path.
+  if ((p as { type?: string }).type === "RestElement") {
+    throw new UnsupportedError({
+      type: "rest parameter (`...args`)",
+      start: (p as { start?: number }).start,
+    });
+  }
   // A destructuring param `({x, y}: Point)` (series 058) → a Rust struct-pattern
   // param `Point { x, y }: Point`. Requires a *named struct* type to pattern
   // against; taken owned (the borrow inference is name-based and can't see it).
@@ -7148,6 +7162,86 @@ function isSpawnInit(e: Expression, analysis: ModuleAnalysis): boolean {
   );
 }
 
+/**
+ * Series 097 destructuring helpers. A newly-graduated destructure shape (array
+ * over a Vec variable, array/object rest) reads its source once per binding slot,
+ * so the source must be a plain identifier (side-effect-free, cheap to re-read). A
+ * non-identifier source (a call, a complex expression) is fail-loud — bind it to a
+ * variable first.
+ */
+function requireIdentifierSource(init: Expression, what: string): void {
+  if (init.type !== "Identifier") {
+    throw new UnsupportedError({
+      type: `${what} over a non-identifier source (bind the source to a variable first)`,
+    });
+  }
+}
+
+/** `<src>.get(i).cloned()` — an `Option<T>` element read (`None` on out-of-bounds). */
+function vecElemOption(src: HirExpr, index: number): HirExpr {
+  return {
+    kind: "method",
+    name: "cloned",
+    args: [],
+    receiver: {
+      kind: "method",
+      name: "get",
+      args: [{ kind: "raw", text: String(index) }],
+      receiver: src,
+    },
+  };
+}
+
+/**
+ * `<src>.get(from..).map(|__s| __s.to_vec()).unwrap_or_default()` — the array-rest
+ * `Vec<T>`. `get(from..)` is `None` when the source is shorter than the leading
+ * count, so `unwrap_or_default()` yields an empty vec (JS's `[]`). The closure
+ * lets Rust infer the element type (no rendered `T`).
+ */
+function vecRest(src: HirExpr, from: number): HirExpr {
+  return {
+    kind: "method",
+    name: "unwrap_or_default",
+    args: [],
+    receiver: {
+      kind: "method",
+      name: "map",
+      args: [{ kind: "raw", text: "|__s| __s.to_vec()" }],
+      receiver: {
+        kind: "method",
+        name: "get",
+        args: [{ kind: "raw", text: `${from}..` }],
+        receiver: src,
+      },
+    },
+  };
+}
+
+/**
+ * Synthesize (idempotently) an anonymous struct for an object-rest's remaining
+ * fields (series 097), modeled on the 093 anon-union precedent: an FNV-1a hash
+ * over the sorted `name:type` signature so two structurally-identical rests dedupe
+ * to one `__anonymous_struct_<hash>` definition. Fields keep source order. Registers
+ * the struct in `restStructs` (drained into items), `structs`, and `structFields`.
+ */
+function synthRestStruct(
+  restFields: { name: string; ty: RustType }[],
+  analysis: ModuleAnalysis,
+): string {
+  const sig = restFields
+    .map((f) => `${f.name}:${JSON.stringify(f.ty)}`)
+    .sort()
+    .join("|");
+  const name = `__anonymous_struct_${fnv1a(sig)}`;
+  if (!analysis.restStructs.has(name)) {
+    const fields = restFields.map((f) => ({ name: f.name, ty: f.ty }));
+    analysis.restStructs.set(name, { kind: "struct", name, fields });
+    analysis.structs.add(name);
+    analysis.structFields.set(name, fields);
+  }
+  return name;
+}
+
 function lowerVarDecl(
   decl: VariableDeclaration,
   analysis: ModuleAnalysis,
@@ -7165,13 +7259,39 @@ function lowerVarDecl(
     // but a panic in Rust — deferred to #42 / the `undefined` model).
     if ((d.id as { type: string }).type === "ArrayPattern") {
       const pat = d.id as unknown as {
-        elements?: ({ type: string; name?: string } | null)[];
+        elements?:
+          | ({ type: string; name?: string; argument?: { type: string; name?: string } } | null)[]
+          | undefined;
       };
       const elements = pat.elements ?? [];
-      const names = elements.map((el) => {
-        if (!el || el.type === "RestElement") {
+      // Parse leading identifier names + an optional trailing rest (series 097).
+      const leadingNames: string[] = [];
+      let restName: string | null = null;
+      for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        if (!el) {
           throw new UnsupportedError({
-            type: "array-destructuring rest element (`[a, ...rest]`)",
+            type: "array-destructuring hole (`[a, , b]`)",
+          });
+        }
+        if (el.type === "RestElement") {
+          if (i !== elements.length - 1) {
+            throw new UnsupportedError({
+              type: "array-destructuring rest element must be last",
+            });
+          }
+          const arg = el.argument;
+          if (!arg || arg.type !== "Identifier" || !arg.name) {
+            throw new UnsupportedError({
+              type: "array-destructuring rest must bind a plain identifier",
+            });
+          }
+          restName = arg.name;
+          break;
+        }
+        if (el.type === "AssignmentPattern") {
+          throw new UnsupportedError({
+            type: "array-destructuring default value (`[a = 0]`)",
           });
         }
         if (el.type !== "Identifier" || !el.name) {
@@ -7179,70 +7299,102 @@ function lowerVarDecl(
             type: "array-destructuring must bind plain identifiers",
           });
         }
-        return el.name;
-      });
-      // A generator source `const [a, b] = g()` (series 075, rides 067): a
-      // fixed-arity prefix pull off the generator's `impl Iterator` —
-      // `let (a, b) = { let mut __it = g(); (__it.next().unwrap(), …) };`. The arity
-      // is the pattern length (a rest element is already rejected above → #58).
-      if (isGeneratorCall(d.init, analysis)) {
-        return {
-          kind: "let",
-          name: names[0] as string,
-          mut: false,
-          ty: null,
-          init: {
-            kind: "genPrefixPull",
-            source: lowerExpr(d.init, analysis),
-            arity: names.length,
-          },
-          names,
-        };
+        leadingNames.push(el.name);
       }
-      const init = lowerExpr(d.init, analysis);
-      if (isJoinTuple(init)) {
-        return {
-          kind: "let",
-          name: names[0] as string,
-          mut: false,
-          ty: null,
-          init,
-          names,
-        };
-      }
-      // A fixed-arity array literal `[e0, e1]` typed as a tuple: bind
-      // `let (a, b) = (e0, e1);`, one element per pattern name (exact-arity).
-      if (d.init.type === "ArrayExpression") {
-        const lit = d.init as ArrayExpression;
-        const litElems = lit.elements;
-        if (litElems.some((e) => !e || e.type === "SpreadElement")) {
-          throw new UnsupportedError({
-            type: "array-destructuring over a spread/hole array literal",
-          });
+      const names = leadingNames;
+      // The three fixed-arity sources (generator prefix-pull, `join!` tuple, array
+      // literal) have a statically-known length, so no element can be missing —
+      // they bind plain (non-Option) values and reject a rest (series 067/051a/075).
+      if (restName === null) {
+        // A generator source `const [a, b] = g()` (series 075, rides 067): a
+        // fixed-arity prefix pull off the generator's `impl Iterator`.
+        if (isGeneratorCall(d.init, analysis)) {
+          return {
+            kind: "let",
+            name: names[0] as string,
+            mut: false,
+            ty: null,
+            init: {
+              kind: "genPrefixPull",
+              source: lowerExpr(d.init, analysis),
+              arity: names.length,
+            },
+            names,
+          };
         }
-        if (litElems.length !== names.length) {
-          throw new UnsupportedError({
-            type: "array-destructuring arity mismatch (pattern length ≠ tuple length)",
-          });
+        const init = lowerExpr(d.init, analysis);
+        if (isJoinTuple(init)) {
+          return {
+            kind: "let",
+            name: names[0] as string,
+            mut: false,
+            ty: null,
+            init,
+            names,
+          };
         }
-        return {
-          kind: "let",
-          name: names[0] as string,
-          mut: false,
-          ty: null,
-          init: {
-            kind: "tuple",
-            elems: litElems.map((e) => lowerExpr(e as Expression, analysis)),
-          },
-          names,
-        };
+        // A fixed-arity array literal `[e0, e1]` typed as a tuple: bind
+        // `let (a, b) = (e0, e1);`, one element per pattern name (exact-arity).
+        if (d.init.type === "ArrayExpression") {
+          const lit = d.init as ArrayExpression;
+          const litElems = lit.elements;
+          if (litElems.some((e) => !e || e.type === "SpreadElement")) {
+            throw new UnsupportedError({
+              type: "array-destructuring over a spread/hole array literal",
+            });
+          }
+          if (litElems.length !== names.length) {
+            throw new UnsupportedError({
+              type: "array-destructuring arity mismatch (pattern length ≠ tuple length)",
+            });
+          }
+          return {
+            kind: "let",
+            name: names[0] as string,
+            mut: false,
+            ty: null,
+            init: {
+              kind: "tuple",
+              elems: litElems.map((e) => lowerExpr(e as Expression, analysis)),
+            },
+            names,
+          };
+        }
       }
-      // Any other source (a `Vec`-typed identifier, a call, a member access):
-      // runtime length → an out-of-bounds slot is `undefined`, which the dialect
-      // has no model for yet. Fail-loud, pointing at #42 / series 066.
-      throw new UnsupportedError({
-        type: "array-destructuring over a Vec/Array source (out-of-bounds is `undefined`; deferred to #42)",
-      });
+      // A **Vec/Array variable** (series 097): runtime length → an out-of-bounds
+      // slot is `undefined`. Each leading name binds `Option<T>` via
+      // `src.get(i).cloned()` (`None` on OOB → JS `undefined`, the shipped 066
+      // model); a trailing rest binds the remaining `Vec<T>`. The source is read
+      // once per slot, so it must be a plain identifier.
+      requireIdentifierSource(d.init, "array-destructuring");
+      const srcTy = receiverTypeOf(d.init, analysis);
+      if (!srcTy || srcTy.kind !== "vec") {
+        throw new UnsupportedError({
+          type: "array-destructuring over a source whose element type is unknown",
+        });
+      }
+      const elem = srcTy.elem;
+      const arrSrc = d.init as Expression;
+      const slots: HirExpr[] = leadingNames.map((_, i) =>
+        vecElemOption(lowerExpr(arrSrc, analysis), i),
+      );
+      const allNames = [...leadingNames];
+      for (const n of leadingNames) {
+        analysis.bindingTypes.set(n, { kind: "option", inner: elem });
+      }
+      if (restName !== null) {
+        slots.push(vecRest(lowerExpr(arrSrc, analysis), leadingNames.length));
+        allNames.push(restName);
+        analysis.bindingTypes.set(restName, { kind: "vec", elem });
+      }
+      return {
+        kind: "let",
+        name: allNames[0] as string,
+        mut: false,
+        ty: null,
+        init: { kind: "tuple", elems: slots },
+        names: allNames,
+      };
     }
     // Object-pattern destructuring over a **named-struct source** (series 067):
     // `const { x, y } = point` → a Rust struct pattern `let Point { x, y } =
@@ -7320,40 +7472,119 @@ function lowerVarDecl(
           names: ["value", "done"],
         };
       }
+      const objPat = d.id as unknown as ObjectPattern;
+      const restProp = objPat.properties.find(
+        (p) => (p as { type?: string }).type === "RestElement",
+      );
+      const hasRest = !!restProp;
       const structName = sourceStructName(d.init, analysis);
       if (!structName) {
         throw new UnsupportedError({
-          type: "object-destructuring over a non-named-struct source",
+          type: hasRest
+            ? "object-rest over a non-named-struct source"
+            : "object-destructuring over a non-named-struct source",
         });
       }
-      const objPat = d.id as unknown as ObjectPattern;
-      const fields = objPat.properties.map((prop) => {
-        if ((prop as { type?: string }).type !== "Property") {
+      // Parse the kept (non-rest) properties as `{ key, value }` identifier pairs;
+      // shorthand → key === value, a renamed field → `{ x: px }` (series 097).
+      const kept: { key: string; value: string }[] = [];
+      for (const prop of objPat.properties) {
+        const pType = (prop as { type?: string }).type;
+        if (pType === "RestElement") continue;
+        if (pType !== "Property") {
           throw new UnsupportedError({
-            type: "object-destructuring rest element (`{ x, ...rest }`)",
+            type: "object-destructuring unsupported property",
           });
         }
-        const key = prop.key as unknown as { type: string; name?: string };
-        const value = prop.value as unknown as { type: string; name?: string };
-        if (
-          prop.computed ||
-          key.type !== "Identifier" ||
-          value.type !== "Identifier" ||
-          key.name !== value.name
-        ) {
+        const p = prop as unknown as {
+          computed?: boolean;
+          key: { type: string; name?: string };
+          value: { type: string; name?: string };
+        };
+        const key = p.key;
+        const value = p.value;
+        if (p.computed || key.type !== "Identifier" || !key.name) {
           throw new UnsupportedError({
-            type: "object-destructuring supports only shorthand field bindings (`{ x, y }`)",
+            type: "object-destructuring computed / non-identifier key",
           });
         }
-        return key.name as string;
+        if (value.type === "AssignmentPattern") {
+          throw new UnsupportedError({
+            type: "object-destructuring default value (`{ x = 1 }`)",
+          });
+        }
+        if (value.type === "ObjectPattern" || value.type === "ArrayPattern") {
+          throw new UnsupportedError({
+            type: "object-destructuring nested pattern (`{ p: { x } }`)",
+          });
+        }
+        if (value.type !== "Identifier" || !value.name) {
+          throw new UnsupportedError({
+            type: "object-destructuring supports only identifier field bindings",
+          });
+        }
+        kept.push({ key: key.name, value: value.name });
+      }
+      if (!hasRest) {
+        // Shorthand or renamed fields → a Rust struct pattern (renaming is native:
+        // `let P { x: px, y } = p;`). All-shorthand stays byte-for-byte with 067.
+        const fieldPats = kept.map((f) =>
+          f.key === f.value ? f.key : `${f.key}: ${f.value}`,
+        );
+        return {
+          kind: "let",
+          name: kept[0]?.value as string,
+          mut: false,
+          ty: null,
+          init: lowerExpr(d.init, analysis),
+          pat: `${structName} { ${fieldPats.join(", ")} }`,
+        };
+      }
+      // Object rest `const { x, ...rest } = obj` (series 097): the kept fields bind
+      // directly; `rest` binds a synthesized anonymous struct of the remaining
+      // source fields. Read once per slot → identifier source only.
+      requireIdentifierSource(d.init, "object-rest destructuring");
+      const restArg = (restProp as unknown as {
+        argument?: { type: string; name?: string };
+      }).argument;
+      if (!restArg || restArg.type !== "Identifier" || !restArg.name) {
+        throw new UnsupportedError({
+          type: "object-rest must bind a plain identifier",
+        });
+      }
+      const restName = restArg.name;
+      const srcFields = analysis.structFields.get(structName) ?? [];
+      const keptKeys = new Set(kept.map((f) => f.key));
+      const restFields = srcFields
+        .filter((f) => !keptKeys.has(f.name))
+        .map((f) => ({ name: f.name, ty: f.ty }));
+      const anonName = synthRestStruct(restFields, analysis);
+      const objSrc = d.init as Expression;
+      const objSlots: HirExpr[] = kept.map((f) => ({
+        kind: "field",
+        object: lowerExpr(objSrc, analysis),
+        name: f.key,
+      }));
+      objSlots.push({
+        kind: "structLit",
+        name: anonName,
+        fields: restFields.map((f) => ({
+          name: f.name,
+          value: { kind: "field", object: lowerExpr(objSrc, analysis), name: f.name },
+        })),
       });
+      for (const f of kept) {
+        const ft = srcFields.find((sf) => sf.name === f.key)?.ty;
+        if (ft) analysis.bindingTypes.set(f.value, ft);
+      }
+      analysis.bindingTypes.set(restName, { kind: "struct", name: anonName });
       return {
         kind: "let",
-        name: fields[0] as string,
+        name: [...kept.map((f) => f.value), restName][0] as string,
         mut: false,
         ty: null,
-        init: lowerExpr(d.init, analysis),
-        pat: `${structName} { ${fields.join(", ")} }`,
+        init: { kind: "tuple", elems: objSlots },
+        names: [...kept.map((f) => f.value), restName],
       };
     }
     // Any other non-identifier binding target is unsupported.

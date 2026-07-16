@@ -128,9 +128,12 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   // Array pattern — only `for (const [k, v] of Object.entries(m))` (series 043);
   // a plain `const [a, b] = …` destructuring binding stays fail-loud in lowering.
   "ArrayPattern",
-  // Object pattern — only a named-struct destructuring *param* `({x, y}: Point)`
-  // (series 058); a plain `const { x } = obj` binding stays fail-loud in lowering.
+  // Object pattern — a named-struct destructuring *param* `({x, y}: Point)`
+  // (series 058) and binding destructuring (series 067/097).
   "ObjectPattern",
+  // Rest element in a binding destructure — array `[a, ...tail]` / object
+  // `{ x, ...rest }` (series 097); the rest binding is lowered in `lowerVarDecl`.
+  "RestElement",
   // Interface inheritance `interface B extends A` (series 059) — the heritage
   // clause; `lowerInterface` flattens the base's fields and synthesizes a trait.
   "TSInterfaceHeritage",
