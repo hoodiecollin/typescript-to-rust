@@ -114,6 +114,7 @@ import {
   namedRef,
   type NamedDiscriminatedUnion,
   type NonDiscriminatedUnion,
+  type PrimMember,
   type PrimitiveUnion,
   type PropSig,
   sanitizeVariantIdent,
@@ -7594,6 +7595,24 @@ function lowerTyped(
   // 084): bare `JSON.parse` is fail-loud and redirects to `parseJson<T>` from
   // `@t2r/std`. We deliberately no longer special-case it here — the binding-init
   // gate (`redirectBareJson`) throws the redirect before this runs.
+  // Ternary in a typed context (series 094): lower each arm *against the same
+  // target `T`* so both coerce uniformly — `T = number` widens both arms to `f64`;
+  // `T = Shape` (a declared union) coerces `c ? circle : square` to its variants;
+  // `T = number | undefined` `Some`-wraps a present arm. Reuses every coercion
+  // below by recursing through `lowerTyped`.
+  if (expr.type === "ConditionalExpression") {
+    const c = expr as unknown as {
+      test: Expression;
+      consequent: Expression;
+      alternate: Expression;
+    };
+    return {
+      kind: "cond",
+      test: truthyCond(c.test, analysis),
+      conseq: lowerTyped(c.consequent, ty, analysis),
+      alt: lowerTyped(c.alternate, ty, analysis),
+    };
+  }
   // Option coercion (series 042): a plain value flowing into an `Option<T>` slot
   // is `Some`-wrapped (recursing against the inner type); `undefined`/`null`
   // becomes `None`. Centralized here so `let`-init, struct fields, and array
@@ -8258,6 +8277,19 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
     case "ChainExpression":
       return lowerChain(
         (expr as unknown as { expression: Expression }).expression,
+        analysis,
+      );
+    case "ConditionalExpression":
+      // Ternary in an *untyped* value position (series 094) — `console.log(c ? … :
+      // …)`, an operand. A typed context routes through `lowerTyped` instead (each
+      // arm coerces to the target). `lowerCond` handles homogeneous arms and the
+      // heterogeneous auto-synthesized-union policy.
+      return lowerCond(
+        expr as unknown as {
+          test: Expression;
+          consequent: Expression;
+          alternate: Expression;
+        },
         analysis,
       );
     case "BinaryExpression": {
@@ -10487,14 +10519,21 @@ function liftFlatMapTernaryBody(
       type: "cannot lift flatMap ternary callback: arms have different element types (a genuinely dynamic `U | V` stays fail-loud → #59)",
     });
   }
+  // Series 094: build the ternary through the shared expression-position `cond`
+  // node — `return (if cond { <Vec<U>> } else { <Vec<U>> })` — instead of a
+  // hand-rolled statement-`if` with `return`s. One ternary lowering, one emitter
+  // path. The arm normalization (scalar → `vec![x]`) above is unchanged.
   return {
     ret: { kind: "vec", elem: consequent.elem },
     fnBody: [
       {
-        kind: "if",
-        cond: truthyCond(cond.test, analysis),
-        conseq: [{ kind: "return", value: consequent.expr }],
-        alt: [{ kind: "return", value: alternate.expr }],
+        kind: "return",
+        value: {
+          kind: "cond",
+          test: truthyCond(cond.test, analysis),
+          conseq: consequent.expr,
+          alt: alternate.expr,
+        },
       },
     ],
   };
@@ -12976,7 +13015,11 @@ function registerPrimitiveUnion(
     kind: "unionEnum",
     name,
     variants,
-    displayImpl: false,
+    // An **all-primitive** union gets a `Display` (series 094) so its value prints
+    // directly (`console.log(x)` of a `string | number`, and the auto-synthesized
+    // ternary union) — every member (`f64`/`String`/`bool`) impls `Display`. A
+    // **mixed** union (a `nom` struct member has no `Display`) stays narrow-then-print.
+    displayImpl: prim.members.every((m) => m.tag !== "nom"),
     derives: ["Clone", "Debug", "PartialEq"],
     narrow: "typeof",
   });
@@ -13217,6 +13260,72 @@ function coerceScalarToUnion(
     variant: variant.name,
     fields: [],
     newtype: lowerTyped(expr, variant.newtype, analysis),
+  };
+}
+
+/**
+ * The `PrimMember` for a scalar `RustType`, or null for a non-primitive (a struct
+ * arm has no `Display`, so it can't seed a *printable* synthesized union — series
+ * 094).
+ */
+function primMemberOf(t: RustType): PrimMember | null {
+  if (t.kind === "String") return { tag: "str", name: "Str" };
+  if (t.kind === "f64") return { tag: "num", name: "Num" };
+  if (t.kind === "bool") return { tag: "bool", name: "Bool" };
+  return null;
+}
+
+/**
+ * Synthesize (idempotently) an anonymous primitive union from two heterogeneous
+ * ternary-arm scalar types in an *untyped* value position (series 094): `c ? 1 :
+ * "a"` → `__anonymous_union_<hash>` with `Num(f64)`/`Str(String)` newtype variants
+ * plus a `Display` (so the value prints, matching JS `String(v)`). Returns the
+ * registered enum, or null when either arm is a non-primitive (no `Display`).
+ */
+function synthPrimUnionForArms(
+  a: RustType,
+  b: RustType,
+  analysis: ModuleAnalysis,
+): HirUnionEnum | null {
+  const ma = primMemberOf(a);
+  const mb = primMemberOf(b);
+  if (!ma || !mb || ma.tag === mb.tag) return null;
+  const u: PrimitiveUnion = { members: [ma, mb] };
+  const name = anonPrimUnionName(u);
+  registerPrimitiveUnion(name, u, analysis);
+  return analysis.unionEnums.get(name) ?? null;
+}
+
+/**
+ * Lower a ternary in an *untyped* value position (series 094). Homogeneous arms (or
+ * arms the light typer can't resolve) become a bare `if`/`else` expression — rustc
+ * enforces arm-type unity. **Heterogeneous** arms auto-synthesize an anonymous
+ * primitive union (the chosen policy) and wrap each arm into its variant; a
+ * non-primitive arm with no type context is fail-loud (annotate a declared union).
+ */
+function lowerCond(
+  c: { test: Expression; consequent: Expression; alternate: Expression },
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const test = truthyCond(c.test, analysis);
+  const ta = inferScalarInner(c.consequent, analysis);
+  const tb = inferScalarInner(c.alternate, analysis);
+  if (ta && tb && !newtypeInnerMatches(ta, tb)) {
+    const info = synthPrimUnionForArms(ta, tb, analysis);
+    if (info) {
+      const conseq = coerceScalarToUnion(c.consequent, info, analysis);
+      const alt = coerceScalarToUnion(c.alternate, info, analysis);
+      if (conseq && alt) return { kind: "cond", test, conseq, alt };
+    }
+    throw new UnsupportedError({
+      type: "heterogeneous ternary in an untyped value position with a non-primitive arm — annotate the target with a declared union type (`const x: A | B = …`)",
+    });
+  }
+  return {
+    kind: "cond",
+    test,
+    conseq: lowerExpr(c.consequent, analysis),
+    alt: lowerExpr(c.alternate, analysis),
   };
 }
 

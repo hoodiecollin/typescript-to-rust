@@ -554,7 +554,13 @@ function emitUnionEnum(e: HirUnionEnum): string {
     .map((v) =>
       indent(
         indent(
-          `${rid(e.name)}::${rid(v.name)} => write!(f, "{}", ${JSON.stringify(v.display ?? "")}),`,
+          // A **newtype** variant (primitive/mixed union F, series 093/094): bind
+          // the inner and render it via `Display` — `Str(s)`/`Num(n)`/`Bool(b)` all
+          // print as JS `String(v)` does. A **fieldless** variant (literal union
+          // A/B) round-trips to its source literal.
+          v.newtype
+            ? `${rid(e.name)}::${rid(v.name)}(inner) => write!(f, "{}", inner),`
+            : `${rid(e.name)}::${rid(v.name)} => write!(f, "{}", ${JSON.stringify(v.display ?? "")}),`,
         ),
       ),
     )
@@ -1600,6 +1606,12 @@ function emitExpr(expr: HirExpr): string {
       }
       return `${left} ${op} ${emitOperand(expr.right, prec, "r")}`;
     }
+    case "cond":
+      // Ternary (series 094) → a parenthesized `if`/`else` expression. The parens
+      // are unconditional: Rust rejects a bare `if`-expr as a binary-operator
+      // operand (`1 + if c {…} else {…}` is a parse error). Each arm sits in the
+      // block tail position, so the block's value is the arm.
+      return `(if ${emitExpr(expr.test)} { ${emitExpr(expr.conseq)} } else { ${emitExpr(expr.alt)} })`;
     case "strConcat": {
       // String concatenation (series 080) → `format!("{}{}…", parts…)`. A string
       // literal part renders as a bare `&str` (`"x"`, not `"x".to_string()`); every
