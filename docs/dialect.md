@@ -598,7 +598,8 @@ The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
 | A `${…}` interpolation of a **nested/object-element array** (`` `${[[1],[2]]}` ``) | Not yet | `template interpolation of a nested/object array — only arrays of string/number/boolean render (JS .join(","))` |
 | A `${…}` interpolation of a **`Map`/`Set`/function** value | Not yet | `template interpolation of a <hashmap\|set\|fnPtr> value` |
 | A **tagged** template `` tag`…` `` (`TaggedTemplateExpression`) | Not yet | `TaggedTemplateExpression` |
-| `UpdateExpression` (`++`/`--`), `SequenceExpression` (comma), and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
+| A **value-position** `++`/`--` on a **non-identifier** target (`const y = a[i]++`, `use(obj.n++)`) | Not yet | `++/-- on a non-identifier target in a value position — assign in a statement` |
+| `SequenceExpression` (comma) and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
 
 **Ternary `cond ? a : b` (series 094)** → Rust's `if`/`else` **expression**
 (emitted parenthesized). The `test` uses the same truthiness path as an `if`
@@ -622,6 +623,17 @@ type: a **scalar** (string/number/bool) via `Display`; an **array** of scalars v
 array, a `Map`/`Set`/function interpolation, and a tagged template. Numbers inside
 `${…}` use the same `format!("{}")` path as `+` concat (not `to_js_string`), so the
 rare `1e21`/`Infinity` divergences are inherited from series 080, not new here.
+
+**`++` / `--` (`UpdateExpression`, series 096)** → Rust `+= 1` / `-= 1` (Rust has no
+`++`/`--`). In **statement position** (a standalone `x++;`, the `for` update slot,
+a while/if-body) it lowers to a bare `x += 1` and supports every target — local,
+field (`this.n++`), index (`a[i]++`); prefix and postfix are equivalent there. In a
+**value position** it is a block-temp with JS semantics: postfix `x++` yields the
+**old** value, prefix `++x` the **new** (`const y = x++`, `while (n-- > 0)`,
+`return x++`, `arr[i++]`). The increment on an integer-promoted counter stays an
+integer (`arr[i++]` keeps `i: usize`, no `1.0`). Value position is restricted to an
+**identifier** target — a field/index target used *as a value* is the fail-loud row
+above (statement position handles those targets).
 
 ---
 
@@ -954,7 +966,7 @@ The currently-modeled node types are:
 `TSEnumDeclaration` · `TSEnumBody` · `TSEnumMember` · `Identifier` · `Literal` ·
 `TemplateLiteral` · `TemplateElement` ·
 `BinaryExpression` · `LogicalExpression` · `UnaryExpression` ·
-`ConditionalExpression` · `AssignmentExpression` · `CallExpression` ·
+`ConditionalExpression` · `AssignmentExpression` · `UpdateExpression` · `CallExpression` ·
 `MemberExpression` · `ArrayExpression` · `ObjectExpression` · `Property` ·
 `ThisExpression` · `Super` · `NewExpression` · `ParenthesizedExpression` ·
 `AwaitExpression` · `ArrowFunctionExpression` · `YieldExpression` ·
