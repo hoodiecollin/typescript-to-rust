@@ -69,14 +69,16 @@ describe("067 object-pattern over a named struct", () => {
     expect(compile(src)).toContain("let Point { x, y } = point;");
   });
 
-  test("BD5 (fail-loud) a renamed field is unsupported (shorthand-only)", () => {
+  test("BD5 (graduated in 097) a renamed field now compiles", () => {
+    // 097 emits a native Rust struct pattern `Point { x: px, y }`. See DS7.
     const src = `${POINT}const point: Point = { x: 1, y: 2 };\nconst { x: px, y } = point;\nconsole.log(px, y);`;
-    expect(() => compile(src)).toThrow(/shorthand|renamed|destructuring/i);
+    expect(compile(src)).toContain("Point { x: px, y }");
   });
 
-  test("BD6 (fail-loud) a rest element is unsupported", () => {
-    const src = `${POINT}const point: Point = { x: 1, y: 2 };\nconst { x, ...rest } = point;\nconsole.log(x);`;
-    expect(() => compile(src)).toThrow(/rest|destructuring/i);
+  test("BD6 (graduated in 097) an object rest now compiles", () => {
+    // 097 synthesizes an anonymous struct for the rest fields. See DS13.
+    const src = `${POINT}const point: Point = { x: 1, y: 2 };\nconst { x, ...rest } = point;\nconsole.log(x, rest.y);`;
+    expect(compile(src)).toContain("__anonymous_struct_");
   });
 });
 
@@ -86,9 +88,11 @@ describe("067 array-pattern over a fixed-arity tuple", () => {
     expect(compile(src)).toContain("let (a, b) = (10");
   });
 
-  test("BD10 (fail-loud) an array-pattern over a Vec identifier points at #42", () => {
+  test("BD10 (graduated in 097) an array-pattern over a Vec identifier now compiles", () => {
+    // Series 097 graduates the #42 residual: elements bind `Option<T>` (OOB →
+    // `None`/`undefined`). See destructuring.test.ts DS1–DS6.
     const src = `const arr: Array<number> = [1, 2, 3];\nconst [a, b] = arr;\nconsole.log(a, b);`;
-    expect(() => compile(src)).toThrow(/42|Vec|undefined|out-of-bounds|destructuring/i);
+    expect(() => compile(src)).not.toThrow();
   });
 
   test("BD11 (fail-loud) an arity mismatch is unsupported", () => {

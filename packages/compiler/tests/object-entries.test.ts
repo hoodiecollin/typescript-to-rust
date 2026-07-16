@@ -7,7 +7,6 @@
 
 import { expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
-import { UnsupportedError } from "../src/emitter";
 
 const REC3 = `const m: Record<string, number> = { "a": 1, "b": 2, "c": 3 };`;
 
@@ -49,8 +48,9 @@ test("ENT5 the entries value is the iter().map().collect() chain", () => {
   ).toContain(".iter().map(|(k, v)| (k.clone(), v.clone())).collect");
 });
 
-test("ENT6 a plain array-destructuring binding is fail-loud", () => {
+test("ENT6 a plain array-destructuring binding now compiles (graduated in 097)", () => {
+  // Series 097 graduates array-over-Vec: elements bind `Option<T>` (OOB → `None`).
   expect(() =>
-    compile(`const xs: Array<number> = [1, 2];\nconst [a, b] = xs;`),
-  ).toThrow(UnsupportedError);
+    compile(`const xs: Array<number> = [1, 2];\nconst [a, b] = xs;\nconsole.log(a, b);`),
+  ).not.toThrow();
 });

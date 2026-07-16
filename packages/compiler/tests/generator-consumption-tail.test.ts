@@ -175,7 +175,9 @@ for (const x of outer()) { console.log(x); }`;
 });
 
 test("GD2 fail-loud: rest element `const [a, ...rest] = g()`", () => {
+  // Series 097 allows array rest over a Vec *variable*, not over a generator call
+  // (a non-identifier source) — still fail-loud, bind it to a variable first.
   const src = `function* g(): Generator<number> { yield 1; yield 2; yield 3; }
 const [a, ...rest] = g();`;
-  rejects(src, /RestElement|rest element/);
+  rejects(src, /rest|non-identifier|destructuring/i);
 });
