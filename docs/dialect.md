@@ -594,8 +594,19 @@ The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
 |---------|------|---------|
 | Logical operator other than `&&`, `\|\|`, `??` | Not yet | `logical operator '<op>'` |
 | Unary operator other than `-`, `!` (i.e. `+`, `~`, `typeof`, `void`, `delete`) | Not yet | `unary operator '<op>'` |
-| `ConditionalExpression` (`?:`) **outside** a `flatMap` ternary callback (series 092 lifts only that shape) | Not yet | generic `Unsupported <node>` (at lowering) |
+| A **heterogeneous** ternary (arms of different type) in an *untyped* value position with a **non-primitive** (struct/object) arm (`c ? pt : "a"`) | Not yet | `heterogeneous ternary in an untyped value position with a non-primitive arm — annotate the target with a declared union type` |
 | `UpdateExpression` (`++`/`--`), `SequenceExpression` (comma), tagged/template literals, and any other unmodeled expression | Not yet | generic `Unsupported <node>` |
+
+**Ternary `cond ? a : b` (series 094)** → Rust's `if`/`else` **expression**
+(emitted parenthesized). The `test` uses the same truthiness path as an `if`
+statement (native `bool`, else `is_truthy`). In a **typed context** (annotated
+`const`/return/param/field/element) each arm coerces to the target `T` — so
+homogeneous arms, a declared-union target (`const x: A | B = c ? … : …`), and an
+`Option` target all work. In an **untyped** position (`console.log(c ? … : …)`),
+homogeneous arms emit a bare `if`/`else`; **heterogeneous primitive** arms
+auto-synthesize a printable anonymous union (`c ? 1 : "a"` → `__anonymous_union_<hash>`,
+reusing 093 case F, now with a `Display`). The one residual is the fail-loud row
+above (a non-primitive arm with no type context).
 
 ---
 
