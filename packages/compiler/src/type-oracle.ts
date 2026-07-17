@@ -24,12 +24,31 @@
  * (Node resolution → the workspace package), keeping types via `import type`.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { basename, dirname, join } from "node:path";
 import type * as TS from "typescript";
+import { DialectError } from "./errors";
 import type { RustType } from "./hir";
 
 const require = createRequire(import.meta.url);
 const ts: typeof TS = require("typescript");
+
+/**
+ * The directory the v5.9.3 `typescript` package's `lib.*.d.ts` files live in
+ * (beside `typescript.js`). Used by the lazy lib-backed program (series 099) to
+ * serve the built-in libs so inference resolves *through* built-in signatures.
+ */
+const TS_LIB_DIR = dirname(require.resolve("typescript"));
+
+/**
+ * The pinned lib set (series 099-A, DECIDED): the `es2022` bundle, matching the
+ * built-in surface the dialect already accepts (`Object.entries`, `.at`, `.map`,
+ * template machinery, `Map`/`Set`/`Promise`). `es2022` transitively references
+ * the whole `es5…es2021` chain, so the inferable surface is explicit and
+ * deterministic — not the tsc default.
+ */
+const ORACLE_LIB = "lib.es2022.d.ts";
 
 /** The synthetic in-memory file name the oracle's Program is built over. */
 const ORACLE_FILE = "__ttr_type_oracle__.ts";
@@ -52,6 +71,28 @@ export interface TypeOracle {
    * anything unmodeled (fail-loud fallback preserved).
    */
   typeAtSpan_rustType(start: number, end: number): RustType | null;
+  /**
+   * The inferred **binding** `RustType` at an oxc span (an initializer's span),
+   * resolved *through* built-in signatures via the lazy lib-backed program
+   * (series 099), then re-validated to a modeled `RustType`. Returns null for
+   * anything outside the accepted surface (tuple, function type, anonymous
+   * object, wide non-nullish union, `bigint`/`symbol`, an unresolved node) — the
+   * caller then keeps its existing fail-loud "without a type annotation" throw.
+   * Throws `DialectError` for an inferred `any`/`unknown` (forbidden, never
+   * silently accepted). A `number` maps to `f64` (value position) so `numeric.ts`
+   * refines it identically to an annotated `: number`. First call pays the
+   * one-time lib-load cost; later calls reuse the cached lib program + checker.
+   */
+  inferredRustType(start: number, end: number): RustType | null;
+  /**
+   * The inferred **return** `RustType` for the function/method/getter node at an
+   * oxc span (series 099). Resolves the tsc signature at the node and takes
+   * `getReturnTypeOfSignature` (robust to multi-return / implicit `undefined`),
+   * unwraps an inferred `Promise<T>` to `T` (async returns), then re-validates
+   * exactly like `inferredRustType`. Null ⇒ caller keeps its existing
+   * "without a return type annotation" throw.
+   */
+  inferredReturnRustType(start: number, end: number): RustType | null;
 }
 
 /**
@@ -164,5 +205,124 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
     return rustTypeOf(t, false);
   }
 
-  return { typeAtSpan, collectionAtSpan, typeAtSpan_rustType };
+  // ── series 099: lazy lib-backed inference tier ────────────────────────────
+  //
+  // The `noLib` program above resolves explicit annotations at ~1 ms. Inferring
+  // *through* built-in method signatures (`.map`, template machinery, `.find` →
+  // `T | undefined`) needs `lib.d.ts` loaded, which is the expensive part. So a
+  // SECOND, lib-enabled program is built lazily on the first inference query and
+  // memoized — a fully-annotated module never triggers it (zero perf change).
+
+  /** Memoized lib-backed `{ sf, checker }`, built on first inference query. */
+  let libTier: { sf: TS.SourceFile; checker: TS.TypeChecker } | null = null;
+
+  /** Resolve a requested lib file name to its on-disk path in `TS_LIB_DIR`. */
+  function libPath(f: string): string | undefined {
+    const cand = join(TS_LIB_DIR, basename(f));
+    return existsSync(cand) ? cand : undefined;
+  }
+
+  function libProgram(): { sf: TS.SourceFile; checker: TS.TypeChecker } {
+    if (libTier) return libTier;
+    const libSf = ts.createSourceFile(ORACLE_FILE, source, ts.ScriptTarget.Latest, true);
+    const cache = new Map<string, TS.SourceFile>();
+    const libHost: TS.CompilerHost = {
+      getSourceFile: (f, langVersion) => {
+        if (f === ORACLE_FILE) return libSf;
+        const cached = cache.get(f);
+        if (cached) return cached;
+        const full = libPath(f);
+        if (!full) return undefined;
+        const text = readFileSync(full, "utf8");
+        const sfLib = ts.createSourceFile(f, text, langVersion, true);
+        cache.set(f, sfLib);
+        return sfLib;
+      },
+      getDefaultLibFileName: () => ORACLE_LIB,
+      writeFile: () => {},
+      getCurrentDirectory: () => "",
+      getDirectories: () => [],
+      fileExists: (f) => f === ORACLE_FILE || libPath(f) !== undefined,
+      readFile: (f) =>
+        f === ORACLE_FILE ? source : (libPath(f) ? readFileSync(libPath(f)!, "utf8") : undefined),
+      getCanonicalFileName: (f) => f,
+      useCaseSensitiveFileNames: () => true,
+      getNewLine: () => "\n",
+    };
+    const libProg = ts.createProgram(
+      [ORACLE_FILE],
+      // `strict` (→ `strictNullChecks`) is REQUIRED: without it `undefined` is
+      // absorbed into every type, so a `.find(…)` → `T | undefined` collapses to
+      // `T` and the nullish-union → `option` mapping never fires (INF5/INF8).
+      {
+        noLib: false,
+        lib: [ORACLE_LIB],
+        target: ts.ScriptTarget.ES2022,
+        types: [],
+        strict: true,
+      },
+      libHost,
+    );
+    libTier = { sf: libSf, checker: libProg.getTypeChecker() };
+    return libTier;
+  }
+
+  /**
+   * The re-validation gate (series 099 §2): map an inferred value-position `Type`
+   * to a modeled `RustType`, or null (⇒ caller fails loud). Throws `DialectError`
+   * on an inferred `any`/`unknown` (forbidden — never silently accepted). A
+   * nullish union `T | undefined`/`T | null` maps to `option<inner>`; a wide
+   * non-nullish union stays null (093 unions are name-driven — inferring an
+   * anonymous enum from a join is exactly the guess fail-loud forbids).
+   */
+  function inferValueType(t: TS.Type, chk: TS.TypeChecker): RustType | null {
+    if (t.flags & ts.TypeFlags.Any) throw new DialectError("`any` type");
+    if (t.flags & ts.TypeFlags.Unknown) throw new DialectError("`unknown` type");
+    if (t.isUnion()) {
+      const nullish = ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void;
+      const hasNullish = t.types.some((m) => m.flags & nullish);
+      if (hasNullish) {
+        const nn = chk.getNonNullableType(t);
+        // Accept only when stripping the nullish members collapses to a single
+        // modeled type — else it is a wide union wrapped in `| undefined`.
+        if (!nn.isUnion()) {
+          const inner = inferValueType(nn, chk);
+          return inner ? { kind: "option", inner } : null;
+        }
+      }
+      return null;
+    }
+    return rustTypeOf(t, false);
+  }
+
+  function inferredRustType(start: number, end: number): RustType | null {
+    const { sf: libSf, checker: chk } = libProgram();
+    const node = findBySpan(libSf, start, end);
+    if (!node) return null;
+    return inferValueType(chk.getTypeAtLocation(node), chk);
+  }
+
+  function inferredReturnRustType(start: number, end: number): RustType | null {
+    const { sf: libSf, checker: chk } = libProgram();
+    const node = findBySpan(libSf, start, end);
+    if (!node) return null;
+    const sig = chk.getSignatureFromDeclaration(node as TS.SignatureDeclaration);
+    if (!sig) return null;
+    let ret = chk.getReturnTypeOfSignature(sig);
+    // async → `Promise<T>`: unwrap to `T` (the emitter wraps the async return).
+    if ((ret.aliasSymbol?.name ?? ret.symbol?.name) === "Promise") {
+      const inner = argsOf(ret)[0];
+      if (!inner) return null;
+      ret = inner;
+    }
+    return inferValueType(ret, chk);
+  }
+
+  return {
+    typeAtSpan,
+    collectionAtSpan,
+    typeAtSpan_rustType,
+    inferredRustType,
+    inferredReturnRustType,
+  };
 }
