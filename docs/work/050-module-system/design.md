@@ -42,9 +42,20 @@ baseline (kept as the floor / fast path).
   a signature-reachable private type → `pub(crate)` (the `private_interfaces` rule);
   purely local → `priv`. Finer `pub(super)` / `pub(in path)` tiers are a **follow-on**.
 - **Axis 4 — namespace/use: DECIDED = support `namespace`→nested `mod`** (coalescing
-  reopened namespaces) **+ grouped/aliased `use` synthesis**; keep **user-facing
-  glob/namespace imports** (`import * as ns`) **fail-loud**; allow **generated** globs
+  reopened namespaces) **+ grouped/aliased `use` synthesis**; allow **generated** globs
   only inside sanctioned facades (Axis 3).
+  - **RE-DECIDED 2026-07-17 (Collin):** **namespace imports** (`import * as ns from
+    "./n"`) are now **supported** — they map to a Rust **module alias** (`use crate::n
+    as ns;`) with member access `ns.x` routed to the `n::x` **path** (the same
+    treatment as enum-member `Color.Red` → `Color::Red`). The original "glob capture
+    risk" rationale was **mistaken**: TS `import * as ns` is *qualified* access, not an
+    unqualified glob, so there is no capture. **Default import/export** are likewise
+    **supported** via a reserved symbol `__default_export`: `export default <fn/class>`
+    emits a named item `__default_export` (anonymous form) or the named decl plus a
+    `pub(crate) use self::foo as __default_export;` alias (named form); `import def from
+    "./d"` binds it via `use crate::d::__default_export as def;`. An anonymous **value**
+    default (`export default 42/{}`) has no named Rust analog and stays fail-loud. Both
+    land in slice **050d**.
 - **Axis 5 — encapsulation creativity: DECIDED = ship prelude-module generation.**
   `#[cfg(test)]` test-file mapping and sealed traits are **separately-scoped future
   series** (noted, not designed here — see "Conditional compilation" below).
@@ -357,11 +368,14 @@ lands anything touching the directive surface.
 
 - **Forbidden:** `export default` (no named Rust analog); a re-export (`export * from`
   / `export { x } from "./y"`) in a **mixed** (non-pure-barrel) file (ambiguous).
-- **Not yet:** default imports; **user-facing** namespace imports (`import * as ns` —
-  glob capture risk); dynamic `import()`; bare/package imports; top-level statements in
-  an imported module; namespace+value declaration merging.
+- **Not yet:** dynamic `import()`; bare/package imports; top-level statements in
+  an imported module; namespace+value declaration merging; an **anonymous value**
+  default export (`export default 42/{}/() =>` — no named Rust analog).
 - **Lifted (no longer residuals):** **renamed exports** (`export { x as y }` — now a
-  `pub use … as y;`) and **pure re-export barrels** (now `pub use` facades, Axis 3).
+  `pub use … as y;`) and **pure re-export barrels** (now `pub use` facades, Axis 3);
+  **namespace imports** (`import * as ns` — now a `use crate::n as ns;` module alias)
+  and **default import/export of a fn/class** (via the reserved `__default_export`
+  symbol) — both re-decided 2026-07-17 (Axis 4 note above), land in 050d.
 - **Accepted (not a residual):** import cycles — sibling modules in one crate are
   mutually visible.
 - The file-prologue directive-scope question is deferred (above). Multi-**crate**
