@@ -20,6 +20,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # to confirm green).
 tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# RegExp fidelity (series 101, epic #56 / Tier-3): the `regex` crate is the
+# standard finite-automaton engine (linear-time; no backrefs/lookaround — those
+# fail loud at transpile time). Backs `regex::Regex`'s JS-shaped wrappers.
+regex = "1"
 
 [dev-dependencies]
 # for the JSON key-order parity test

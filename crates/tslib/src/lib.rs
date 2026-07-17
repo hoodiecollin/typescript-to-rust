@@ -23,6 +23,7 @@ pub mod io;
 pub mod json;
 pub mod number;
 pub mod ops;
+pub mod regex;
 pub mod rng;
 pub mod string;
 pub mod truthy;
