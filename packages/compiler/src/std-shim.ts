@@ -49,7 +49,11 @@ export type StdShimName =
   | "fsAsync"
   | "http"
   | "Writer"
-  | "HttpResponse";
+  | "HttpResponse"
+  // Date/time surface (series 102, epic #56). `clock(epochMs)` is the seeded,
+  // differential-stable replacement for ambient `Date.now()`/`new Date()` (the
+  // `Date` analog of `rng(seed)`) — a `tslib::date::Clock` handle.
+  | "clock";
 
 /** The set of exported intrinsic names, for membership + "not exported" errors. */
 export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
@@ -80,6 +84,8 @@ export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
   "http",
   "Writer",
   "HttpResponse",
+  // Date/time (series 102)
+  "clock",
 ]);
 
 /**

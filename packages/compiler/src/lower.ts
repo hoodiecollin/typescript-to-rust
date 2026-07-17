@@ -7841,7 +7841,13 @@ function lowerVarDecl(
       // A regex value or a regex `match`/`exec`/`split`/`test`/`search`/`replace`
       // result (series 101) is typed by construction (the `tslib::regex` return);
       // Rust infers it, so no annotation is required (like `.find`/`.at`).
-      !isRegexInit(d.init, analysis)
+      !isRegexInit(d.init, analysis) &&
+      // A `Date` (`new Date(...)`, a `clock(...).date()` bridge) or a `clock(...)`
+      // handle (series 102) is typed by construction (`tslib::date::Date`/`Clock`);
+      // Rust infers it, so no annotation is required. (A no-arg / loose-string
+      // `new Date` is still fail-loud — the throw fires when `init` lowers below.)
+      !isDateExpr(d.init, analysis) &&
+      !isClockExpr(d.init, analysis)
     ) {
       // Series 099 inference tier: before failing loud, ask the lib-backed oracle
       // to infer the initializer's type *through* built-in signatures and
@@ -7980,6 +7986,23 @@ function lowerVarDecl(
         }
       }
     }
+    // Track a `Date` binding (series 102): `const d = new Date(...)` or a
+    // `const d = c.date()` clock bridge — a `tslib::date::Date`. A later
+    // `.getTime()`/`.getUTCHours()`/`.toISOString()`/… routes to the Date accessor
+    // surface. Recorded before those reads (statements lower top-to-bottom).
+    if (d.id.type === "Identifier" && isDateExpr(d.init, analysis)) {
+      analysis.dateBindings.add((d.id as Identifier).name);
+    }
+    // Track a `clock(seed)` handle binding (series 102) — the lowered init is a
+    // `tslib::date::Clock::new(...)` call, so `.now()/.date()/.tick(ms)` route to
+    // the handle surface. Emitted `let mut` below (`tick` takes `&mut self`).
+    if (
+      init.kind === "call" &&
+      init.callee === "tslib::date::Clock::new" &&
+      d.id.type === "Identifier"
+    ) {
+      analysis.clockBindings.add((d.id as Identifier).name);
+    }
     // Record the `RustType` of an I/O intrinsic binding (series 100) so a later
     // method call resolves by type — e.g. `.join(",")` on a `Vec<String>` from
     // `readDir`/`args`, or a `?? d` on the `Option<String>` from `env`/`readLine`.
@@ -8063,6 +8086,10 @@ function lowerVarDecl(
       init.kind === "call" &&
       (init.callee === "tslib::io::stdout" ||
         init.callee === "tslib::io::stderr");
+    // A `clock(epochMs)` handle (series 102) is always `let mut` — its `tick(ms)`
+    // method takes `&mut self` (advances the internal epoch-ms). Mirrors `rng`.
+    const clockHandle =
+      init.kind === "call" && init.callee === "tslib::date::Clock::new";
     return {
       kind: "let",
       name: d.id.name,
@@ -8070,7 +8097,8 @@ function lowerVarDecl(
         (mutable?.has(d.id.name) ?? false) ||
         steppedInstance ||
         rngHandle ||
-        writerHandle,
+        writerHandle ||
+        clockHandle,
       ty: letTy,
       init,
     };
@@ -10187,6 +10215,70 @@ function lowerCall(
         name: methodName,
         args,
       };
+    }
+    // `Date` accessor methods (series 102) — routed by the RECEIVER being a Date
+    // (`new Date(x)`, a `dateBindings` name, or a `clock(...).date()` bridge), so
+    // both the direct and the bound forms work. A setter / locale formatter /
+    // unknown method is fail-loud (the surface is read-only + UTC-normalized);
+    // every accessor is `&self` and takes no args.
+    if (isDateExpr(m.object, analysis)) {
+      const rustName = DATE_METHODS[methodName];
+      if (!rustName) {
+        if (methodName.startsWith("set")) {
+          throw new UnsupportedError({
+            type: `\`.${methodName}\` — Date setters are not accepted (Date is immutable in this dialect; construct a new Date from ms)`,
+          });
+        }
+        if (methodName.startsWith("toLocale")) {
+          throw new UnsupportedError({
+            type: `\`.${methodName}\` — locale formatting is non-portable and not modeled; use \`toISOString\`/\`toJSON\`/\`toDateString\``,
+          });
+        }
+        throw new UnsupportedError({
+          type: `\`.${methodName}\` on a Date — only the get*/getUTC* accessors, \`toISOString\`, \`toJSON\`, and \`toDateString\` are available`,
+        });
+      }
+      return {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name: rustName,
+        args: [],
+      };
+    }
+    // `clock` handle methods (series 102) — `c.now()/.date()/.tick(ms)` where `c`
+    // is a `clock(...)` handle. `tick` takes `&mut self` (binding is `let mut`).
+    // An unknown method is fail-loud (only now/date/tick exist).
+    if (isClockExpr(m.object, analysis)) {
+      const CLOCK_METHODS = new Set(["now", "date", "tick"]);
+      if (!CLOCK_METHODS.has(methodName)) {
+        throw new UnsupportedError({
+          type: `\`.${methodName}\` on a clock handle — only \`now\`, \`date\`, \`tick\` are available`,
+        });
+      }
+      return {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name: methodName,
+        args: call.arguments.map((a) => lowerExpr(a as Expression, analysis)),
+      };
+    }
+    // Bare `Date.now()` / `Date.parse(...)` / `Date.UTC(...)` (series 102) — the
+    // static entry points read the host clock or an implementation-defined parser
+    // (non-differential). Fail loud; `Date.now` redirects to the seeded `clock`
+    // (the `Math.random → rng` treatment applied to time).
+    if (
+      m.object.type === "Identifier" &&
+      (m.object as Identifier).name === "Date" &&
+      !analysis.classes.has("Date")
+    ) {
+      if (methodName === "now") {
+        throw new UnsupportedError({
+          type: '`Date.now()` reads the host wall-clock (non-differential) — import `clock` from "@t2r/std" and call `clock(epochMs).now()` (an explicit seed makes the instant differential-stable)',
+        });
+      }
+      throw new UnsupportedError({
+        type: `\`Date.${methodName}\` is not modeled — construct with \`new Date(ms | isoString | fields)\`, and use \`clock\` from "@t2r/std" for a seeded now`,
+      });
     }
     // A static method call `Type.m(args)` off a class name (series 060) → the
     // associated-fn call `Type::m(args)`. Static-fallible `new`/method propagation
@@ -12681,6 +12773,18 @@ function lowerStdShimCall(
   if (shim === "rng") {
     return { kind: "rngNew", seed: lowerExpr(arg, analysis) };
   }
+  // `clock(epochMs)` (series 102) → a `tslib::date::Clock` handle. Exactly one
+  // argument (a `number` epoch-ms seed). The binding-recording in `lowerVarDecl`
+  // marks `const c = clock(…)` in `clockBindings` (emitted `let mut`) so
+  // `.now()/.date()/.tick(ms)` route to the handle surface. Structural twin of
+  // `rng` — composes from the existing `call` HIR (no new HIR/emitter case).
+  if (shim === "clock") {
+    return {
+      kind: "call",
+      callee: "tslib::date::Clock::new",
+      args: [{ borrow: "owned", expr: lowerExpr(arg, analysis) }],
+    };
+  }
   // `parseJsonValue(s)` (series 090) → the dynamic parse. Reuses the 084 parse
   // node with a `jsonValue` target, so `const r = parseJsonValue(s)` records a
   // `ParseResult<JsonValue>` binding (its `.value` accessor yields a JsonValue).
@@ -13577,6 +13681,140 @@ function keyElemFromVecElem(vecElem: RustType): RustType {
   return vecElem.kind === "f64" ? { kind: "orderedFloat" } : vecElem;
 }
 
+/**
+ * JS `Date` accessor → the `tslib::date::Date` snake_case method (series 102).
+ * The short local accessors alias their `getUTC*` twin (UTC-normalized). All are
+ * `&self` and take no args; `toJSON` aliases `toISOString`.
+ */
+const DATE_METHODS: Record<string, string> = {
+  getTime: "get_time",
+  getFullYear: "get_full_year",
+  getUTCFullYear: "get_full_year",
+  getMonth: "get_month",
+  getUTCMonth: "get_month",
+  getDate: "get_date",
+  getUTCDate: "get_date",
+  getDay: "get_day",
+  getUTCDay: "get_day",
+  getHours: "get_hours",
+  getUTCHours: "get_hours",
+  getMinutes: "get_minutes",
+  getUTCMinutes: "get_minutes",
+  getSeconds: "get_seconds",
+  getUTCSeconds: "get_seconds",
+  getMilliseconds: "get_milliseconds",
+  getUTCMilliseconds: "get_milliseconds",
+  getTimezoneOffset: "get_timezone_offset",
+  toISOString: "to_iso_string",
+  toJSON: "to_iso_string",
+  toDateString: "to_date_string",
+};
+
+/** The strict ISO-8601 forms `new Date(str)` accepts — else fail-loud (series 102). */
+const STRICT_ISO = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z)?$/;
+
+/**
+ * A `clock(epochMs)` handle expression (series 102): a `clockBindings` identifier
+ * or a direct `clock(...)` std-shim call (recognized by specifier, so an aliased
+ * import routes too). Used to type a `.date()` bridge + route handle methods.
+ */
+function isClockExpr(
+  expr: Expression | null,
+  analysis: ModuleAnalysis,
+): boolean {
+  if (!expr) return false;
+  if (expr.type === "Identifier") {
+    return analysis.clockBindings.has((expr as Identifier).name);
+  }
+  if (expr.type === "CallExpression") {
+    const callee = (expr as CallExpression).callee;
+    return (
+      callee.type === "Identifier" &&
+      analysis.stdShim.get((callee as Identifier).name) === "clock"
+    );
+  }
+  return false;
+}
+
+/**
+ * A `Date`-typed expression (series 102): a `new Date(...)`, a `dateBindings`
+ * identifier, or a `clock(...).date()` bridge. Date methods route by the receiver
+ * satisfying this, so both the direct `new Date(x).getTime()` and the bound
+ * `const d = new Date(x); d.getTime()` forms work.
+ */
+function isDateExpr(
+  expr: Expression | null,
+  analysis: ModuleAnalysis,
+): boolean {
+  if (!expr) return false;
+  if (expr.type === "NewExpression") {
+    const c = (expr as NewExpression).callee;
+    return c.type === "Identifier" && (c as Identifier).name === "Date";
+  }
+  if (expr.type === "Identifier") {
+    return analysis.dateBindings.has((expr as Identifier).name);
+  }
+  if (expr.type === "CallExpression") {
+    const callee = (expr as CallExpression).callee;
+    return (
+      callee.type === "MemberExpression" &&
+      !(callee as MemberExpression).computed &&
+      (callee as MemberExpression).property.type === "Identifier" &&
+      ((callee as MemberExpression).property as Identifier).name === "date" &&
+      isClockExpr((callee as MemberExpression).object, analysis)
+    );
+  }
+  return false;
+}
+
+/**
+ * `new Date(...)` (series 102) → the `tslib::date::Date` constructor, routed by
+ * arg count/shape: no-arg (ambient wall-clock read) → fail-loud, redirect to
+ * `clock`; one `string`-literal → `parse_iso` (a non-strict-ISO literal is
+ * fail-loud); one `number` (or any non-string-literal expr) → `from_epoch_ms`;
+ * ≥2 → the 0-based-month calendar `from_parts` (JS defaults: day=1, rest 0).
+ */
+function lowerDateNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
+  const args = expr.arguments;
+  if (args.length === 0) {
+    throw new UnsupportedError({
+      type: 'no-arg `new Date()` reads the host wall-clock (non-differential) — import `clock` from "@t2r/std" and call `clock(epochMs)` for an explicit, differential-stable instant',
+    });
+  }
+  if (args.length === 1) {
+    const a0 = args[0] as Expression;
+    if (a0.type === "Literal" && typeof (a0 as Literal).value === "string") {
+      const s = (a0 as Literal).value as string;
+      if (!STRICT_ISO.test(s)) {
+        throw new UnsupportedError({
+          type: `\`new Date(${JSON.stringify(s)})\` is a loose date string — only strict RFC3339 (\`YYYY-MM-DDTHH:mm:ss.sssZ\`) or \`YYYY-MM-DD\` are accepted (JS \`Date.parse\` loose forms are implementation-defined and not modeled)`,
+        });
+      }
+      return {
+        kind: "call",
+        callee: "tslib::date::Date::parse_iso",
+        args: [{ borrow: "owned", expr: { kind: "raw", text: rustStrLit(s) } }],
+      };
+    }
+    return {
+      kind: "call",
+      callee: "tslib::date::Date::from_epoch_ms",
+      args: [{ borrow: "owned", expr: lowerExpr(a0, analysis) }],
+    };
+  }
+  // ≥2 args → the calendar-field constructor. JS defaults: day=1, the rest 0.
+  const defaults = ["0f64", "0f64", "1f64", "0f64", "0f64", "0f64", "0f64"];
+  const parts: HirArg[] = [];
+  for (let i = 0; i < 7; i++) {
+    const argI = args[i];
+    const e: HirExpr = argI
+      ? lowerExpr(argI, analysis)
+      : { kind: "raw", text: defaults[i] ?? "0f64" };
+    parts.push({ borrow: "owned", expr: e });
+  }
+  return { kind: "call", callee: "tslib::date::Date::from_parts", args: parts };
+}
+
 /** `new C(args)` → `C::new(args)`. Constructor params are owned (args by value). */
 function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
   if (expr.callee.type !== "Identifier") {
@@ -13594,6 +13832,9 @@ function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
       type: "a `RegExp` built from a non-literal pattern cannot be validated against the Rust `regex` engine — inline the pattern as a literal (`/…/`) so backreferences/lookaround are rejected at transpile time",
     });
   }
+  // `new Date(...)` (series 102) — the deterministic instant algebra. No-arg /
+  // loose-string forms fail loud inside `lowerDateNew`.
+  if (className === "Date") return lowerDateNew(expr, analysis);
   // Explicit call-site type arguments `new Box<string>(x)` (series 081) — the
   // dialect is inference-only (rustc infers `T` from the ctor arg), so an explicit
   // arg is fail-loud. (`Map`/`Set` carry their own turbofish path below and are

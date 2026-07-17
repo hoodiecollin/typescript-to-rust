@@ -544,6 +544,23 @@ export interface ModuleAnalysis {
    * JS `undefined`). Populated during lowering.
    */
   matchBindings: Set<string>;
+  /**
+   * Bindings whose value is a `Date` (series 102) — a `tslib::date::Date` from
+   * `new Date(ms | isoString | fields)` or a `clock(...).date()` bridge. A method
+   * call `.getTime()`/`.getUTCHours()`/`.toISOString()`/… routes to the `Date`
+   * accessor surface (all `&self`, so emitted as a plain `let`); a setter, a
+   * locale formatter, or an unknown method is fail-loud. Populated during
+   * lowering (statements lower top-to-bottom).
+   */
+  dateBindings: Set<string>;
+  /**
+   * Bindings whose value is a `clock(epochMs)` handle (series 102) — a
+   * `tslib::date::Clock`, the seeded differential-stable replacement for ambient
+   * `Date.now()`/`new Date()`. A `.now()`/`.date()`/`.tick(ms)` routes to the
+   * handle surface; the binding is emitted `let mut` (`tick` takes `&mut self`).
+   * Direct structural twin of `rngBindings`. Populated during lowering.
+   */
+  clockBindings: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -1761,6 +1778,9 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // Regex bindings + first-match result bindings (series 101), filled during lowering.
     regexBindings: new Map(),
     matchBindings: new Set(),
+    // Date + clock handle bindings (series 102), filled during lowering.
+    dateBindings: new Set(),
+    clockBindings: new Set(),
     // Union-type enums (093) — filled by the `collectUnions` pre-pass in `lower()`.
     unionEnums: new Map(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.

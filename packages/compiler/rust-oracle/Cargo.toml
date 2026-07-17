@@ -80,6 +80,12 @@ ordered-float = "4"
 # longer flakes mid-suite. Unused by regex-free output (costs nothing at check
 # time).
 regex = "1"
+# chrono backs the Date surface (series 102, epic #56): `new Date(...)` and the
+# `@t2r/std` `clock(epochMs)` → `tslib::date::Date`/`Clock`. `default-features =
+# false` (UTC-only, no system clock/tz-db). Pre-warmed by the test preload on a
+# cold cache (`ensureDepsWarm`). Unused by Date-free output (costs nothing at
+# check time).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [lib]
 name = "rust_oracle"
