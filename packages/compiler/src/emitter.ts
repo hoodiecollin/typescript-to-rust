@@ -36,10 +36,12 @@ import type {
   HirMatchArm,
   HirModule,
   HirStmt,
+  HirMod,
   HirStruct,
   HirStructKey,
   HirTrait,
   RustType,
+  Vis,
 } from "./hir";
 import { DialectError, UnsupportedError, lower } from "./lower";
 
@@ -149,67 +151,209 @@ export function emit(program: Program, source?: string): string {
   return emitModule(lower(program, source));
 }
 
-/** Emit a complete Rust module from already-lowered HIR. */
-export function emitModule(mod: HirModule): string {
-  // A struct table (interface + class field shapes) drives on-demand trait
-  // derivation (`derives.ts`); threaded through item emission.
-  const structs = buildStructTable(mod.items);
-  // Generated structs derive serde traits only when the module uses JSON (045).
-  const usesJson =
-    usesKind(mod, "jsonStringify") ||
-    usesKind(mod, "jsonParse") ||
-    usesKind(mod, "parseJson") ||
-    // The 090 JsonValue boundary deserializes (`from_value`) / serializes
-    // (`to_value`) modeled structs, so they need the serde derives too.
-    usesKind(mod, "fromJsonValue") ||
-    usesKind(mod, "toJsonValue");
-  const parts = mod.items.map((item) => emitItem(item, structs, usesJson));
-  if (mod.main.length > 0) {
-    const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
-    // A fallible script makes `main` return `Result<(), String>` (its trailing
-    // `Ok(())` is already in `mod.main`, added by lowering); else a bare `main`.
-    const ret = mod.mainRet ? ` -> ${emitType(mod.mainRet)}` : "";
-    // A script that `await`s needs an async runtime: `#[tokio::main] async fn main`.
-    const attr = mod.mainAsync ? "#[tokio::main]\n" : "";
-    const asyncKw = mod.mainAsync ? "async " : "";
-    parts.push(`${attr}${asyncKw}fn main()${ret} {\n${body}\n}`);
-  }
-  // Std imports, deep-scanned from the HIR (the emitter is the sole producer of
-  // each, so each scan is exact). `Rc`/`RefCell` travel together (`"use rc"`).
+/**
+ * The std-import `use` lines a single emitted file needs, deep-scanned from just
+ * *its own* items (+ `main` for the crate root). The emitter is the sole producer
+ * of each node, so every scan is exact. Split out of `emitModule` (series 050) so
+ * each module file computes its own prelude — items in a separate file don't see
+ * the crate root's `use`s. `Rc`/`RefCell` travel together (`"use rc"`).
+ */
+function stdImports(items: HirItem[], main: HirStmt[]): string[] {
+  const scan = { items, main };
   const imports: string[] = [];
   // `Record`/object types are backed by `IndexMap` (series 041) so key/value
   // iteration matches JS's insertion order (`HashMap` does not preserve it).
   if (
-    usesKind(mod, "hashmap") ||
-    usesKind(mod, "mapBuild") ||
-    usesKind(mod, "mapNew")
+    usesKind(scan, "hashmap") ||
+    usesKind(scan, "mapBuild") ||
+    usesKind(scan, "mapNew")
   )
     imports.push("use indexmap::IndexMap;");
   // `Set<T>` → `IndexSet` (series 061), same insertion-order fidelity as `IndexMap`.
-  if (usesKind(mod, "set") || usesKind(mod, "setNew"))
+  if (usesKind(scan, "set") || usesKind(scan, "setNew"))
     imports.push("use indexmap::IndexSet;");
   // Scalar-`f64` map keys / set elements wrap in `OrderedFloat` (series 061); a
   // synthesized f64-bearing struct-key newtype (series 074) wraps its `f64` leaves
   // in `OrderedFloat` at hash/eq time, so it needs the import too.
   if (
-    usesKind(mod, "orderedFloat") ||
-    usesKind(mod, "structKey") ||
-    mod.items.some((i) => i.kind === "structKey")
+    usesKind(scan, "orderedFloat") ||
+    usesKind(scan, "structKey") ||
+    items.some((i) => i.kind === "structKey")
   )
     imports.push("use ordered_float::OrderedFloat;");
   if (
-    usesKind(mod, "rc") ||
-    usesKind(mod, "rcNew") ||
-    usesKind(mod, "rcClone")
+    usesKind(scan, "rc") ||
+    usesKind(scan, "rcNew") ||
+    usesKind(scan, "rcClone")
   ) {
     imports.push("use std::rc::Rc;", "use std::cell::RefCell;");
   }
   // A state-machine generator (series 075) drives its arms via `GenStep<Y, R>`
   // (tslib); import it so the `impl Steppable` / `step()` arms name it unqualified.
-  if (mod.items.some((i) => i.kind === "generator"))
+  if (items.some((i) => i.kind === "generator"))
     imports.push("use tslib::gen::GenStep;");
+  return imports;
+}
+
+/** Does any item across the whole crate use JSON? (Series 045/090 serde derives.) */
+function crateUsesJson(scan: unknown): boolean {
+  return (
+    usesKind(scan, "jsonStringify") ||
+    usesKind(scan, "jsonParse") ||
+    usesKind(scan, "parseJson") ||
+    // The 090 JsonValue boundary deserializes (`from_value`) / serializes
+    // (`to_value`) modeled structs, so they need the serde derives too.
+    usesKind(scan, "fromJsonValue") ||
+    usesKind(scan, "toJsonValue")
+  );
+}
+
+/** Emit the generated `fn main` (with its `Result`/`#[tokio::main]` shape). */
+function emitMain(mod: HirModule): string {
+  const body = mod.main.map((s) => indent(emitStmt(s))).join("\n");
+  // A fallible script makes `main` return `Result<(), String>` (its trailing
+  // `Ok(())` is already in `mod.main`, added by lowering); else a bare `main`.
+  const ret = mod.mainRet ? ` -> ${emitType(mod.mainRet)}` : "";
+  // A script that `await`s needs an async runtime: `#[tokio::main] async fn main`.
+  const attr = mod.mainAsync ? "#[tokio::main]\n" : "";
+  const asyncKw = mod.mainAsync ? "async " : "";
+  return `${attr}${asyncKw}fn main()${ret} {\n${body}\n}`;
+}
+
+/**
+ * Emit a complete Rust module from already-lowered HIR. Single-file fast path: a
+ * multi-file crate (`mod.mods` present, series 050) instead goes through
+ * {@link emitCrate}; this stays the single-`main.rs` renderer for every existing
+ * `lower()` result, byte-for-byte unchanged.
+ */
+export function emitModule(mod: HirModule): string {
+  // A struct table (interface + class field shapes) drives on-demand trait
+  // derivation (`derives.ts`); threaded through item emission.
+  const structs = buildStructTable(mod.items);
+  // Generated structs derive serde traits only when the module uses JSON (045).
+  const usesJson = crateUsesJson(mod);
+  const parts = mod.items.map((item) => emitItem(item, structs, usesJson));
+  if (mod.main.length > 0) parts.push(emitMain(mod));
+  const imports = stdImports(mod.items, mod.main);
   const prelude = imports.length > 0 ? `${imports.join("\n")}\n\n` : "";
   return `${prelude}${parts.join("\n\n")}\n`;
+}
+
+/** One emitted crate source file: a repo-relative path + its Rust contents. */
+export interface CrateFile {
+  /** Path relative to the crate `src`/example root, e.g. `main.rs`, `util/math.rs`. */
+  path: string;
+  content: string;
+}
+
+/**
+ * Emit a **multi-file** crate (series 050) from a `lowerCrate` result: the entry
+ * becomes `main.rs` (its items + generated `mod foo;` declarations + `fn main`),
+ * and each non-`inline` `HirMod` becomes its own `.rs` file at its `modPath`
+ * (`math.rs`, `util/math.rs`). Directory segments with no file of their own get a
+ * synthetic module file carrying just their child `mod …;` declarations. Every
+ * file computes its own std-import prelude (a separate file can't see the root's
+ * `use`s). The struct table + JSON-usage flag are crate-global so a struct's
+ * derives resolve regardless of which file declares or uses it. Runs one binary,
+ * so the differential oracle (stdout diff) is unchanged.
+ */
+export function emitCrate(mod: HirModule): CrateFile[] {
+  const mods = mod.mods ?? [];
+  // Crate-global struct table + JSON flag (a struct in one file may be used with a
+  // JSON boundary in another, and its derives must match).
+  const allItems = [...mod.items, ...mods.flatMap((m) => m.items)];
+  const structs = buildStructTable(allItems);
+  const usesJson = crateUsesJson({ items: allItems, main: mod.main });
+
+  const renderItems = (items: HirItem[]): string =>
+    items.map((item) => emitItem(item, structs, usesJson)).join("\n\n");
+
+  // `mod …;` declaration edges: for every real (file) mod, each modPath prefix's
+  // last segment is declared in its parent (crate root for a top-level segment).
+  // A key is the parent's modPath joined by "/" ("" = crate root).
+  const fileMods = mods.filter((m) => !m.inline);
+  const declsByParent = new Map<string, Set<string>>();
+  const addDecl = (parent: string, child: string): void => {
+    (declsByParent.get(parent) ?? declsByParent.set(parent, new Set()).get(parent)!).add(child);
+  };
+  for (const m of fileMods) {
+    for (let i = 1; i <= m.modPath.length; i++) {
+      addDecl(m.modPath.slice(0, i - 1).join("/"), m.modPath[i - 1] as string);
+    }
+  }
+  const declLines = (parent: string): string[] =>
+    [...(declsByParent.get(parent) ?? [])].map((c) => `mod ${rid(c)};`);
+
+  // Inline namespace mods (Axis 4) render *within* their parent file as `mod n { … }`.
+  const inlineMods = mods.filter((m) => m.inline);
+  const inlineFor = (parent: string): string[] =>
+    inlineMods
+      .filter((m) => m.modPath.slice(0, -1).join("/") === parent)
+      .map((m) => emitInlineMod(m, structs, usesJson));
+
+  const files: CrateFile[] = [];
+
+  // ── Crate root (main.rs) ──────────────────────────────────────────────────
+  const rootParts: string[] = [];
+  rootParts.push(...declLines(""));
+  const rootUses = mod.uses ?? [];
+  if (rootUses.length > 0) rootParts.push(rootUses.join("\n"));
+  rootParts.push(...inlineFor(""));
+  if (mod.items.length > 0) rootParts.push(renderItems(mod.items));
+  if (mod.main.length > 0) rootParts.push(emitMain(mod));
+  const rootImports = stdImports(mod.items, mod.main);
+  const rootPrelude =
+    rootImports.length > 0 ? `${rootImports.join("\n")}\n\n` : "";
+  files.push({
+    path: "main.rs",
+    content: `${rootPrelude}${rootParts.filter((p) => p.length > 0).join("\n\n")}\n`,
+  });
+
+  // ── Real module files ─────────────────────────────────────────────────────
+  const fileByPath = new Map<string, HirMod>();
+  for (const m of fileMods) fileByPath.set(m.modPath.join("/"), m);
+
+  // Every real leaf file + every synthetic directory module (a prefix that
+  // declares children but has no file of its own).
+  const emittedPaths = new Set<string>();
+  const emitModFile = (key: string): void => {
+    if (emittedPaths.has(key) || key === "") return;
+    emittedPaths.add(key);
+    const m = fileByPath.get(key);
+    const parts: string[] = [];
+    parts.push(...declLines(key));
+    parts.push(...inlineFor(key));
+    let items: HirItem[] = [];
+    if (m) {
+      if (m.uses.length > 0) parts.push(m.uses.join("\n"));
+      items = m.items;
+      if (items.length > 0) parts.push(renderItems(items));
+    }
+    const imports = stdImports(items, []);
+    const prelude = imports.length > 0 ? `${imports.join("\n")}\n\n` : "";
+    files.push({
+      path: `${key}.rs`,
+      content: `${prelude}${parts.filter((p) => p.length > 0).join("\n\n")}\n`,
+    });
+  };
+  // Directory modules first (parents), then leaves — order is irrelevant to cargo.
+  for (const parent of declsByParent.keys()) emitModFile(parent);
+  for (const m of fileMods) emitModFile(m.modPath.join("/"));
+
+  return files;
+}
+
+/** Render an inline namespace module (Axis 4): `[pub] mod name { <uses> <items> }`. */
+function emitInlineMod(
+  m: HirMod,
+  structs: StructTable,
+  usesJson: boolean,
+): string {
+  const inner: string[] = [];
+  if (m.uses.length > 0) inner.push(m.uses.join("\n"));
+  for (const item of m.items) inner.push(emitItem(item, structs, usesJson));
+  const body = inner.map((s) => indent(s)).join("\n\n");
+  return `mod ${rid(m.name)} {\n${body}\n}`;
 }
 
 /**
@@ -228,6 +372,16 @@ function usesKind(node: unknown, kind: string): boolean {
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────
+
+/**
+ * Render an item/field/method visibility keyword prefix (series 050): `"pub "` /
+ * `"pub(crate) "`, or `""` for a private (default) item. Placed right before the
+ * `fn`/`struct`/`enum` keyword (after any `#[derive]`/attribute), so
+ * `#[derive(…)]\npub(crate) struct Foo` is well-formed.
+ */
+function visKw(vis: Vis | undefined): string {
+  return vis === "pub" ? "pub " : vis === "pub(crate)" ? "pub(crate) " : "";
+}
 
 function emitItem(
   item: HirItem,
@@ -422,7 +576,7 @@ function emitGenerator(g: HirGenerator): string {
     g.exposesStep || (g.bidirectional && !g.nextDefaultable)
       ? sname
       : `impl Iterator<Item = ${itemTy}>`;
-  const wrapper = `fn ${rid(g.name)}(${ctorParams}) -> ${wrapRet} { ${sname}::new(${wrapArgs}) }`;
+  const wrapper = `${visKw(g.vis)}fn ${rid(g.name)}(${ctorParams}) -> ${wrapRet} { ${sname}::new(${wrapArgs}) }`;
   items.push(wrapper);
 
   return items.join("\n\n");
@@ -487,7 +641,7 @@ function emitEnum(e: HirEnum): string {
       ),
     )
     .join("\n");
-  return `#[derive(Clone, Copy, PartialEq)]\nenum ${rid(e.name)} {\n${variants}\n}`;
+  return `#[derive(Clone, Copy, PartialEq)]\n${visKw(e.vis)}enum ${rid(e.name)} {\n${variants}\n}`;
 }
 
 /**
@@ -548,7 +702,7 @@ function emitUnionEnum(e: HirUnionEnum): string {
       return indent(`${rid(v.name)} { ${fields} },`);
     })
     .join("\n");
-  const decl = `#[derive(${e.derives.join(", ")})]\nenum ${rid(e.name)} {\n${variants}\n}`;
+  const decl = `#[derive(${e.derives.join(", ")})]\n${visKw(e.vis)}enum ${rid(e.name)} {\n${variants}\n}`;
   if (!e.displayImpl) return decl;
   const arms = e.variants
     .map((v) =>
@@ -584,7 +738,13 @@ function emitClass(
   usesJson: boolean,
 ): string {
   const struct = emitStruct(
-    { kind: "struct", name: c.name, fields: c.fields, generics: c.generics },
+    {
+      kind: "struct",
+      name: c.name,
+      vis: c.vis,
+      fields: c.fields,
+      generics: c.generics,
+    },
     structs,
     usesJson,
   );
@@ -687,15 +847,15 @@ function emitStruct(
   // derived (else "cannot find attribute `serde`"), so gate on the derive itself.
   const serdeDerived = derive.includes("serde::Serialize");
   const emitField = (f: HirStruct["fields"][number]): string => {
-    const field = `${rid(f.name)}: ${emitType(f.ty)},`;
+    const field = `${visKw(f.vis)}${rid(f.name)}: ${emitType(f.ty)},`;
     return serdeDerived && f.omitIfNone
       ? indent(`#[serde(skip_serializing_if = "Option::is_none")]\n${field}`)
       : indent(field);
   };
   const decl =
     s.fields.length === 0
-      ? `${derive}struct ${rid(s.name)}${gen} {}`
-      : `${derive}struct ${rid(s.name)}${gen} {\n${s.fields
+      ? `${derive}${visKw(s.vis)}struct ${rid(s.name)}${gen} {}`
+      : `${derive}${visKw(s.vis)}struct ${rid(s.name)}${gen} {\n${s.fields
           .map(emitField)
           .join("\n")}\n}`;
   // Interface inheritance (series 059): a getter-trait impl per extended base. Each
@@ -838,7 +998,7 @@ function emitFn(fn: HirFn): string {
   );
   const params = [...self, ...rest].join(", ");
   const ret = fn.ret.kind === "unit" ? "" : ` -> ${emitType(fn.ret)}`;
-  return `${asyncKw}fn ${rid(fn.name)}${fnGenericClause(fn)}(${params})${ret} ${block(fn.body)}`;
+  return `${visKw(fn.vis)}${asyncKw}fn ${rid(fn.name)}${fnGenericClause(fn)}(${params})${ret} ${block(fn.body)}`;
 }
 
 /**
