@@ -524,6 +524,127 @@ function crateUseLine(
 }
 
 /**
+ * Collect the **nominal** names a `RustType` (transitively) references — a struct /
+ * key-newtype `name` and a trait-object / `impl Trait` `trait`. A generic deep-walk
+ * (every HIR node is a `kind`-tagged plain object), so it stays total as `RustType`
+ * grows; a scalar (`f64`, `String`, …) contributes nothing.
+ */
+function nominalNamesOf(node: unknown, out: Set<string>): void {
+  if (Array.isArray(node)) {
+    for (const n of node) nominalNamesOf(n, out);
+    return;
+  }
+  if (node !== null && typeof node === "object") {
+    const k = (node as { kind?: string }).kind;
+    const name = (node as { name?: unknown }).name;
+    const trait = (node as { trait?: unknown }).trait;
+    if ((k === "struct" || k === "structKey") && typeof name === "string") {
+      out.add(name);
+    }
+    if ((k === "dyn" || k === "implTrait") && typeof trait === "string") {
+      out.add(trait);
+    }
+    for (const v of Object.values(node)) nominalNamesOf(v, out);
+  }
+}
+
+/** The nominal names appearing in an item's **signature** (not its body). */
+function signatureRefs(item: HirItem): Set<string> {
+  const out = new Set<string>();
+  const fromFn = (fn: HirFn): void => {
+    for (const p of fn.params) nominalNamesOf(p.ty, out);
+    nominalNamesOf(fn.ret, out);
+  };
+  switch (item.kind) {
+    case "fn":
+      fromFn(item);
+      break;
+    case "struct":
+      for (const f of item.fields) nominalNamesOf(f.ty, out);
+      break;
+    case "structKey":
+      out.add(item.struct);
+      break;
+    case "class":
+      for (const f of item.fields) nominalNamesOf(f.ty, out);
+      if (item.ctor) fromFn(item.ctor);
+      for (const m of item.methods) fromFn(m);
+      if (item.base) nominalNamesOf(item.base.ty, out);
+      break;
+    case "unionEnum":
+      for (const v of item.variants) {
+        for (const f of v.fields) nominalNamesOf(f.ty, out);
+        if (v.newtype) nominalNamesOf(v.newtype, out);
+      }
+      break;
+    case "trait":
+      for (const m of item.methods) fromFn(m);
+      for (const a of item.accessors) nominalNamesOf(a.ty, out);
+      for (const a of item.byValueAccessors ?? []) nominalNamesOf(a.ty, out);
+      break;
+    case "generator":
+      nominalNamesOf(item.item, out);
+      nominalNamesOf(item.retTy, out);
+      for (const p of item.params) nominalNamesOf(p.ty, out);
+      for (const f of item.localFields) nominalNamesOf(f.ty, out);
+      break;
+    // `enum` (C-like, unit variants) and `errorEnum` (synthesized, crate-root)
+    // reference no other nominal type.
+    default:
+      break;
+  }
+  return out;
+}
+
+/**
+ * Infer crate visibility (series 050, Axis 1) — `pub(crate)` granularity. Every
+ * item named in an `export` is `pub(crate)`; so is any item **reachable from an
+ * exported signature** (an exported fn's param/return type, an exported struct's
+ * field type, transitively) — Rust forbids a private type in a `pub(crate)`
+ * signature (`private_interfaces`), so the closure must widen them. A purely local
+ * item (neither exported nor signature-reachable) stays private. Mutates each
+ * reached item's `vis` (and a reached struct/class's fields + ctor/methods, so a
+ * cross-module literal / call reaches them).
+ */
+function inferCrateVisibility(items: HirItem[], exported: Set<string>): void {
+  const byName = new Map<string, HirItem>();
+  for (const it of items) {
+    const n = (it as { name?: string }).name;
+    if (n && !byName.has(n)) byName.set(n, it);
+  }
+  // BFS the signature-reachability closure from the exported seed.
+  const reachable = new Set<string>();
+  const queue: string[] = [];
+  for (const n of exported) {
+    if (byName.has(n)) {
+      reachable.add(n);
+      queue.push(n);
+    }
+  }
+  while (queue.length > 0) {
+    const item = byName.get(queue.shift()!)!;
+    for (const ref of signatureRefs(item)) {
+      if (byName.has(ref) && !reachable.has(ref)) {
+        reachable.add(ref);
+        queue.push(ref);
+      }
+    }
+  }
+  // Widen every reached item (and its members) to `pub(crate)`.
+  for (const name of reachable) {
+    const item = byName.get(name)!;
+    (item as { vis?: Vis }).vis = "pub(crate)";
+    if (item.kind === "struct" || item.kind === "class") {
+      for (const f of item.fields) f.vis = "pub(crate)";
+    }
+    if (item.kind === "class") {
+      if (item.ctor) item.ctor.vis = "pub(crate)";
+      for (const m of item.methods) m.vis = "pub(crate)";
+    }
+  }
+}
+
+/**
  * Lower a resolved multi-file **crate** (series 050) to a single `HirModule` whose
  * non-entry files are carried in `mods`.
  *
@@ -663,15 +784,16 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
   };
   const lowered = lower(merged);
 
-  // Partition the flat items back to their owning module files, stamping the
-  // exported ones `pub(crate)`. Un-owned (synthesized) items stay at the root.
+  // Infer visibility across the whole crate (Axis 1): exported names + everything
+  // signature-reachable from them → `pub(crate)`; purely local items stay private.
+  inferCrateVisibility(lowered.items, exportedNames);
+
+  // Partition the flat items back to their owning module files. Un-owned
+  // (synthesized) items stay at the root.
   const rootItems: HirItem[] = [];
   const itemsByMod = new Map<string, HirItem[]>();
   for (const item of lowered.items) {
     const name = (item as { name?: string }).name;
-    if (name && exportedNames.has(name)) {
-      (item as { vis?: Vis }).vis = "pub(crate)";
-    }
     const owner = name ? nameToModPath.get(name) : undefined;
     if (!owner || owner.length === 0) {
       rootItems.push(item);
