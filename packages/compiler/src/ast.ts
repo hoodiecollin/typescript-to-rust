@@ -407,11 +407,22 @@ export interface Program extends Span {
   body: Statement[];
 }
 
-/** `import { a, b as c } from "src"` (series 084 — only `@t2r/std` is modeled). */
+/**
+ * `import { a, b as c } from "src"`. Series 084 recognized only `@t2r/std`; the
+ * module system (series 050) adds `./`-relative imports across files. `specifiers`
+ * may carry a default (`import d from …`) or namespace (`import * as ns …`) form.
+ * Both are **supported** (series 050d): a namespace import maps to a Rust module
+ * alias (`use crate::n as ns;`, `ns.x` → `n::x`), and a default import binds the
+ * target module's reserved `__default_export` symbol via `as`.
+ */
 export interface ImportDeclaration extends Span {
   type: "ImportDeclaration";
   source: { type: "Literal"; value: string };
-  specifiers: ImportSpecifier[];
+  specifiers: (
+    | ImportSpecifier
+    | ImportDefaultSpecifier
+    | ImportNamespaceSpecifier
+  )[];
 }
 
 /** One `{ imported as local }` clause of an `ImportDeclaration`. */
@@ -419,4 +430,76 @@ export interface ImportSpecifier extends Span {
   type: "ImportSpecifier";
   imported: Identifier;
   local: Identifier;
+}
+
+/** `import def from "./d"` — a default import; binds the module's reserved
+ * `__default_export` symbol (`use crate::d::__default_export as def;`, series 050d). */
+export interface ImportDefaultSpecifier extends Span {
+  type: "ImportDefaultSpecifier";
+  local: Identifier;
+}
+
+/** `import * as ns from "./n"` — a namespace import; a Rust module alias
+ * (`use crate::n as ns;`, member access `ns.x` → `n::x`, series 050d). */
+export interface ImportNamespaceSpecifier extends Span {
+  type: "ImportNamespaceSpecifier";
+  local: Identifier;
+}
+
+/**
+ * `export <decl>` / `export { a, b as c }` / `export { x as y } from "./z"`
+ * (series 050). `declaration` is set for `export function`/`class`/`interface`/
+ * `enum`; else `specifiers` lists the exported names. A non-null `source` marks a
+ * **re-export** (accepted only inside a pure barrel). `exportKind` is `"type"` for
+ * a type-only export.
+ */
+export interface ExportNamedDeclaration extends Span {
+  type: "ExportNamedDeclaration";
+  declaration: Statement | null;
+  specifiers: ExportSpecifier[];
+  source: { type: "Literal"; value: string } | null;
+  exportKind: "value" | "type";
+}
+
+/** One `{ local as exported }` clause of an `ExportNamedDeclaration`. */
+export interface ExportSpecifier extends Span {
+  type: "ExportSpecifier";
+  local: Identifier;
+  exported: Identifier;
+  exportKind: "value" | "type";
+}
+
+/** `export default <expr|decl>` — fail-loud (no named Rust analog). */
+export interface ExportDefaultDeclaration extends Span {
+  type: "ExportDefaultDeclaration";
+  declaration: Expression | Statement;
+  exportKind: "value" | "type";
+}
+
+/** `export * from "./barrel"` — a glob re-export (facade-only; else fail-loud). */
+export interface ExportAllDeclaration extends Span {
+  type: "ExportAllDeclaration";
+  exported: Identifier | null;
+  source: { type: "Literal"; value: string };
+  exportKind: "value" | "type";
+}
+
+/** A `TSModuleBlock` — the `{ … }` body of a `namespace`/`module` declaration. */
+export interface TSModuleBlock extends Span {
+  type: "TSModuleBlock";
+  body: Statement[];
+}
+
+/**
+ * `namespace Foo { … }` / `module Foo { … }` (series 050, Axis 4) → a nested Rust
+ * `mod`. `kind` is `"namespace"` (or `"module"`/`"global"`); `declare`/`global`
+ * ambient forms are fail-loud. A missing `body` (ambient `declare module`) is null.
+ */
+export interface TSModuleDeclaration extends Span {
+  type: "TSModuleDeclaration";
+  id: Identifier;
+  body: TSModuleBlock | null;
+  kind: "namespace" | "module" | "global";
+  declare: boolean;
+  global: boolean;
 }

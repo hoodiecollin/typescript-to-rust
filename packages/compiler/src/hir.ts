@@ -1175,6 +1175,9 @@ export type SelfRecv = "ref" | "refMut" | "owned";
 export interface HirFn {
   kind: "fn";
   name: string;
+  /** Rust visibility (series 050); absent ⇒ private. Also carried on a class
+   * method for cross-module dispatch. */
+  vis?: Vis;
   isAsync: boolean;
   params: HirParam[];
   /** `unit` for a `void`/unannotated function. */
@@ -1216,14 +1219,17 @@ export interface GenericParam {
 export interface HirStruct {
   kind: "struct";
   name: string;
+  /** Rust visibility (series 050); absent ⇒ private. */
+  vis?: Vis;
   /**
    * Each field's `omitIfNone` (series 091): its declared nullishness is
    * `undefined`-only (`x?: T` / `x: T | undefined`, no `null` arm), so a `None`
    * value must be omitted from JSON — the emitter adds
    * `#[serde(skip_serializing_if = "Option::is_none")]`. A `null`-bearing field
    * keeps the key (serializes `null`); "null wins" for `T | null | undefined`.
+   * `vis` (series 050): a `pub(crate)` field for a cross-module struct literal.
    */
-  fields: { name: string; ty: RustType; omitIfNone?: boolean }[];
+  fields: { name: string; ty: RustType; omitIfNone?: boolean; vis?: Vis }[];
   /**
    * Generic type parameters (series 081) — present for a `class Box<T>`'s emitted
    * struct (`struct Box<T>` / `struct Box<T: IShape>`). Interface-lowered structs
@@ -1287,7 +1293,9 @@ export interface HirStructKey {
 export interface HirClass {
   kind: "class";
   name: string;
-  fields: { name: string; ty: RustType }[];
+  /** Rust visibility (series 050); absent ⇒ private. */
+  vis?: Vis;
+  fields: { name: string; ty: RustType; vis?: Vis }[];
   ctor: HirFn | null;
   methods: HirFn[];
   /**
@@ -1358,6 +1366,8 @@ export interface HirClass {
 export interface HirTrait {
   kind: "trait";
   name: string;
+  /** Rust visibility (series 050); absent ⇒ private. */
+  vis?: Vis;
   methods: HirFn[];
   accessors: { field: string; ty: RustType }[];
   /**
@@ -1394,6 +1404,8 @@ export interface HirErrorEnum {
 export interface HirEnum {
   kind: "enum";
   name: string;
+  /** Rust visibility (series 050); absent ⇒ private. */
+  vis?: Vis;
   variants: { name: string; disc: number | null }[];
 }
 
@@ -1432,6 +1444,8 @@ export interface HirUnionVariant {
 export interface HirUnionEnum {
   kind: "unionEnum";
   name: string;
+  /** Rust visibility (series 050); absent ⇒ private. */
+  vis?: Vis;
   variants: HirUnionVariant[];
   /** Emit an `impl Display` round-tripping each variant to its `display` (literal unions). */
   displayImpl: boolean;
@@ -1464,6 +1478,8 @@ export interface HirGenerator {
   kind: "generator";
   /** The public wrapper fn name (the source `function*` name, e.g. `range`). */
   name: string;
+  /** Rust visibility of the public wrapper fn (series 050); absent ⇒ private. */
+  vis?: Vis;
   /** The generated state-machine struct name (e.g. `RangeGen`). */
   structName: string;
   /** `Item = T` — from the `Generator<T>` / `IterableIterator<T>` annotation. */
@@ -1528,6 +1544,14 @@ export interface HirGenerator {
   nextDefaultable: boolean;
 }
 
+/**
+ * An item's Rust visibility (series 050). `undefined`/`"priv"` render nothing (a
+ * module-private item); `"pub(crate)"` and `"pub"` prefix the keyword. Inferred by
+ * `lowerCrate` from each module's exported set + signature-reachability closure;
+ * absent (private) for every single-file fast-path item, so emission is unchanged.
+ */
+export type Vis = "pub" | "pub(crate)" | "priv";
+
 /** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */
 export type HirItem =
   | HirFn
@@ -1541,6 +1565,33 @@ export type HirItem =
   | HirGenerator;
 
 /**
+ * A non-entry crate module (series 050) — one TS file → one Rust source file at
+ * `modPath` (`src/foo.rs`, `src/util/math.rs`). Emitted as its own file: a `use`
+ * prelude (its `./`-relative imports → `use crate::…;`) + its `items`. The crate
+ * root declares it (`mod foo;`) to wire the file in. A `namespace Foo { … }`
+ * (Axis 4) also lowers to a `HirMod` with `inline: true` — an inline `mod foo {
+ * … }` rendered *within* its parent file rather than as a separate source file.
+ */
+export interface HirMod {
+  kind: "mod";
+  /** The module's Rust name — the file stem / namespace name, sanitized (`rid`). */
+  name: string;
+  /** The nested module path from the crate root (`["util","math"]`). */
+  modPath: string[];
+  /** `use crate::…;` lines emitted at the top of the module file/block. */
+  uses: string[];
+  items: HirItem[];
+  /**
+   * An **inline** `mod name { … }` (a `namespace`, Axis 4) rendered inside its
+   * parent file, not a separate source file. Absent/false ⇒ a real module file.
+   */
+  inline?: boolean;
+  /** A generated `pub use` **facade** module (Axis 3): `items` is empty and `uses`
+   * carries the `pub use crate::…;` re-export lines. */
+  facade?: boolean;
+}
+
+/**
  * A lowered module. Top-level *declarations* become `items`; top-level
  * *statements* become the body of a generated `fn main()` (`main`, empty when
  * there is no script). Mixing script with a user-defined `main` is rejected in
@@ -1549,6 +1600,19 @@ export type HirItem =
 export interface HirModule {
   items: HirItem[];
   main: HirStmt[];
+  /**
+   * The crate's non-entry modules (series 050). Present only for a multi-file
+   * crate lowered by `lowerCrate`; absent for every single-file `lower()` result
+   * (so the fast-path emission is byte-for-byte unchanged). The emitter writes one
+   * `.rs` file per real (non-`inline`) mod and declares each with `mod name;` at
+   * the crate root.
+   */
+  mods?: HirMod[];
+  /**
+   * `use crate::…;` lines for the crate ROOT (the entry file's `./`-relative
+   * imports). Present only for a multi-file crate; absent single-file.
+   */
+  uses?: string[];
   /**
    * Non-fatal compiler diagnostics (series 056) accumulated during lowering —
    * the first channel between "emit" and fail-loud `UnsupportedError`. The CLI
