@@ -135,14 +135,24 @@ export class RustProject {
   }
 
   /**
-   * Compile many programs as `examples/<id>.rs` in ONE cargo invocation and run
-   * the ones that compiled. The heavy dependency rlibs are built once and shared
-   * across the whole batch, and cargo parallelizes the per-example codegen across
-   * cores — far cheaper than N separate `run()` calls. Returns a map keyed by the
-   * program `id` (each result's `.ok`/`.stdout`/`.errors` mirror `run()`).
+   * Compile many programs in ONE cargo invocation and run the ones that compiled.
+   * A single-file program is `examples/<id>.rs`; a **multi-file** crate (series 050)
+   * is a directory example `examples/<id>/main.rs` (+ its module files), which cargo
+   * auto-discovers as the target `<id>` exactly like a single file. The heavy
+   * dependency rlibs are built once and shared across the whole batch, and cargo
+   * parallelizes the per-example codegen across cores — far cheaper than N separate
+   * `run()` calls. Returns a map keyed by the program `id` (each result's
+   * `.ok`/`.stdout`/`.errors` mirror `run()`).
    */
   runBatch(
-    programs: { id: string; src: string; io?: IoInput }[],
+    programs: {
+      id: string;
+      /** Single-file source (written to `examples/<id>.rs`). */
+      src?: string;
+      /** Multi-file crate (series 050) — each path is relative to `examples/<id>/`. */
+      files?: { path: string; content: string }[];
+      io?: IoInput;
+    }[],
   ): Promise<Map<string, CargoResult>> {
     return this.lock(async () => {
       // Reset the shared bin/lib so a program left by a prior run() can't break
@@ -158,11 +168,18 @@ export class RustProject {
       const exDir = join(this.dir, "examples");
       mkdirSync(exDir, { recursive: true });
       const ioById = new Map<string, IoInput>();
+      const withNl = (s: string): string => (s.endsWith("\n") ? s : `${s}\n`);
       for (const p of programs) {
-        writeIfChanged(
-          join(exDir, `${p.id}.rs`),
-          p.src.endsWith("\n") ? p.src : `${p.src}\n`,
-        );
+        if (p.files) {
+          // A multi-file crate → a directory example `examples/<id>/…`.
+          for (const f of p.files) {
+            const dest = join(exDir, p.id, f.path);
+            mkdirSync(dirname(dest), { recursive: true });
+            writeIfChanged(dest, withNl(f.content));
+          }
+        } else {
+          writeIfChanged(join(exDir, `${p.id}.rs`), withNl(p.src ?? ""));
+        }
         if (p.io) ioById.set(p.id, p.io);
       }
       return cargoBuildExamples(
