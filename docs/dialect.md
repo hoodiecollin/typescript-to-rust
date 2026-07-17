@@ -147,7 +147,7 @@ name.)
 | Bare `Promise` with no inner type | Not yet | generic `Unsupported <node>` |
 | `Record<K, V>` missing key or value type | Not yet | generic `Unsupported <node>` |
 | `Record<number, V>` / non-string key | Not yet | `Record with a non-string key (only string keys map to HashMap)` |
-| Unknown/undeclared type name (`Map`, `Set`, `Date`, an unresolved generic, …) | Not yet | generic `Unsupported <node>` |
+| Unknown/undeclared type name (an unresolved generic, an unknown class, …) | Not yet | generic `Unsupported <node>` |
 | Bare `null` / `undefined` type (not inside a union) | Not yet | generic `Unsupported <node>` |
 | A union of a **recursive** type (`type Tree = … \| { kids: Tree[] }`) | Not yet | fails when the recursive field lowers (needs `Box`) |
 | A **generic** union (`type Wrap<T> = {some:T} \| {none:true}`) | Not yet | generic `Unsupported <node>` |
@@ -869,8 +869,10 @@ behavior: the type/policy problem moves to an explicit call-site API. The shim i
 differential oracle runs faithful behavior matching the emitted Rust.
 
 `@t2r/std` is the **only** modeled import. Exports: JSON (`parseJson`,
-`stringifyJson`, and the 090 `JsonValue` boundary), the 089 seeded `rng`, and the
-series-100 **I/O** surface (fs / env / process / stdin / async fs / HTTP — see
+`stringifyJson`, and the 090 `JsonValue` boundary), the 089 seeded `rng`, the
+102 seeded `clock` (the differential-stable "now" — see
+[Date & time](#date--time-series-102)), and the series-100 **I/O** surface (fs /
+env / process / stdin / async fs / HTTP — see
 [I/O via `@t2r/std`](#io-via-t2rstd-series-100) below).
 
 - **`stringifyJson(v): string`** → the `tslib::json::stringify` writer (JS number
@@ -1005,6 +1007,52 @@ are **char** indices (the 083/098 char-indexed model, not UTF-16 code units); a
 | A function replacer `s.replace(re, (m) => …)` | Not yet | `` a function replacer in `.replace` is not modeled (v1) — use a string replacement template `` |
 | The `` $` `` / `$'` (before-/after-match) replacement specials | Not yet | `` the `` $` `` / `$'` … replacement specials have no Rust `regex` equivalent `` |
 | `s.matchAll(re)` / `s.replaceAll(re, …)` without the `g` flag | Not yet | `` `s.matchAll(re)` requires the `g` flag on the regex (as in JS) `` |
+
+---
+
+## Date & time (series 102)
+
+`new Date(...)` lowers to a `tslib::date::Date` over the `chrono` crate — a
+**deterministic instant algebra**: construct from epoch-ms, a strict ISO-8601
+string, or 0-based-month calendar fields; read fields back; format. Because it is
+a pure function of its inputs it is fully differential-stable. Date **arithmetic
+and comparison go through epoch-ms** (`a.getTime() < b.getTime()`,
+`new Date(d.getTime() + 86_400_000)`) — plain `number` operations, no new
+machinery; a bare `date < date` (implicit `valueOf`) is not accepted.
+
+The **wall-clock reader** (`Date.now()`, no-arg `new Date()`) reads the host
+clock, so like `Math.random` it cannot be differential — it is fail-loud,
+redirected to a seeded `clock(epochMs)` from `@t2r/std` (a `tslib::date::Clock`
+handle with `now()` / `date()` / `tick(ms)`, the direct twin of `rng(seed)`). The
+seed is an explicit call-site argument, so both runtimes observe the same instant.
+
+- **Construction**: `new Date(ms)` → `from_epoch_ms`; `new Date(isoString)` →
+  `parse_iso` (**strict** RFC3339 / `YYYY-MM-DD` only); `new Date(y, m0, d, …)` →
+  `from_parts` (month is **0-based**, JS semantics).
+- **Accessors** (all `→ number`): `getTime`, `getFullYear`, `getMonth` (0-based),
+  `getDate`, `getDay` (Sun=0), `getHours`/`getMinutes`/`getSeconds`/
+  `getMilliseconds`, `getTimezoneOffset`. The `getUTC*` twins are accepted and
+  **the short local names alias them** (see the timezone note). A Date binding
+  needs no annotation (typed by construction).
+- **Formatting**: `toISOString()` / `toJSON()` → `YYYY-MM-DDTHH:mm:ss.sssZ` (exact
+  JS shape — literal `Z`, 3-digit ms); `toDateString()` → the fixed English
+  `"Www Mmm DD YYYY"` (hand-written, no locale).
+
+**Timezone divergence (documented, not fail-loud):** all instants are UTC
+internally and the short local accessors are **UTC-normalized**
+(`getHours ≡ getUTCHours`, `getTimezoneOffset ≡ 0`). On a non-UTC host, stock JS
+`getHours()` would return the local hour; here it returns the UTC hour. This is
+internally consistent and differential-stable (the harness also pins `TZ=UTC` on
+the oracle run). Real per-zone fidelity is a future graduation.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Bare `Date.now()` | Not yet | `` `Date.now()` reads the host wall-clock … call `clock(epochMs).now()` `` |
+| No-arg `new Date()` | Not yet | `` no-arg `new Date()` reads the host wall-clock … call `clock(epochMs)` `` |
+| Loose-format parse (`new Date("Nov 14 2023")`) | Not yet | `` …is a loose date string — only strict RFC3339 … are accepted `` |
+| A setter (`d.setFullYear(…)`, `setTime`, …) | Not yet | `` …Date setters are not accepted (Date is immutable …; construct a new Date from ms) `` |
+| A locale formatter (`toLocaleDateString`, …) | Not yet | `` …locale formatting is non-portable and not modeled … `` |
+| An unknown method on a Date | Not yet | `` …on a Date — only the get*/getUTC* accessors, `toISOString`, `toJSON`, `toDateString` are available `` |
 
 ---
 
