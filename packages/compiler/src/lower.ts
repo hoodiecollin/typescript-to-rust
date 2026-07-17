@@ -495,6 +495,15 @@ export function lower(program: Program, source?: string): HirModule {
   );
 }
 
+/**
+ * The reserved Rust symbol a TS `export default` maps to (series 050, Axis 4,
+ * re-decided 2026-07-17). A `default` export is nameless in TS; on the Rust side
+ * it becomes an ordinary **named** item `__default_export` (anonymous fn/class) or
+ * a `pub(crate) use self::<name> as __default_export;` alias (named fn/class), and
+ * a default import binds it via `use crate::<mod>::__default_export as <local>;`.
+ */
+const DEFAULT_EXPORT_SYM = "__default_export";
+
 /** The exported / crate-root name of a top-level declaration (series 050). */
 function crateDeclName(stmt: Statement): string | undefined {
   const t = stmt.type;
@@ -704,15 +713,21 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
           });
         }
         for (const spec of imp.specifiers) {
-          if (spec.type !== "ImportSpecifier" || !spec.imported) {
+          if (spec.type === "ImportSpecifier" && spec.imported) {
+            uses.push(
+              crateUseLine(targetMod, spec.imported.name, spec.local.name),
+            );
+          } else if (spec.type === "ImportDefaultSpecifier") {
+            // Default import → the reserved `__default_export` symbol, bound to the
+            // local name via `as` (Axis 4, re-decided 2026-07-17).
+            uses.push(
+              crateUseLine(targetMod, DEFAULT_EXPORT_SYM, spec.local.name),
+            );
+          } else {
             throw new UnsupportedError({
-              type:
-                spec.type === "ImportDefaultSpecifier"
-                  ? "default import (named imports only)"
-                  : "namespace import (`import * as ns`) — glob binding risks silent name capture",
+              type: `unsupported import specifier (${spec.type})`,
             });
           }
-          uses.push(crateUseLine(targetMod, spec.imported.name, spec.local.name));
         }
         continue;
       }
@@ -750,8 +765,41 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
         continue;
       }
       if (t === "ExportDefaultDeclaration") {
+        const d = (stmt as unknown as { declaration: Statement }).declaration;
+        if (
+          d.type === "FunctionDeclaration" ||
+          d.type === "ClassDeclaration"
+        ) {
+          // A fn/class default → a named Rust item (Axis 4, re-decided 2026-07-17).
+          const decl = d as unknown as {
+            id: { type: string; name: string; start: number; end: number } | null;
+          };
+          if (decl.id?.name) {
+            // Named: keep its own name, alias it as the reserved default symbol.
+            nameToModPath.set(decl.id.name, m.modPath);
+            exportedNames.add(decl.id.name);
+            mergedBody.push(d);
+            uses.push(
+              `pub(crate) use self::${decl.id.name} as ${DEFAULT_EXPORT_SYM};`,
+            );
+          } else {
+            // Anonymous: name the item the reserved symbol directly.
+            decl.id = {
+              type: "Identifier",
+              name: DEFAULT_EXPORT_SYM,
+              start: 0,
+              end: 0,
+            };
+            nameToModPath.set(DEFAULT_EXPORT_SYM, m.modPath);
+            exportedNames.add(DEFAULT_EXPORT_SYM);
+            mergedBody.push(d);
+          }
+          continue;
+        }
+        // An anonymous VALUE default (`export default 42 / {} / () => …`) has no
+        // named Rust analog → fail-loud.
         throw new UnsupportedError({
-          type: "`export default` (no named Rust analog)",
+          type: "anonymous value `export default` (only a named fn/class default has a Rust symbol)",
         });
       }
       if (t === "ExportAllDeclaration") {
