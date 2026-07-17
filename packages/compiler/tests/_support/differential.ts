@@ -65,7 +65,12 @@ export async function runTs(src: string, io?: IoInput): Promise<string> {
       stdin,
       stdout: "pipe",
       stderr: "ignore",
-      env: { ...process.env, ...io?.env },
+      // Pin `TZ=UTC` (series 102): the emitted Rust `Date` is UTC-only, and the
+      // dialect UTC-normalizes JS's short local accessors, so the Bun oracle must
+      // read UTC too for `getHours`/`toDateString`/… to match byte-for-byte. A
+      // per-spec `io.env.TZ` still overrides. Harmless for non-Date suites (every
+      // differential program is a pure function of its inputs).
+      env: { ...process.env, TZ: "UTC", ...io?.env },
     });
     const stdout = await new Response(proc.stdout).text();
     await proc.exited;
