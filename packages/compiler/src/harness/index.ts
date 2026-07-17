@@ -15,14 +15,22 @@
  * clobber each other.
  */
 
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import {
   type CargoResult,
   type IoInput,
   cargoBuildExamples,
   cargoCheck,
   cargoRun,
+  prewarmDeps,
   rustfmt,
 } from "./cargo";
 
@@ -95,6 +103,21 @@ export class RustProject {
   }
 
   /**
+   * Compile the whole dependency graph once (see {@link prewarmDeps}). Serialized
+   * through the same crate lock as every other operation, and writes the exact
+   * trivial sources `runBatch` resets to, so it neither fights a concurrent writer
+   * nor thrashes the lib/bin fingerprint the first real batch relies on. Returns
+   * whether the pre-warm build succeeded.
+   */
+  prewarm(): Promise<boolean> {
+    return this.lock(async () => {
+      this.write("lib.rs", "");
+      this.write("main.rs", "fn main() {}");
+      return prewarmDeps(this.dir);
+    });
+  }
+
+  /**
    * Compile many programs as `examples/<id>.rs` in ONE cargo invocation and run
    * the ones that compiled. The heavy dependency rlibs are built once and shared
    * across the whole batch, and cargo parallelizes the per-example codegen across
@@ -132,6 +155,77 @@ export class RustProject {
 
 /** Shared instance backed by the committed `rust-oracle` crate. */
 export const harness = new RustProject();
+
+/**
+ * Sentinel recording the dependency-graph fingerprint the target was last
+ * pre-warmed for. Lives INSIDE `target/` so `cargo clean` (or a fresh checkout)
+ * drops it and forces a re-warm; `/target` is gitignored so it never lands in vcs.
+ */
+const PREWARM_SENTINEL = join(ORACLE_DIR, "target", ".t2r-prewarm");
+
+/** Fingerprint the inputs that determine the oracle's dependency graph. */
+function depFingerprint(): string {
+  const h = createHash("sha256");
+  // `Cargo.toml` is the human-facing dep declaration (edited to add a crate);
+  // `Cargo.lock` captures the exact resolved versions (transitive bumps). Either
+  // changing means the compiled rlibs may be stale.
+  for (const f of ["Cargo.toml", "Cargo.lock"]) {
+    const p = join(ORACLE_DIR, f);
+    h.update(f);
+    h.update("\0");
+    if (existsSync(p)) h.update(readFileSync(p));
+    h.update("\0");
+  }
+  return h.digest("hex");
+}
+
+let depsWarmed: Promise<void> | null = null;
+
+/**
+ * Ensure every oracle dependency rlib is compiled before the suite runs any
+ * cargo-backed spec — the fix for the cargo thundering-herd flake.
+ *
+ * Change-detected: the dependency graph is fingerprinted (the oracle's
+ * `Cargo.toml` + `Cargo.lock`) and compared against {@link PREWARM_SENTINEL}. On a
+ * match — the common case — this is a single file read and returns instantly. On a
+ * mismatch (a crate was added / version-bumped) or a missing sentinel (a fresh or
+ * `cargo clean`ed target) it runs {@link RustProject.prewarm} ONCE, serialized and
+ * untimed, then records the fingerprint so later runs skip it. Memoized per
+ * process; never rejects (a failed pre-warm just lets the individual specs surface
+ * the real cargo diagnostics rather than aborting the whole suite).
+ */
+export function ensureDepsWarm(): Promise<void> {
+  if (depsWarmed) return depsWarmed;
+  depsWarmed = (async () => {
+    try {
+      const want = depFingerprint();
+      if (
+        existsSync(PREWARM_SENTINEL) &&
+        readFileSync(PREWARM_SENTINEL, "utf8") === want
+      ) {
+        return; // deps already warm for this exact graph — nothing to do
+      }
+      console.error(
+        "[t2r] rust-oracle dependency graph changed (or target cold) — " +
+          "pre-warming rlibs once to avoid the cargo thundering-herd flake…",
+      );
+      const ok = await harness.prewarm();
+      if (ok) {
+        mkdirSync(dirname(PREWARM_SENTINEL), { recursive: true });
+        writeFileSync(PREWARM_SENTINEL, want);
+        console.error("[t2r] rust-oracle dependencies pre-warmed.");
+      } else {
+        console.error(
+          "[t2r] pre-warm build did not succeed; specs will surface the real " +
+            "cargo diagnostics.",
+        );
+      }
+    } catch (err) {
+      console.error(`[t2r] pre-warm skipped after error: ${String(err)}`);
+    }
+  })();
+  return depsWarmed;
+}
 
 /** Convenience: compile a Rust source string, return the cargo result. */
 export function checkRust(source: string): Promise<CargoResult> {

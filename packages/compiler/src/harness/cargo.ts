@@ -242,6 +242,40 @@ export async function cargoRun(
   return classify(exitCode, diagnostics, stdout, stderr);
 }
 
+/**
+ * Pre-warm every declared dependency rlib in a single `cargo build`.
+ *
+ * The thundering-herd flake: when a crate is added to the oracle's `Cargo.toml`,
+ * the FIRST differential batch that touches cargo pays the entire cold compile of
+ * that crate (+ its transitive deps) — under a per-test / `beforeAll` timeout that
+ * was sized for *warm* builds. The cold compile races that timeout, gets killed
+ * mid-build, and leaves a partially-populated `target/` that cascades into a burst
+ * of unrelated failures.
+ *
+ * A plain `cargo build` (lib + bin, no `--examples`) forces cargo to compile the
+ * whole dependency graph — the same rlibs every later example batch reuses — once,
+ * up front, with no competing timeout. Offline-first with an online fallback on a
+ * cold registry cache, mirroring {@link runCargo}. stderr is inherited so the cold
+ * compile is visible; this only runs on the cold / dep-changed path (the caller
+ * skips it when the graph is unchanged), so it adds no noise to warm runs.
+ * Returns whether the build succeeded.
+ */
+export async function prewarmDeps(cwd: string): Promise<boolean> {
+  const build = (online: boolean): Promise<number> =>
+    Bun.spawn(["cargo", "build", ...(online ? [] : ["--offline"])], {
+      cwd,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "inherit",
+      env: { ...process.env },
+    }).exited;
+  // A cold registry cache fails `--offline` (the crate source isn't downloaded);
+  // retry online to fetch, then compile. Our trivial lib/bin never fails to
+  // compile, so an offline failure only ever means "needs the network".
+  if ((await build(false)) === 0) return true;
+  return (await build(true)) === 0;
+}
+
 /** Run `fn`s over `items` with at most `limit` in flight; preserves order. */
 export async function mapBounded<T, R>(
   items: T[],

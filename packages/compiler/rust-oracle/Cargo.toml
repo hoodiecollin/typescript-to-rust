@@ -33,8 +33,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] 
 # reqwest backs the network HTTP surface (series 100, epic #52): `await
 # http.get(url)` / `http.post(url, body)` → `tslib::http::get`/`post` over
 # reqwest (async, rustls TLS so there is no system-OpenSSL dependency). Pinned so
-# the offline cache stays warm; the harness fetches it online on a cold cache
-# (honor the cargo-dep-thundering-herd first-run flake — re-run to confirm).
+# the offline cache stays warm; the harness fetches it online on a cold cache.
+# The test preload pre-warms this (and every dep) once before any spec runs
+# (`ensureDepsWarm`), so a cold add no longer flakes mid-suite.
 # Present-but-unused by network-free output (costs nothing at check time).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # futures backs dynamic async fan-out (series 051b): `Promise.all(arr.map(f))` /
