@@ -132,6 +132,38 @@ export function rng(seed: number): Rng {
 }
 
 /**
+ * A seeded, differential-stable clock (series 102) — the `Date` analog of
+ * `rng(seed)`. Bare `Date.now()` / no-arg `new Date()` read the host wall-clock
+ * and cannot be differential (the Bun and Rust runs observe different instants),
+ * so they are fail-loud; the developer constructs an explicit `clock(epochMs)`
+ * whose "current time" is a call-site argument, so both runtimes read the *same*
+ * instant. The epoch-ms is truncated to an integer to mirror the Rust `i64`
+ * newtype. Reference body — runs under Bun, never compiled.
+ */
+export class Clock {
+  private epochMs: number;
+  constructor(epochMs: number) {
+    this.epochMs = Math.trunc(epochMs);
+  }
+  /** Milliseconds since the Unix epoch — the seeded `Date.now()`. */
+  now(): number {
+    return this.epochMs;
+  }
+  /** A `Date` fixed at the current instant (bridges into the deterministic algebra). */
+  date(): Date {
+    return new Date(this.epochMs);
+  }
+  /** Advance the clock deterministically (the honest analog of elapsed time). */
+  tick(ms: number): void {
+    this.epochMs += Math.trunc(ms);
+  }
+}
+
+export function clock(epochMs: number): Clock {
+  return new Clock(epochMs);
+}
+
+/**
  * `JsonValue` — the opt-in dynamic JSON value (series 090, epic #59). Reached
  * only via {@link parseJsonValue} / {@link fromJsonValue} / {@link toJsonValue};
  * it does NOT reopen `any`. Wraps the raw parsed tree with an explicit,
