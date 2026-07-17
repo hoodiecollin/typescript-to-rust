@@ -26,8 +26,17 @@ tslib = { path = "../../../crates/tslib" }
 # warm; the harness fetches it online on a cold cache. Unused by non-async
 # output (a present-but-unused dependency costs nothing at check time). The
 # `time` feature backs awaited timers (series 051b): `await sleep(ms)` →
-# `tokio::time::sleep(...)`, which does not compile without it.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+# `tokio::time::sleep(...)`, which does not compile without it. The `fs` feature
+# backs async file I/O (series 100): `await fsAsync.readFile(p)` →
+# `tokio::fs::read_to_string(...).await?`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs"] }
+# reqwest backs the network HTTP surface (series 100, epic #52): `await
+# http.get(url)` / `http.post(url, body)` → `tslib::http::get`/`post` over
+# reqwest (async, rustls TLS so there is no system-OpenSSL dependency). Pinned so
+# the offline cache stays warm; the harness fetches it online on a cold cache
+# (honor the cargo-dep-thundering-herd first-run flake — re-run to confirm).
+# Present-but-unused by network-free output (costs nothing at check time).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # futures backs dynamic async fan-out (series 051b): `Promise.all(arr.map(f))` /
 # `Promise.allSettled` → `futures::future::join_all` / `try_join_all` (fully
 # qualified — no `use` prelude). Present-but-unused by fan-out-free output (costs

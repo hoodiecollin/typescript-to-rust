@@ -12,6 +12,14 @@ edition = "2021"
 # `preserve_order` keeps object keys in insertion order (matches JS / IndexMap).
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+# I/O (series 100, epic #52). `tokio` (fs feature) backs the async fs helper
+# `io::read_dir_async`; `reqwest` (async, rustls TLS so there is no system-
+# OpenSSL dependency) backs the `http::get`/`post` client. Both compose with the
+# 051 tokio runtime the emitted `#[tokio::main]` provides. Pinned so the offline
+# cache stays warm (honor the cargo-dep-thundering-herd first-run flake — re-run
+# to confirm green).
+tokio = { version = "1", features = ["fs", "io-util", "rt", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 # for the JSON key-order parity test
