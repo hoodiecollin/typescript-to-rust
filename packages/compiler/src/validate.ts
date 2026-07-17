@@ -265,7 +265,62 @@ export function validate(program: Program): void {
     //    or an unknown `@t2r/std` name, is fail-loud — general module imports
     //    (050) are unshipped.
     if (n.type === "ImportDeclaration") checkStdShimImport(n);
+    // 5. Bare I/O footguns (series 100) → redirect to the `@t2r/std` surface.
+    //    Runs before lowering, so `process.exit(0)` (which would otherwise lower
+    //    silently) and `process.argv`/`env`/`stdin` / `fetch(...)` all fail loud
+    //    with an actionable message pointing at the blessed intrinsic.
+    checkIoFootgunRedirect(n);
   });
+}
+
+/**
+ * Redirect the bare I/O footgun globals to the `@t2r/std` surface (series 100,
+ * epic #52) — the `forbid + redirect` discipline of 084/089. `fetch(...)` → the
+ * `http` namespace; `process.argv`/`env`/`exit`/`stdin` → `args`/`env`/`exit`/
+ * `readStdin`. (Bare `node:fs` imports are already rejected by
+ * `checkStdShimImport`.) `@throws {UnsupportedError}`.
+ */
+function checkIoFootgunRedirect(n: AnyNode): void {
+  if (n.type === "CallExpression") {
+    const callee = (n as { callee?: AnyNode }).callee;
+    if (
+      callee &&
+      callee.type === "Identifier" &&
+      (callee as { name?: string }).name === "fetch"
+    ) {
+      throw new UnsupportedError({
+        type: '`fetch` is not accepted — import `http` from "@t2r/std" and call `http.get(url)` / `http.post(url, body)` in an async function',
+      });
+    }
+  }
+  if (n.type === "MemberExpression") {
+    const m = n as { object?: AnyNode; property?: AnyNode };
+    if (
+      m.object?.type === "Identifier" &&
+      (m.object as { name?: string }).name === "process"
+    ) {
+      const prop =
+        m.property?.type === "Identifier"
+          ? (m.property as { name?: string }).name
+          : undefined;
+      const REDIRECTS: Record<string, string> = {
+        argv: '`process.argv` is not accepted — import `args` from "@t2r/std"',
+        env: '`process.env` is not accepted — import `env` from "@t2r/std"',
+        exit: '`process.exit` is not accepted — import `exit` from "@t2r/std"',
+        stdin:
+          'reading `process.stdin` is not accepted — import `readStdin`/`readLine` from "@t2r/std"',
+        stdout:
+          'writing `process.stdout` is not accepted — import `stdout` from "@t2r/std"',
+        stderr:
+          'writing `process.stderr` is not accepted — import `stderr` from "@t2r/std"',
+      };
+      throw new UnsupportedError({
+        type:
+          (prop && REDIRECTS[prop]) ??
+          '`process` is not accepted — import `args`/`env`/`exit`/`readStdin` from "@t2r/std"',
+      });
+    }
+  }
 }
 
 /**
