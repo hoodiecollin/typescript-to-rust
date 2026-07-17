@@ -1561,17 +1561,28 @@ function lowerFunctionInner(
   // A missing return type used to default silently to `-> ()`; it now fails loud
   // (series 046c). An explicit `: void` annotation still lowers to `UNIT` via
   // `lowerType`, so genuinely unit-returning functions annotate `: void`.
+  let ret: RustType;
   if (!func.returnType) {
-    throw new UnsupportedError({
-      type: `function '${name}' without a return type annotation`,
-      start: func.id?.start,
-    });
+    // Series 099 inference tier: infer the return type via the oracle's signature
+    // resolution (robust to multi-return / implicit `undefined`), re-validate to
+    // a modeled `RustType`. Null (out of surface, or no oracle) keeps the throw.
+    const inferred = analysis.typeOracle
+      ? analysis.typeOracle.inferredReturnRustType(func.start, func.end)
+      : null;
+    if (!inferred) {
+      throw new UnsupportedError({
+        type: `function '${name}' without a return type annotation`,
+        start: func.id?.start,
+      });
+    }
+    ret = inferred;
+  } else {
+    ret = lowerType(
+      func.returnType.typeAnnotation,
+      analysis.structs,
+      analysis.typeParams,
+    );
   }
-  const ret = lowerType(
-    func.returnType.typeAnnotation,
-    analysis.structs,
-    analysis.typeParams,
-  );
 
   if (!func.body)
     throw new UnsupportedError({ type: "function without a body" });
@@ -4057,12 +4068,21 @@ function lowerStaticMethod(
   const info = analysis.methodParams.get(name);
   const params = fn.params.map((p, i) => lowerParam(p, info?.[i], structs));
   applyBaseParamTraits(params, analysis);
+  let ret: RustType;
   if (!fn.returnType) {
-    throw new UnsupportedError({
-      type: `static method '${name}' without a return type annotation`,
-    });
+    // Series 099 inference tier: infer the static-method return via the oracle.
+    const inferred = analysis.typeOracle
+      ? analysis.typeOracle.inferredReturnRustType(member.start, member.end)
+      : null;
+    if (!inferred) {
+      throw new UnsupportedError({
+        type: `static method '${name}' without a return type annotation`,
+      });
+    }
+    ret = inferred;
+  } else {
+    ret = lowerType(fn.returnType.typeAnnotation, structs);
   }
-  const ret = lowerType(fn.returnType.typeAnnotation, structs);
   if (!fn.body) throw new UnsupportedError({ type: "static method without a body" });
   const body = lowerStatements(
     takeDirectives(fn.body.body),
@@ -4103,12 +4123,21 @@ function lowerAccessor(
   if (member.kind === "get") {
     acc.getters.add(prop);
     analysis.accessors.set(className, acc);
+    let ret: RustType;
     if (!fn.returnType) {
-      throw new UnsupportedError({
-        type: `getter '${prop}' without a return type annotation`,
-      });
+      // Series 099 inference tier: infer the getter return via the oracle.
+      const inferred = analysis.typeOracle
+        ? analysis.typeOracle.inferredReturnRustType(member.start, member.end)
+        : null;
+      if (!inferred) {
+        throw new UnsupportedError({
+          type: `getter '${prop}' without a return type annotation`,
+        });
+      }
+      ret = inferred;
+    } else {
+      ret = lowerType(fn.returnType.typeAnnotation, structs);
     }
-    const ret = lowerType(fn.returnType.typeAnnotation, structs);
     if (!fn.body) throw new UnsupportedError({ type: "getter without a body" });
     const body = lowerStatements(
       takeDirectives(fn.body.body),
@@ -4972,13 +5001,22 @@ function lowerMethodInner(
   applyBaseParamTraits(params, analysis);
   // A missing return type fails loud (series 046c); an explicit `: void` still
   // lowers to `UNIT`.
+  let ret: RustType;
   if (!fn.returnType) {
-    throw new UnsupportedError({
-      type: `method '${name}' without a return type annotation`,
-      start: (member.key as { start?: number }).start,
-    });
+    // Series 099 inference tier: infer the method return via the oracle.
+    const inferred = analysis.typeOracle
+      ? analysis.typeOracle.inferredReturnRustType(member.start, member.end)
+      : null;
+    if (!inferred) {
+      throw new UnsupportedError({
+        type: `method '${name}' without a return type annotation`,
+        start: (member.key as { start?: number }).start,
+      });
+    }
+    ret = inferred;
+  } else {
+    ret = lowerType(fn.returnType.typeAnnotation, structs, analysis.typeParams);
   }
-  const ret = lowerType(fn.returnType.typeAnnotation, structs, analysis.typeParams);
   if (!fn.body) throw new UnsupportedError({ type: "method without a body" });
   // Series 088: seed *this method's* param types into `bindingTypes` for the body's
   // duration, restored after. The global `collectBindingTypes` map is name-keyed, so
@@ -7652,7 +7690,7 @@ function lowerVarDecl(
     if ((d.id as { type: string }).type !== "Identifier") {
       throw new UnsupportedError({ type: "destructuring binding" });
     }
-    const ty = d.id.typeAnnotation
+    let ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
     // f64-bearing struct key (series 074): a `Map<Point,V>`/`Set<Point>` binding
@@ -7710,10 +7748,32 @@ function lowerVarDecl(
       // infers it, so no annotation is required (like an `<array>.find(…)`).
       !isStringAtCall(d.init, analysis)
     ) {
-      throw new UnsupportedError({
-        type: `binding '${d.id.name}' without a type annotation`,
-        start: d.id.start,
-      });
+      // Series 099 inference tier: before failing loud, ask the lib-backed oracle
+      // to infer the initializer's type *through* built-in signatures and
+      // re-validate it to a modeled `RustType`. An inferred `any`/`unknown`
+      // throws `DialectError` from the oracle; null (out-of-surface, or no oracle)
+      // keeps the throw below.
+      const inferred =
+        d.init && analysis.typeOracle
+          ? analysis.typeOracle.inferredRustType(d.init.start, d.init.end)
+          : null;
+      if (inferred) {
+        // Unlike an annotation, inference means the init ALREADY has this type —
+        // it is NOT a coercion target (don't `Some`-wrap an option-returning
+        // call, don't re-coerce a union). So record it for downstream analysis
+        // (indexing / `if let Some` narrowing / method dispatch / `fmt_opt`) and
+        // leave `ty` null so `lowerTyped` does the natural, non-coercing lowering
+        // and Rust infers the binding — exactly as the by-construction exemptions
+        // above already do for `.find` / `.at` / `Object.entries`.
+        if (d.id.type === "Identifier") {
+          analysis.bindingTypes.set(d.id.name, inferred);
+        }
+      } else {
+        throw new UnsupportedError({
+          type: `binding '${d.id.name}' without a type annotation`,
+          start: d.id.start,
+        });
+      }
     }
     // An object/array literal is interpreted from its binding's type: a `hashmap`
     // → `HashMap::from([…])`, a `struct` → `Name { … }`, a `vec<struct>` →
