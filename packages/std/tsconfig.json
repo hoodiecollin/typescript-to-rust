@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    // Bun's typings supply the `process` global + the `node:fs` module
+    // declarations the I/O shim bodies use (series 100). The bodies only ever
+    // run under Bun (the differential oracle), so bun types are the right lens.
+    "types": ["bun"]
+  }
+}
