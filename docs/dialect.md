@@ -960,6 +960,54 @@ chained `.join(",")` / `?? d` resolves.
 
 ---
 
+## RegExp (series 101)
+
+A regex literal `/pat/flags` and `new RegExp("lit", "flags")` (string-literal
+pattern) lower to a `tslib::regex::Regex` over the Rust `regex` crate. Because the
+pattern is **statically known**, it is translated + validated **at transpile
+time**: the `regex` engine is a finite automaton (linear-time, **no
+backreferences, no lookaround**), so the faithful core ships and the unsupported
+constructs fail loud *naming the construct* — never mistranslated. Flags `i`/`m`/`s`
+fold into an inline `(?ims)` prefix; `g` is carried on the value (picks the
+call-site shape); `u` is a no-op accept (Rust `regex` is Unicode by default).
+
+The regex is a **stateless value** (sub-decision RE-STATE): the non-stateful uses
+ship fully; the stateful `g`/`lastIndex`/`exec`-loop idiom is fail-loud →
+`s.matchAll(re)`.
+
+- **Regex methods**: `re.test(s)` → `bool`; a single `re.exec(s)` → the first
+  match (`RegExpMatchArray | null`).
+- **String methods** (the regex is the Rust receiver, the string the argument):
+  `s.match(re)` → the capture array (no `g`) or the full-match list (`g`);
+  `s.matchAll(re)` (requires `g`) → an iterator of match arrays; `s.replace`/
+  `s.replaceAll` → `replace_first`/`replace_all` (a **string-literal** replacement
+  template, `$1`/`$<name>`/`$&`/`$$` translated); `s.split(re)`; `s.search(re)` →
+  the first match's **char** index (`-1` if none).
+- **Match arrays**: `m![i]` (positional) and `m!.groups!.name` (named) → an
+  `Option<String>` (`None` = out-of-range / non-participating → JS `undefined`,
+  the 066 model). A regex binding / match result needs no annotation (typed by
+  construction, like `.find`/`.at`).
+
+Divergences (faithful-but-documented, not fail-loud): `\d`/`\w`/`\s` are
+Unicode-aware in Rust `regex` (JS is ASCII-ish) — faithful for ASCII input; a
+capturing split (`/(sep)/`) drops the captured separators (JS keeps them); offsets
+are **char** indices (the 083/098 char-indexed model, not UTF-16 code units); a
+`matchAll` non-participating group renders `""` (not `undefined`).
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| A backreference (`\1`, `\k<name>`) in a literal pattern | Not yet | `` a backreference (`\1`) is not supported by the Rust `regex` engine… `` |
+| Lookahead (`(?=…)`/`(?!…)`) / lookbehind (`(?<=…)`/`(?<!…)`) | Not yet | `` lookahead `(?=…)` is not supported… `` / `` lookbehind `(?<=…)`… `` |
+| The sticky `y` flag / the `d` (hasIndices) flag | Not yet | `` the sticky `y` flag … is not modeled `` / `` the `d` (hasIndices…) flag is not modeled `` |
+| `re.lastIndex` read/write | Not yet | `` `RegExp.lastIndex` (stateful matching) is not modeled … use `s.matchAll(re)` `` |
+| A stateful `exec` loop (`while ((m = re.exec(s)))`) | Not yet | `` the stateful `RegExp.exec` loop is not modeled — use `s.matchAll(re)` `` |
+| `new RegExp(runtimeVar)` (non-literal pattern) | Not yet | `` a `RegExp` built from a non-literal pattern cannot be validated … inline the pattern as a literal `` |
+| A function replacer `s.replace(re, (m) => …)` | Not yet | `` a function replacer in `.replace` is not modeled (v1) — use a string replacement template `` |
+| The `` $` `` / `$'` (before-/after-match) replacement specials | Not yet | `` the `` $` `` / `$'` … replacement specials have no Rust `regex` equivalent `` |
+| `s.matchAll(re)` / `s.replaceAll(re, …)` without the `g` flag | Not yet | `` `s.matchAll(re)` requires the `g` flag on the regex (as in JS) `` |
+
+---
+
 ## Directives (`"use …"` string prologues)
 
 Recognized: `"use strict"` (ignored), `"use panic"`, `"use rc"`, `"use arena"`.
