@@ -868,8 +868,10 @@ behavior: the type/policy problem moves to an explicit call-site API. The shim i
 **real, Bun-resolvable TS** (`packages/std`, a workspace package) so the
 differential oracle runs faithful behavior matching the emitted Rust.
 
-`@t2r/std` is the **only** modeled import. Tier A exports: `parseJson`,
-`stringifyJson`.
+`@t2r/std` is the **only** modeled import. Exports: JSON (`parseJson`,
+`stringifyJson`, and the 090 `JsonValue` boundary), the 089 seeded `rng`, and the
+series-100 **I/O** surface (fs / env / process / stdin / async fs / HTTP — see
+[I/O via `@t2r/std`](#io-via-t2rstd-series-100) below).
 
 - **`stringifyJson(v): string`** → the `tslib::json::stringify` writer (JS number
   fidelity: integrals no `.0`, shortest-round-trip fractions, `Infinity`/`NaN` →
@@ -911,6 +913,50 @@ annotation-driven `JSON.parse` and untyped `serde_json::Value` fallback are
 | `JSON.stringify(...)` (bare) | Not yet | `` `JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)` `` |
 | `JSON.parse(...)` (bare, any position, annotated or not) | Not yet | `` `JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)` `` |
 | Any other `JSON.*` (`JSON.rawJSON`, …) | Not yet | `JSON.<name>` |
+
+## I/O via `@t2r/std` (series 100)
+
+The I/O surface rides the same shim lane — sync fs / env / process / stdin, async
+fs, and HTTP, each recognized only by the reserved specifier and lowered to a
+concrete Rust target. Every fallible op folds into the shipped `throw`↔`Result`/`?`
+model (design series 049): a failing call `throw`s in the Bun run and returns
+`Err` in Rust, so `try`/`catch` and propagation mirror exactly, with I/O as the
+error source. Fallible tslib helpers normalize their error to `String` at the
+leaf, so the emitter only ever sees `Result<_, String>` (the `String`-error spine
+is intact; `?` composes into a `String`- or `AppError`-returning fn).
+
+- **Sync fs** (`std::fs` / `tslib::io`): `readFile`/`writeFile`/`appendFile`/
+  `removeFile`/`readDir`(sorted)/`mkdir`(recursive)/`removeDir`(recursive) — all
+  fallible; `exists` — infallible (`false` on any error).
+- **Env / process** (`std::env` / `std::process`): `env(name): string | null` →
+  `Option<String>` (the 066 model; `?? d` / narrowing apply), `args(): string[]`
+  (the args after the binary — `process.argv.slice(2)` parity), `exit(code): never`.
+- **Stdin / streams** (`std::io` / `tslib::io`): `readStdin()` (all of stdin),
+  `readLine(): string | null` (one line, newline stripped, `null` at EOF),
+  `stdout()`/`stderr()` → a `Writer` handle with `write`/`writeLine`/`flush`
+  (byte-precise, **infallible** — JS `process.stdout.write` doesn't throw either).
+- **Async fs** (`tokio::fs`): the `fsAsync.*` namespace — `readFile`/`writeFile`/
+  `readDir`/`removeFile`/`mkdir`, only valid **awaited** inside an `async` fn
+  (`.await?`); an un-awaited one is the 051 un-polled-future fail-loud.
+- **HTTP** (`tslib::http` over reqwest, rustls): the `http.get(url)` /
+  `http.post(url, body)` namespace → a `HttpResponse` (`.status`/`.ok` fields,
+  `.body` accessor). GET/POST of **text bodies only**; awaited (`.await?`).
+
+Handle/result bindings need no annotation (typed by construction, like
+`parseJson<T>`); an I/O `Vec<String>`/`Option<String>` binding is recorded so a
+chained `.join(",")` / `?? d` resolves.
+
+| Trigger | Kind | Message |
+|---------|------|---------|
+| Bare `fetch(...)` (Bun/Node global) | Not yet | `` `fetch` is not accepted — import `http` from "@t2r/std"… `` |
+| Bare `process.argv`/`env`/`exit`/`stdin`/`stdout`/`stderr` | Not yet | `` `process.<name>` is not accepted — import `args`/`env`/`exit`/`readStdin`… `` |
+| Bare `node:fs` / other-specifier import (`readFileSync`, …) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module…` |
+| An `fsAsync.*` / `http.*` call **not** directly awaited (un-polled future) | Not yet | `call to an async method not directly awaited (an un-polled future never runs)` |
+| An unknown `http` method (not `get`/`post`) | Not yet | `` `.<m>` on `http` — only get/post of text bodies are available `` |
+| An unknown `Writer` method (not `write`/`writeLine`/`flush`) | Not yet | `` `.<m>` on a Writer — only `write`, `writeLine`, `flush` are available `` |
+| `.<prop>` on an http response other than `.status`/`.ok`/`.body` | Not yet | `` `.<prop>` on an http response — only `.status`, `.ok`, `.body` are available `` |
+| `await` inside a `try`/`catch` (async error recovery) | Not yet | `await inside a try/catch is not yet supported (async error recovery is a later slice)…` |
+| Streaming / file-watch / raw sockets / binary file I/O / HTTP headers | Not yet | (out-of-surface — no shim entry; unknown `@t2r/std` name → `'<name>' is not exported…`) |
 
 ---
 
