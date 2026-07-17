@@ -48,19 +48,25 @@ don't. Each row below quotes the message the compiler prints.
 
 ## Required (the positive rules)
 
-- **Explicit type annotations** on every variable, function parameter, and
-  function return type. Exception: a binding whose initializer is a
-  statically-obvious literal — a scalar (`const n = 5`, `const s = "hi"`,
-  `const b = true`) or a **non-empty, homogeneous scalar-literal array**
-  (`const xs = [1, 2, 3]`, `["a", "b"]`, `[true, false]`) — may be left untyped
-  (series 046). Builtin forms the compiler types by construction are likewise
-  exempt: a stored `Object.entries(…)`, a `parseJson<T>(…)` std-shim result
-  (→ `ParseResult<T>`, series 084 — the `<T>` carries the type),
-  an `<array>.find(…)`, and a `using` resource. Everything else — a call to a
-  user function, arithmetic, `-5`, `null`/`undefined`, a bare identifier, a
-  member access, a template literal, an empty/mixed/nested array — must be
-  annotated. A **missing function/method return type** is likewise fail-loud
-  (it no longer defaults to `-> ()`); annotate `: void` for a unit return.
+- **Explicit type annotations** on every function **parameter**. A parameter has
+  no inferable type (an un-annotated param is implicit `any`, which is forbidden),
+  so this is a hard requirement — `parameter '<name>' without a type annotation`.
+  **Bindings and function/method/getter return types may be left un-annotated**
+  (series 099): the tsc-backed TypeOracle infers the type *through* built-in
+  signatures (`.map`, `.find`, template literals, `Object.entries`, …) and a
+  **re-validation gate** either maps it to a modeled `RustType` (then it is used,
+  exactly as an annotation would be) or keeps the fail-loud "without a … type
+  annotation" throw. So an un-annotated `const doubled = xs.map(x => x*2)` or a
+  return-type-less `function area(w: number, h: number) { return w*h; }` now lower.
+  What the gate still rejects (unchanged-loud): an inferred **tuple**, **function
+  type**, **anonymous object**, **wide non-nullish union** (093 unions are
+  name-driven), `any`/`unknown` (a `DialectError`), `bigint`/`symbol`, an
+  `null`/`undefined`-only initializer, or anything else outside the modeled
+  surface. Statically-obvious literals (`const n = 5`, `["a","b"]`) and the
+  by-construction forms (`Object.entries`, `parseJson<T>`, `.find`, `.at`, `using`)
+  keep their fast pre-check and never reach the oracle. A `: void` return still
+  lowers to a unit fn. (Class-field non-literal initializers are **not** inferred
+  this series — that stays fail-loud, deferred.)
 - **Statically-known, closed object shapes** via `interface`, `type`, or `class`.
   Object literals must conform to a declared shape.
 - **No shared mutable aliasing that escapes what the ownership pass can prove
@@ -183,7 +189,7 @@ see the JSON-divergence bullet above).
 | Array-destructuring over a source whose element type is unknown | Not yet | `array-destructuring over a source whose element type is unknown` |
 | Rest **parameter** `(...args: T[])` (variadic — distinct from a rest *binding*) | Not yet | `rest parameter` |
 | Parameter without a type annotation | Not yet | `parameter '<name>' without a type annotation` |
-| An untyped binding outside the obvious-literal exception (scalar or homogeneous scalar-literal array), excluding the builtin `Object.entries`/`JSON.parse`/`.find`/`using` forms | Not yet | `binding '<name>' without a type annotation` |
+| An un-annotated binding whose initializer the oracle **can't infer to a modeled type** (inferred tuple / function type / anonymous object / wide union / `null`/`undefined`-only / no source threaded). Inferable-to-modeled bindings now lower (series 099); obvious literals + by-construction forms short-circuit before the oracle. | Not yet | `binding '<name>' without a type annotation` |
 
 > **Binding destructuring is supported** (series 067 + 097). Object: `const { x, y
 > } = point`, renamed `const { x: px } = point`, and rest `const { x, ...rest } =
@@ -203,8 +209,8 @@ see the JSON-divergence bullet above).
 |---------|------|---------|
 | Anonymous function declaration (no name) | Not yet | generic `Unsupported <node>` |
 | Function without a body | Not yet | `function without a body` |
-| Function without a return-type annotation (was a silent `-> ()`) | Not yet | `function '<name>' without a return type annotation` |
-| Method without a return-type annotation | Not yet | `method '<name>' without a return type annotation` |
+| Function without a return-type annotation **whose inferred return is out of surface** (series 099 infers modeled returns via `getReturnTypeOfSignature`; a `Promise<T>` unwraps to `T`) | Not yet | `function '<name>' without a return type annotation` |
+| Method / static-method / getter without a return-type annotation, inferred return out of surface | Not yet | `method '<name>' without a return type annotation` |
 | Top-level script statements alongside a user-defined `main()` | Not yet | `top-level statements alongside a user-defined main()` |
 
 ---
