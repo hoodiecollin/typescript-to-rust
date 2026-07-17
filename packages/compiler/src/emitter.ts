@@ -227,12 +227,19 @@ function emitMain(mod: HirModule): string {
  * `lower()` result, byte-for-byte unchanged.
  */
 export function emitModule(mod: HirModule): string {
+  // Inline `namespace` mods (series 050d, Axis 4) render *within* this single file
+  // as `mod Foo { … }`. A single-file `lower()` only ever produces inline mods (a
+  // real crate goes through `emitCrate`); their items join the struct table + JSON
+  // scan so a namespace struct's derives resolve.
+  const inlineMods = (mod.mods ?? []).filter((m) => m.inline);
+  const allItems = [...mod.items, ...inlineMods.flatMap((m) => m.items)];
   // A struct table (interface + class field shapes) drives on-demand trait
   // derivation (`derives.ts`); threaded through item emission.
-  const structs = buildStructTable(mod.items);
+  const structs = buildStructTable(allItems);
   // Generated structs derive serde traits only when the module uses JSON (045).
-  const usesJson = crateUsesJson(mod);
-  const parts = mod.items.map((item) => emitItem(item, structs, usesJson));
+  const usesJson = crateUsesJson({ items: allItems, main: mod.main });
+  const parts = inlineMods.map((m) => emitInlineMod(m, structs, usesJson));
+  parts.push(...mod.items.map((item) => emitItem(item, structs, usesJson)));
   if (mod.main.length > 0) parts.push(emitMain(mod));
   const imports = stdImports(mod.items, mod.main);
   const prelude = imports.length > 0 ? `${imports.join("\n")}\n\n` : "";
@@ -355,6 +362,10 @@ function emitInlineMod(
   usesJson: boolean,
 ): string {
   const inner: string[] = [];
+  // A `mod { … }` block does not inherit the file's `use` prelude, so each inline
+  // mod computes its own std imports from its items (series 050d).
+  const imports = stdImports(m.items, []);
+  if (imports.length > 0) inner.push(imports.join("\n"));
   if (m.uses.length > 0) inner.push(m.uses.join("\n"));
   for (const item of m.items) inner.push(emitItem(item, structs, usesJson));
   const body = inner.map((s) => indent(s)).join("\n\n");

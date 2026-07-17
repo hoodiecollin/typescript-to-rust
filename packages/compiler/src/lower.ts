@@ -194,18 +194,28 @@ export function lower(
   source?: string,
   crateNamespaces?: ReadonlySet<string>,
 ): HirModule {
+  // Extract `namespace Foo { … }` blocks (series 050d, Axis 4) **before** the
+  // dialect gate — each lowers recursively to an inline `mod Foo { pub … }` below,
+  // and pulling them out keeps `validate` from seeing the namespace wrapper or its
+  // inner `export`s. The remaining program is namespace-free.
+  const nsExtract = extractNamespaces(program);
+  const nsProgram = nsExtract.program;
+  // All path-root names (import aliases + this program's namespaces) — a member
+  // access `X.y` on any of these routes to the Rust path `X::y`.
+  const pathRoots = new Set<string>(crateNamespaces ?? []);
+  for (const ns of nsExtract.namespaces) pathRoots.add(ns.name);
   // Step 2: reject input forbidden by the dialect (`any`/`unknown`, …) — fail
   // loud with `DialectError`, distinct from the "not yet implemented" gate below.
-  validate(program);
+  validate(nsProgram);
   // Normalize a top-level `const f = (…) => …` arrow into a synthetic function
   // declaration *before* analysis, so ownership, fallibility, and lowering treat
   // it identically to a `function` (see normalizeArrows).
-  const normalized = normalizeArrows(program);
+  const normalized = normalizeArrows(nsProgram);
   const analysis = analyzeModule(normalized);
   // Namespace / import-alias path roots (series 050d, Axis 4): the crate layer
-  // passes its `import * as ns` aliases here so `ns.f()` routes to `ns::f()`; a
-  // `namespace Foo {}` in this program adds `Foo` below (after it is lowered out).
-  if (crateNamespaces) for (const n of crateNamespaces) analysis.namespaces.add(n);
+  // passes its `import * as ns` aliases; a `namespace Foo {}` adds `Foo`. So
+  // `ns.f()` / `Foo.bar()` route to the module path `ns::f()` / `Foo::bar()`.
+  for (const n of pathRoots) analysis.namespaces.add(n);
   // Enum names are nominal types too — resolve them like structs in `lowerType`
   // (the emitter renders both as the bare name). They stay in `analysis.enums`
   // as well, so a member access `E.Variant` still lowers to a path, not a field.
@@ -481,7 +491,7 @@ export function lower(
   // struct, so the `return self.field` move-out drops the 038 clone. Runs after
   // `computeAutoRc` (which decides consuming vs demoted).
   applyOwnedSelf(module, autoRc.consumingMethods);
-  return fixKeyBorrows(
+  const result = fixKeyBorrows(
     fixStringScrutinees(
       refineOwnership(
         refineTaskEscape(
@@ -501,6 +511,37 @@ export function lower(
       ),
     ),
   );
+  // Namespaces (series 050d, Axis 4): lower each extracted block **recursively**
+  // to an inline `mod` — its members run the full pipeline on their own, and an
+  // `export`ed member is `pub` so a `Foo.bar()` (routed to `Foo::bar()` above)
+  // resolves. Reopened blocks were already coalesced by `extractNamespaces`. The
+  // path-root set is threaded through so a namespace member can reference another
+  // namespace (`Bar.x`). A namespace body carries only declarations (no top-level
+  // statements — enforced in extraction), so its `main` is always empty.
+  if (nsExtract.namespaces.length > 0) {
+    const nsMods: HirMod[] = [];
+    for (const ns of nsExtract.namespaces) {
+      const lowered = lower(
+        { type: "Program", body: ns.members, start: 0, end: 0 },
+        undefined,
+        pathRoots,
+      );
+      for (const item of lowered.items) {
+        const nm = (item as { name?: string }).name;
+        if (nm && ns.exported.has(nm)) (item as { vis?: Vis }).vis = "pub";
+      }
+      nsMods.push({
+        kind: "mod",
+        name: ns.name,
+        modPath: [ns.name],
+        uses: lowered.uses ?? [],
+        items: lowered.items,
+        inline: true,
+      });
+    }
+    result.mods = [...(result.mods ?? []), ...nsMods];
+  }
+  return result;
 }
 
 /**
@@ -526,6 +567,97 @@ function crateDeclName(stmt: Statement): string | undefined {
     return (stmt as { id?: { name?: string } }).id?.name;
   }
   return undefined;
+}
+
+/**
+ * A `namespace Foo { export … }` block extracted from a program (series 050d,
+ * Axis 4) — its name, its member declarations (unwrapped from any `export`), and
+ * the set of member names that were `export`ed (→ `pub` inside the `mod`). A
+ * reopened namespace (declared twice) is coalesced into one block by name.
+ */
+interface NsBlock {
+  name: string;
+  members: Statement[];
+  exported: Set<string>;
+}
+
+/**
+ * Pull every top-level `namespace Foo { … }` (`TSModuleDeclaration`) out of a
+ * program (series 050d, Axis 4), returning the namespace-free program plus the
+ * coalesced blocks. Run **before** `validate` so the whole-tree gate never sees the
+ * namespace wrapper or its inner `export`s — each block's members are plain
+ * declarations (modeled) that lower recursively into an inline `mod`. A reopened
+ * `namespace Foo` merges into one block (Rust `mod` can't reopen). A namespace
+ * member that is not a named declaration (a top-level statement, a bare `const`, a
+ * re-export) has no `mod`-item analog → fail-loud.
+ */
+function extractNamespaces(program: Program): {
+  program: Program;
+  namespaces: NsBlock[];
+} {
+  const kept: Statement[] = [];
+  const byName = new Map<string, NsBlock>();
+  const order: string[] = [];
+  const blockFor = (name: string): NsBlock => {
+    let b = byName.get(name);
+    if (!b) {
+      b = { name, members: [], exported: new Set() };
+      byName.set(name, b);
+      order.push(name);
+    }
+    return b;
+  };
+  for (const stmt of program.body) {
+    if (stmt.type !== "TSModuleDeclaration") {
+      kept.push(stmt);
+      continue;
+    }
+    const decl = stmt as unknown as {
+      id: { type: string; name: string };
+      body?: { type: string; body: Statement[] } | null;
+    };
+    // A qualified `namespace A.B {}` (nested id) or a `declare`/ambient module has
+    // no `TSModuleBlock` body → no sound `mod` mapping.
+    if (decl.id.type !== "Identifier" || decl.body?.type !== "TSModuleBlock") {
+      throw new UnsupportedError({
+        type: "namespace form (only `namespace <Ident> { … }` with a block body is modeled)",
+      });
+    }
+    const block = blockFor(decl.id.name);
+    for (const inner of decl.body.body) {
+      if (inner.type === "ExportNamedDeclaration") {
+        const exp = inner as unknown as {
+          declaration: Statement | null;
+          source: unknown;
+        };
+        if (!exp.declaration || exp.source) {
+          throw new UnsupportedError({
+            type: "namespace member (only `export <decl>` / a bare decl; no re-export or specifier list)",
+          });
+        }
+        const name = crateDeclName(exp.declaration);
+        if (!name) {
+          throw new UnsupportedError({
+            type: `namespace member must be a named declaration (${exp.declaration.type})`,
+          });
+        }
+        block.exported.add(name);
+        block.members.push(exp.declaration);
+      } else {
+        const name = crateDeclName(inner);
+        if (!name) {
+          throw new UnsupportedError({
+            type: `namespace member must be a declaration, not a top-level statement (${inner.type})`,
+          });
+        }
+        block.members.push(inner);
+      }
+    }
+  }
+  return {
+    program: { ...program, body: kept },
+    namespaces: order.map((n) => byName.get(n)!),
+  };
 }
 
 /**
@@ -946,6 +1078,11 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
       facade: facadeKeys.has(key) || undefined,
     });
   }
+  // Inline `namespace` mods (series 050d, Axis 4) surfaced by the merged lowering
+  // are carried through at crate-root scope (a namespace declared in any crate file
+  // routes as `Foo::bar` crate-wide). They render within the root file, not as
+  // their own source file.
+  if (lowered.mods) mods.push(...lowered.mods);
 
   return {
     ...lowered,

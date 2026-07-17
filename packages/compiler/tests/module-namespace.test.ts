@@ -26,4 +26,47 @@ defineDifferential("module-namespace", [
       expect(rust).toContain("m::add(");
     },
   },
+  // ── MOD26 — a `namespace Foo { export fn }` → `mod Foo { pub fn }` ─────────
+  {
+    name: "MOD26 namespace declaration → inline mod, `Foo.bar()` → `Foo::bar()`",
+    src: `namespace Geometry {
+  export function square(n: number): number { return n * n; }
+}
+console.log(Geometry.square(6));`,
+    expected: "36",
+    extra: ({ rust }) => {
+      expect(rust).toMatch(/mod Geometry \{/);
+      expect(rust).toContain("pub fn square");
+      expect(rust).toContain("Geometry::square(");
+    },
+  },
+  // ── MOD27 — a reopened namespace coalesces into one `mod` ──────────────────
+  {
+    name: "MOD27 reopened namespace coalesces; both members resolve",
+    src: `namespace M {
+  export function a(): number { return 10; }
+}
+namespace M {
+  export function b(): number { return 20; }
+}
+console.log(M.a() + M.b());`,
+    expected: "30",
+    extra: ({ rust }) => {
+      // Exactly one `mod M { … }` (reopened blocks coalesced), carrying both fns.
+      expect(rust.match(/mod M \{/g)?.length).toBe(1);
+      expect(rust).toContain("pub fn a");
+      expect(rust).toContain("pub fn b");
+    },
+  },
+  // ── MOD26b — a namespace member calling a sibling member (intra-mod call) ──
+  {
+    name: "MOD26b namespace member calls a sibling member",
+    src: `namespace Calc {
+  export function dbl(n: number): number { return n * 2; }
+  export function quad(n: number): number { return dbl(dbl(n)); }
+}
+console.log(Calc.quad(3));`,
+    expected: "12",
+    extra: ({ rust }) => expect(rust).toContain("Calc::quad("),
+  },
 ]);
