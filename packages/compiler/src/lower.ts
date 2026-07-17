@@ -2771,6 +2771,17 @@ function lowerTry(
     : null;
   const errTy = programErrType(analysis);
 
+  // A `try` body that `await`s (e.g. `try { await fsAsync.readFile(p) } catch`)
+  // is fail-loud: recovery lowers to a **sync** `Result`-returning IIFE closure,
+  // which cannot host an `.await`. Async error-recovery (an `async` recovery
+  // closure) is a separate slice — reject rather than emit a closure that will
+  // not compile. The sync fallible catch (IO7) is unaffected.
+  if (hirHasAwait(rawTry)) {
+    throw new UnsupportedError({
+      type: "await inside a try/catch is not yet supported (async error recovery is a later slice — await outside the try, or handle the error via the propagated Result)",
+    });
+  }
+
   // `try`/`finally` with no `catch` handler (series 063, graduated): a labeled
   // block captures the `Result`, `finally` runs on both paths, then an error
   // propagates. `finally` + an escaping jump stays fail-loud (carrier-enum
@@ -7040,6 +7051,20 @@ function receiverTypeOf(
       }
     }
   }
+  // `@t2r/std` I/O intrinsics returning `Vec<String>` (series 100): a chained
+  // `.join(",")` on `args()` / `readDir(p)` routes through the `vec` gate (the
+  // oracle can't type the shim return, so it is resolved structurally here).
+  if (
+    expr.type === "CallExpression" &&
+    (expr as CallExpression).callee.type === "Identifier"
+  ) {
+    const intr = analysis.stdShim.get(
+      ((expr as CallExpression).callee as Identifier).name,
+    );
+    if (intr === "args" || intr === "readDir") {
+      return { kind: "vec", elem: { kind: "String" } };
+    }
+  }
   // Tier 1 — bare identifier → bindingTypes (the fast, pre-082 path).
   if (expr.type === "Identifier") {
     const name = (expr as Identifier).name;
@@ -7746,7 +7771,11 @@ function lowerVarDecl(
       !isArrayFromMapCall(d.init) &&
       // A string `.at(i)` (098) → `Option<String>`, typed by construction; Rust
       // infers it, so no annotation is required (like an `<array>.find(…)`).
-      !isStringAtCall(d.init, analysis)
+      !isStringAtCall(d.init, analysis) &&
+      // An `@t2r/std` I/O intrinsic binding (series 100) — `const s = readFile(p)`,
+      // `const w = stdout()`, `const res = await http.get(u)` — is typed by
+      // construction (the `tslib` return); Rust infers it, so no annotation.
+      !isStdIoInit(d.init, analysis)
     ) {
       // Series 099 inference tier: before failing loud, ask the lib-backed oracle
       // to infer the initializer's type *through* built-in signatures and
@@ -7830,6 +7859,39 @@ function lowerVarDecl(
     if (init.kind === "rngNew" && d.id.type === "Identifier") {
       analysis.rngBindings.add((d.id as Identifier).name);
     }
+    // Track a `stdout()`/`stderr()` `Writer` handle binding (series 100): a later
+    // `.write()/.writeLine()/.flush()` routes to the handle surface. The lowered
+    // init is a `tslib::io::stdout`/`stderr` call. Emitted `let mut` below.
+    if (
+      init.kind === "call" &&
+      (init.callee === "tslib::io::stdout" ||
+        init.callee === "tslib::io::stderr") &&
+      d.id.type === "Identifier"
+    ) {
+      analysis.writerBindings.add((d.id as Identifier).name);
+    }
+    // Track an `http.get`/`post` result binding (series 100): the lowered init is
+    // `try(await(tslib::http::get|post(...)))`, so a later `.status`/`.ok`/`.body`
+    // routes to the `HttpResponse` surface.
+    if (
+      init.kind === "try" &&
+      init.expr.kind === "await" &&
+      init.expr.expr.kind === "call" &&
+      (init.expr.expr.callee === "tslib::http::get" ||
+        init.expr.expr.callee === "tslib::http::post") &&
+      d.id.type === "Identifier"
+    ) {
+      analysis.httpResponseBindings.add((d.id as Identifier).name);
+    }
+    // Record the `RustType` of an I/O intrinsic binding (series 100) so a later
+    // method call resolves by type — e.g. `.join(",")` on a `Vec<String>` from
+    // `readDir`/`args`, or a `?? d` on the `Option<String>` from `env`/`readLine`.
+    // `ty` stays null (Rust infers the `let`); this only feeds method dispatch,
+    // exactly as the 099 inferred-binding recording does.
+    if (d.id.type === "Identifier") {
+      const ioTy = ioBindingRustType(init);
+      if (ioTy) analysis.bindingTypes.set((d.id as Identifier).name, ioTy);
+    }
     // A `const b = r.shuffle(arr)` binding (089) holds a fresh `Vec<T>` — record
     // its `bindingTypes` entry (element type from the source array) so a later
     // `b.join(",")` / `b.map(...)` resolves via the `vec` gate. The `noLib` oracle
@@ -7898,10 +7960,20 @@ function lowerVarDecl(
     // `&mut self` (they advance the internal state), so the handle is only useful
     // mutably even without a TS reassignment.
     const rngHandle = init.kind === "rngNew";
+    // A `stdout()`/`stderr()` `Writer` handle (series 100) is always `let mut` —
+    // its `write`/`writeLine`/`flush` methods take `&mut self`.
+    const writerHandle =
+      init.kind === "call" &&
+      (init.callee === "tslib::io::stdout" ||
+        init.callee === "tslib::io::stderr");
     return {
       kind: "let",
       name: d.id.name,
-      mut: (mutable?.has(d.id.name) ?? false) || steppedInstance || rngHandle,
+      mut:
+        (mutable?.has(d.id.name) ?? false) ||
+        steppedInstance ||
+        rngHandle ||
+        writerHandle,
       ty: letTy,
       init,
     };
@@ -9005,11 +9077,15 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       // Option coercion on reassignment (series 066): `x = v` where `x` is
       // `Option<T>` `Some`-wraps a present value (`undefined`/`null` → `None`), so
       // the slot stays `Option<T>`. Mirrors the let-init / field-init coercion.
+      // Exception (series 100): a value that is *already* an `Option` by
+      // construction — `readLine()`/`env(...)` — must NOT be re-wrapped (that
+      // would double it to `Option<Option<T>>`); it reassigns naturally below.
       if (
         a.operator === "=" &&
         a.left.type === "Identifier" &&
         analysis.bindingTypes.get((a.left as Identifier).name)?.kind === "option" &&
-        !analysis.narrowedOptions.has((a.left as Identifier).name)
+        !analysis.narrowedOptions.has((a.left as Identifier).name) &&
+        !isOptionReturningIoCall(a.right, analysis)
       ) {
         const value: HirExpr = isNullishExpr(a.right)
           ? { kind: "none" }
@@ -9197,6 +9273,19 @@ function lowerAwait(expr: AwaitExpression, analysis: ModuleAnalysis): HirExpr {
   if (callee.type === "MemberExpression") {
     const combinator = lowerAwaitCombinator(call, callee as MemberExpression, analysis);
     if (combinator) return combinator;
+  }
+
+  // `await fsAsync.<m>(...)` / `await http.<m>(...)` (series 100) — an async-I/O
+  // namespace call → `<tslib target>(&args).await?`. Handled here (before the
+  // generic async-method path) since the `fsAsync`/`http` methods are not in
+  // `asyncMethods`; the fallibility rides the `bodyUsesAsyncIo` seed.
+  if (callee.type === "MemberExpression") {
+    const obj = (callee as MemberExpression).object;
+    const ns =
+      obj.type === "Identifier"
+        ? analysis.ioAsyncNamespaces.get((obj as Identifier).name)
+        : undefined;
+    if (ns) return lowerIoAsyncCall(ns, call, analysis);
   }
 
   // `await obj.m(...)` — an async method call (series 054a). The method must be
@@ -9911,6 +10000,46 @@ function lowerCall(
     const m = call.callee as MemberExpression;
     if (m.property.type !== "Identifier") throw new UnsupportedError(call);
     const methodName = (m.property as Identifier).name;
+    // A `fsAsync.<m>(...)` / `http.<m>(...)` call reaching `lowerCall` directly is
+    // **not** awaited (`lowerAwait` intercepts the awaited form) — an un-polled
+    // future that never runs (series 100 / the 051 rule). Fail-loud.
+    if (
+      m.object.type === "Identifier" &&
+      analysis.ioAsyncNamespaces.has((m.object as Identifier).name)
+    ) {
+      throw new UnsupportedError({
+        type: "call to an async method not directly awaited (an un-polled future never runs)",
+      });
+    }
+    // `Writer` handle methods (series 100) — `w.write(s)/.writeLine(s)/.flush()`
+    // where `w ∈ writerBindings`. Maps to the snake_case `tslib::io::Writer`
+    // method (`rid` does not snake_case). The methods are **infallible** (they
+    // `.expect()` internally — JS `process.stdout.write` doesn't throw either),
+    // so no `?` and the stream stays out of the fallibility fixpoint. An unknown
+    // method is fail-loud (the 089 handle-method pattern).
+    if (isWriterReceiver(m.object, analysis)) {
+      const WRITER_METHODS: Record<string, string> = {
+        write: "write",
+        writeLine: "write_line",
+        flush: "flush",
+      };
+      const rustName = WRITER_METHODS[methodName];
+      if (!rustName) {
+        throw new UnsupportedError({
+          type: `\`.${methodName}\` on a Writer — only \`write\`, \`writeLine\`, \`flush\` are available`,
+        });
+      }
+      return {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name: rustName,
+        // `write`/`writeLine` take `&str`; pass the `String` arg by `&` (deref-
+        // coerces). `flush` takes none.
+        args: call.arguments.map((a) =>
+          refExpr(lowerExpr(a as Expression, analysis)),
+        ),
+      };
+    }
     // `JsonValue` accessor methods (series 090) — `get`/`at`/`asNumber`/`asString`/
     // `asBool`/`isNull`/`isNumber`/`isString`/`isBool`/`isArray`/`isObject` on any
     // statically-`JsonValue` receiver (a binding, `r.value`, or a `.get(…).at(…)`
@@ -11977,11 +12106,135 @@ function lowerNumberStatic(
  *   `T` is fail-loud. The result binding's inner `T` is recorded in
  *   `parseResultBindings` by `lowerVarDecl` so `.ok`/`.value`/`.error` resolve.
  */
+/**
+ * The flat sync `@t2r/std` I/O intrinsics (series 100) → their `tslib::io` /
+ * `std` targets. `fallible` ones thread `?` (the containing fn is `Result` via
+ * the seeded fallibility fixpoint); `refArgs` passes string args by `&` (→ `&str`
+ * via deref coercion). Zero-arg intrinsics (`args`/`readStdin`/`readLine`/
+ * `stdout`/`stderr`) simply supply no args.
+ */
+const STD_IO_TARGETS: Record<
+  string,
+  { path: string; fallible: boolean; refArgs: boolean }
+> = {
+  readFile: { path: "tslib::io::read_file", fallible: true, refArgs: true },
+  writeFile: { path: "tslib::io::write_file", fallible: true, refArgs: true },
+  appendFile: { path: "tslib::io::append_file", fallible: true, refArgs: true },
+  exists: { path: "tslib::io::exists", fallible: false, refArgs: true },
+  removeFile: { path: "tslib::io::remove_file", fallible: true, refArgs: true },
+  readDir: { path: "tslib::io::read_dir", fallible: true, refArgs: true },
+  mkdir: { path: "tslib::io::mkdir", fallible: true, refArgs: true },
+  removeDir: { path: "tslib::io::remove_dir", fallible: true, refArgs: true },
+  env: { path: "tslib::io::env", fallible: false, refArgs: true },
+  args: { path: "tslib::io::args", fallible: false, refArgs: true },
+  exit: { path: "tslib::io::exit", fallible: false, refArgs: false },
+  readStdin: { path: "tslib::io::read_stdin", fallible: true, refArgs: true },
+  readLine: { path: "tslib::io::read_line", fallible: true, refArgs: true },
+  stdout: { path: "tslib::io::stdout", fallible: false, refArgs: false },
+  stderr: { path: "tslib::io::stderr", fallible: false, refArgs: false },
+};
+
+/**
+ * Lower a flat sync `@t2r/std` I/O intrinsic call (series 100). Returns `null`
+ * for a non-I/O shim name (the JSON/rng intrinsics handled by the caller). The
+ * `fsAsync`/`http` namespace objects and the `Writer`/`HttpResponse` types are
+ * not directly callable — a direct call is fail-loud.
+ */
+function lowerStdIoCall(
+  shim: StdShimName,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  const t = STD_IO_TARGETS[shim];
+  if (!t) {
+    if (
+      shim === "fsAsync" ||
+      shim === "http" ||
+      shim === "Writer" ||
+      shim === "HttpResponse"
+    ) {
+      throw new UnsupportedError({
+        type: `\`${shim}\` from "@t2r/std" is not directly callable (use its members${
+          shim === "fsAsync" || shim === "http" ? `, e.g. \`${shim}.…\`` : ""
+        })`,
+      });
+    }
+    return null;
+  }
+  const args: HirArg[] = call.arguments.map((a) => ({
+    borrow: t.refArgs ? "ref" : "owned",
+    expr: lowerExpr(a as Expression, analysis),
+  }));
+  const callExpr: HirExpr = { kind: "call", callee: t.path, args };
+  return t.fallible ? { kind: "try", expr: callExpr } : callExpr;
+}
+
+/**
+ * The async-I/O namespace targets (series 100): `fsAsync.<m>` → a `tslib::io`
+ * async fn, `http.<m>` → a `tslib::http` fn. Each is fallible + awaited, lowered
+ * to `<path>(&args).await?` by `lowerIoAsyncCall`.
+ */
+const IO_ASYNC_TARGETS: Record<string, Record<string, string>> = {
+  fsAsync: {
+    readFile: "tslib::io::read_file_async",
+    writeFile: "tslib::io::write_file_async",
+    readDir: "tslib::io::read_dir_async",
+    removeFile: "tslib::io::remove_file_async",
+    mkdir: "tslib::io::mkdir_async",
+  },
+  http: {
+    get: "tslib::http::get",
+    post: "tslib::http::post",
+  },
+};
+
+/**
+ * Lower an **awaited** async-I/O namespace call — `await fsAsync.readFile(p)` /
+ * `await http.get(u)` (series 100) → `<path>(&args).await?`. The `?` rides the
+ * 049/051 fallibility model (the awaited-fallible rule); the enclosing async fn
+ * is `Result` via the `bodyUsesAsyncIo` seed. An unknown member on the namespace
+ * is fail-loud. Called from `lowerAwait` (the non-awaited case is rejected in
+ * `lowerCall`).
+ */
+function lowerIoAsyncCall(
+  ns: "fsAsync" | "http",
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr {
+  const member = call.callee as MemberExpression;
+  const method =
+    member.property.type === "Identifier"
+      ? (member.property as Identifier).name
+      : null;
+  const path = method ? IO_ASYNC_TARGETS[ns]?.[method] : undefined;
+  if (!path) {
+    const avail = Object.keys(IO_ASYNC_TARGETS[ns] ?? {}).join("/");
+    throw new UnsupportedError({
+      type: `\`.${method ?? "?"}\` on \`${ns}\` — only ${avail} ${
+        ns === "http" ? "of text bodies are" : "are"
+      } available`,
+    });
+  }
+  const args: HirArg[] = call.arguments.map((a) => ({
+    borrow: "ref",
+    expr: lowerExpr(a as Expression, analysis),
+  }));
+  return {
+    kind: "try",
+    expr: { kind: "await", expr: { kind: "call", callee: path, args } },
+  };
+}
+
 function lowerStdShimCall(
   shim: StdShimName,
   call: CallExpression,
   analysis: ModuleAnalysis,
 ): HirExpr {
+  // I/O intrinsics (series 100) — the flat sync fs / env / process / stdin
+  // calls. Handled first (some take zero args, unlike the one-arg JSON/rng
+  // intrinsics below). Returns `null` for a non-I/O intrinsic → falls through.
+  const io = lowerStdIoCall(shim, call, analysis);
+  if (io) return io;
   const arg = call.arguments[0];
   if (!arg) {
     throw new UnsupportedError({
@@ -12266,6 +12519,98 @@ function isRngMethodInit(e: Expression, analysis: ModuleAnalysis): boolean {
       ((callee as MemberExpression).object as Identifier).name,
     )
   );
+}
+
+/**
+ * The `RustType` an `@t2r/std` I/O intrinsic binding holds (series 100), peeling
+ * the `try`/`await` wrappers off the lowered init: `readDir`/`args` →
+ * `Vec<String>`, `env`/`readLine` → `Option<String>`, `readFile`/`readStdin` →
+ * `String`. Returns `null` for a non-I/O (or void) init. Fed to `bindingTypes`
+ * for method dispatch; the `let` type is still Rust-inferred.
+ */
+function ioBindingRustType(init: HirExpr): RustType | null {
+  let e: HirExpr = init;
+  if (e.kind === "try") e = e.expr;
+  if (e.kind === "await") e = e.expr;
+  if (e.kind !== "call") return null;
+  switch (e.callee) {
+    case "tslib::io::read_dir":
+    case "tslib::io::read_dir_async":
+    case "tslib::io::args":
+      return { kind: "vec", elem: { kind: "String" } };
+    case "tslib::io::env":
+    case "tslib::io::read_line":
+      return { kind: "option", inner: { kind: "String" } };
+    case "tslib::io::read_file":
+    case "tslib::io::read_stdin":
+    case "tslib::io::read_file_async":
+      return { kind: "String" };
+    default:
+      return null;
+  }
+}
+
+/** Is `e` a direct call to an `@t2r/std` I/O intrinsic that already returns an
+ * `Option` (`env`/`readLine`, series 100)? Used to skip the Option re-wrap on a
+ * reassignment (the value is Option by construction). */
+function isOptionReturningIoCall(e: Expression, analysis: ModuleAnalysis): boolean {
+  if (e.type !== "CallExpression") return false;
+  const callee = (e as CallExpression).callee;
+  if (callee.type !== "Identifier") return false;
+  const intr = analysis.stdShim.get((callee as Identifier).name);
+  return intr === "env" || intr === "readLine";
+}
+
+/**
+ * Is `obj` a `Writer` receiver (series 100) — a recorded `writerBindings` local
+ * (`const w = stdout(); w.write(...)`) OR a direct `stdout()`/`stderr()` shim
+ * call (the chained `stderr().writeLine(...)` form). Both route a `.write`/
+ * `.writeLine`/`.flush` to the handle surface.
+ */
+function isWriterReceiver(obj: Expression, analysis: ModuleAnalysis): boolean {
+  if (
+    obj.type === "Identifier" &&
+    analysis.writerBindings.has((obj as Identifier).name)
+  ) {
+    return true;
+  }
+  if (obj.type === "CallExpression") {
+    const callee = (obj as CallExpression).callee;
+    if (callee.type === "Identifier") {
+      const intr = analysis.stdShim.get((callee as Identifier).name);
+      return intr === "stdout" || intr === "stderr";
+    }
+  }
+  return false;
+}
+
+/**
+ * Is `e` an `@t2r/std` I/O intrinsic init (series 100) — a flat sync I/O call
+ * (`readFile(p)`, `env(n)`, `stdout()`, …) or an `await fsAsync.<m>(...)` /
+ * `await http.<m>(...)`? Such a binding is typed by construction (the `tslib`
+ * return type; Rust infers it — a `Writer`/`HttpResponse`/`String`/`Vec`/
+ * `Option`), so it is exempt from the binding-annotation gate, like the rng /
+ * parseJson exemptions.
+ */
+function isStdIoInit(e: Expression, analysis: ModuleAnalysis): boolean {
+  let node: Expression = e;
+  if (node.type === "AwaitExpression") {
+    node = (node as unknown as { argument: Expression }).argument;
+  }
+  if (!node || node.type !== "CallExpression") return false;
+  const callee = (node as CallExpression).callee;
+  if (callee.type === "MemberExpression") {
+    const obj = (callee as MemberExpression).object;
+    return (
+      obj.type === "Identifier" &&
+      analysis.ioAsyncNamespaces.has((obj as Identifier).name)
+    );
+  }
+  if (callee.type === "Identifier") {
+    const intr = analysis.stdShim.get((callee as Identifier).name);
+    return intr !== undefined && STD_IO_TARGETS[intr] !== undefined;
+  }
+  return false;
 }
 
 /** Is `e` a direct call to a declared generator (`g()`) — an `impl Iterator`
@@ -12900,6 +13245,33 @@ function lowerMember(
     ) {
       throw new UnsupportedError({
         type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+      });
+    }
+    // `@t2r/std` `http.get`/`post` result (series 100): `.status`/`.ok` read the
+    // public `HttpResponse` fields; `.body` is the `self`-consuming `body()`
+    // accessor. Routed by the binding being a recorded `httpResponseBindings`
+    // name (`const res = await http.get(u)`). An unknown member is fail-loud.
+    if (
+      member.object.type === "Identifier" &&
+      analysis.httpResponseBindings.has((member.object as Identifier).name)
+    ) {
+      if (prop === "status" || prop === "ok") {
+        return {
+          kind: "field",
+          object: lowerExpr(member.object, analysis),
+          name: prop,
+        };
+      }
+      if (prop === "body") {
+        return {
+          kind: "method",
+          receiver: lowerExpr(member.object, analysis),
+          name: "body",
+          args: [],
+        };
+      }
+      throw new UnsupportedError({
+        type: `\`.${prop}\` on an http response — only \`.status\`, \`.ok\`, \`.body\` are available`,
       });
     }
     // `@t2r/std` `parseJson<T>` result (series 084): `.ok` is the `ParseResult`

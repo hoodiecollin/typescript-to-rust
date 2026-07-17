@@ -27,7 +27,29 @@ export type StdShimName =
   | "parseJsonValue"
   | "fromJsonValue"
   | "toJsonValue"
-  | "JsonValue";
+  | "JsonValue"
+  // I/O surface (series 100, epic #52). Flat sync fs / env / process / stdin
+  // intrinsics + the `fsAsync`/`http` namespace objects + the `Writer`/
+  // `HttpResponse` type intrinsics (recognized for import + type resolution).
+  | "readFile"
+  | "writeFile"
+  | "appendFile"
+  | "exists"
+  | "removeFile"
+  | "readDir"
+  | "mkdir"
+  | "removeDir"
+  | "env"
+  | "args"
+  | "exit"
+  | "readStdin"
+  | "readLine"
+  | "stdout"
+  | "stderr"
+  | "fsAsync"
+  | "http"
+  | "Writer"
+  | "HttpResponse";
 
 /** The set of exported intrinsic names, for membership + "not exported" errors. */
 export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
@@ -38,6 +60,45 @@ export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
   "fromJsonValue",
   "toJsonValue",
   "JsonValue",
+  // I/O (series 100)
+  "readFile",
+  "writeFile",
+  "appendFile",
+  "exists",
+  "removeFile",
+  "readDir",
+  "mkdir",
+  "removeDir",
+  "env",
+  "args",
+  "exit",
+  "readStdin",
+  "readLine",
+  "stdout",
+  "stderr",
+  "fsAsync",
+  "http",
+  "Writer",
+  "HttpResponse",
+]);
+
+/**
+ * The `@t2r/std` I/O intrinsics whose lowering is **fallible** — a call reaches
+ * the 049 fallibility fixpoint as a fallible leaf (its containing fn becomes
+ * `Result`-returning; the call site threads `?`, or `.await?` for the async
+ * ones). The infallible carve-outs (`exists`/`env`/`args`/`exit`/`stdout`/
+ * `stderr`, and handle *acquisition*) are absent here (design §5).
+ */
+export const FALLIBLE_SYNC_IO: ReadonlySet<StdShimName> = new Set([
+  "readFile",
+  "writeFile",
+  "appendFile",
+  "removeFile",
+  "readDir",
+  "mkdir",
+  "removeDir",
+  "readStdin",
+  "readLine",
 ]);
 
 /**

@@ -25,7 +25,11 @@
 
 import type { FunctionDeclaration, Program, Statement, TSType } from "./ast";
 import type { HirFn, HirStruct, HirUnionEnum, RustType } from "./hir";
-import { type StdShimName, collectStdShimBindings } from "./std-shim";
+import {
+  FALLIBLE_SYNC_IO,
+  type StdShimName,
+  collectStdShimBindings,
+} from "./std-shim";
 import type { TypeOracle } from "./type-oracle";
 
 /** JS array/collection methods that mutate the receiver in place. */
@@ -500,6 +504,29 @@ export interface ModuleAnalysis {
    * `let` — the accessors take `&self`.
    */
   jsonValueBindings: Set<string>;
+  /**
+   * Bindings whose value is a `stdout()`/`stderr()` `Writer` handle (series 100)
+   * — a `tslib::io::Writer`. A `.write(s)`/`.writeLine(s)`/`.flush()` on such a
+   * binding routes to the handle surface (fallible `?`); an unknown method is
+   * fail-loud. Populated during lowering; emitted `let mut` (methods take
+   * `&mut self`). Reuses the 089 rng-handle machinery.
+   */
+  writerBindings: Set<string>;
+  /**
+   * Bindings whose value is an `http.get`/`http.post` result (series 100) — a
+   * `tslib::http::HttpResponse`. A member access `.status`/`.ok` reads the public
+   * field; `.body` is the `self`-consuming `body()` accessor. Mirrors the 084
+   * `parseResultBindings` surface. Populated during lowering (`const res = await
+   * http.get(u)`).
+   */
+  httpResponseBindings: Set<string>;
+  /**
+   * `@t2r/std` async-I/O namespace bindings (series 100): local alias →
+   * `"fsAsync"`/`"http"`, from `import { fsAsync, http } from "@t2r/std"`. A
+   * member call `ns.m(...)` on such a local routes to the async I/O target
+   * (`.await?`); a non-awaited one is fail-loud (the 051 un-polled-future rule).
+   */
+  ioAsyncNamespaces: Map<string, "fsAsync" | "http">;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -1112,6 +1139,35 @@ function bodyThrows(body: unknown): boolean {
   return found;
 }
 
+/**
+ * Whether this body makes an **async-I/O namespace call** — `ns.m(...)` where
+ * `ns` is a `fsAsync`/`http` local (series 100). Try-shielded like `bodyThrows`
+ * (a caught async-I/O call is recovered by the try IIFE, not propagated). Such a
+ * call is fallible + awaited (`.await?`), so its presence makes the enclosing
+ * scope `Result`-returning, exactly as a `throw` or a fallible-fn call does.
+ */
+function bodyUsesAsyncIo(
+  body: unknown,
+  namespaces: ReadonlySet<string>,
+): boolean {
+  if (namespaces.size === 0) return false;
+  let found = false;
+  walkOwn(body, (n) => {
+    if (n.type !== "CallExpression") return;
+    const callee = n.callee;
+    if (
+      isNode(callee) &&
+      callee.type === "MemberExpression" &&
+      isNode(callee.object) &&
+      callee.object.type === "Identifier" &&
+      namespaces.has(callee.object.name as string)
+    ) {
+      found = true;
+    }
+  });
+  return found;
+}
+
 /** The names this body calls directly (identifier callees, own level only). */
 function calledNames(body: unknown): Set<string> {
   const names = new Set<string>();
@@ -1265,6 +1321,8 @@ function analyzeFallible(
   program: Program,
   script: Statement[],
   panicScopes: ReadonlySet<string>,
+  ioSyncFallibleLocals: ReadonlySet<string>,
+  ioAsyncNamespaces: ReadonlySet<string>,
 ): {
   fallible: Set<string>;
   fallibleMethods: Set<string>;
@@ -1284,7 +1342,9 @@ function analyzeFallible(
     for (const c of fanOutCalledNames(body)) callsFree.add(c);
     scopes.push({
       key,
-      throws: bodyThrows(body),
+      // An awaited async-I/O namespace call (series 100) is fallible + awaited,
+      // so — like a `throw` — it makes this scope `Result`-returning.
+      throws: bodyThrows(body) || bodyUsesAsyncIo(body, ioAsyncNamespaces),
       callsFree,
       callsMethod: calledMethodNames(body, methodUniverse),
       newsClass: newedClassNames(body),
@@ -1305,6 +1365,12 @@ function analyzeFallible(
   }
 
   const fallible = new Set<string>();
+  // Seed the fallible set with the sync-fallible I/O local aliases (series 100):
+  // `readFile`/`writeFile`/… act as fallible **leaf** names, so any scope whose
+  // `callsFree` includes one propagates to `Result` through the fixpoint below —
+  // exactly as a call to a fallible user fn does. (They are not scope keys, so
+  // they never leak into the extracted public set.)
+  for (const local of ioSyncFallibleLocals) fallible.add(local);
   // A `"use panic"` scope's own `throw`s become `panic!`, so they do not make it
   // fallible; it also never *becomes* fallible via propagation (excluded below).
   for (const s of scopes)
@@ -1618,10 +1684,24 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     arenaScopes.add(SCRIPT_SCOPE);
   }
 
+  // `@t2r/std` bindings (series 084) + the series-100 I/O derivations. Computed
+  // once here so `analyzeFallible` can seed the fallible I/O leaves + detect
+  // awaited async-I/O usage, and the result is reused in the returned analysis.
+  const stdShim = collectStdShimBindings(program);
+  const ioSyncFallibleLocals = new Set<string>();
+  const ioAsyncNamespaces = new Map<string, "fsAsync" | "http">();
+  for (const [local, intrinsic] of stdShim) {
+    if (FALLIBLE_SYNC_IO.has(intrinsic)) ioSyncFallibleLocals.add(local);
+    if (intrinsic === "fsAsync") ioAsyncNamespaces.set(local, "fsAsync");
+    if (intrinsic === "http") ioAsyncNamespaces.set(local, "http");
+  }
+
   const { fallible, fallibleMethods, fallibleCtors } = analyzeFallible(
     program,
     script,
     panicScopes,
+    ioSyncFallibleLocals,
+    new Set(ioAsyncNamespaces.keys()),
   );
 
   // Top-level `async` function declarations (drives the `await`-target check and
@@ -1651,11 +1731,16 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     structs,
     // `@t2r/std` std-shim bindings (series 084) — recognized by the reserved
     // import specifier. `parseResultBindings` fills during lowering.
-    stdShim: collectStdShimBindings(program),
+    stdShim,
     parseResultBindings: new Map(),
     // Populated during lowering as `const r = rng(seed)` handle bindings are seen (089).
     rngBindings: new Set(),
     jsonValueBindings: new Set(),
+    // I/O handle bindings (series 100), filled during lowering; the async-I/O
+    // namespace map is derived from the imports above.
+    writerBindings: new Set(),
+    httpResponseBindings: new Set(),
+    ioAsyncNamespaces,
     // Union-type enums (093) — filled by the `collectUnions` pre-pass in `lower()`.
     unionEnums: new Map(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.
