@@ -84,6 +84,13 @@ governs 027):
 | `slice` / `substring` | ★3 | ★3 | **Tf** | **✓ landed (083)** `tslib::string::str_slice`/`substring` (negative/swapped, char-indexed) |
 | `charAt` / `[i]` | ★3 | ★3 | **Tf** | **✓ landed (083)** `tslib::string::char_at` (out-of-range → `""`, char-indexed) |
 | `repeat` | ★2 | ★1 | N | **✓ landed (083)** `.repeat(n as usize)` |
+| `indexOf` / `lastIndexOf` | ★4 | ★2 | **Tf** | **✓ landed (098)** `tslib::string::index_of`/`last_index_of` (char-indexed, `-1` sentinel; 1-arg `from` on `indexOf`). 2-arg `lastIndexOf(x, from)` residual |
+| `at` | ★3 | ★3 | **Tf** | **✓ landed (098)** `tslib::string::str_at` → `Option<String>` (JS `undefined` on OOB, negative-from-end); fixes a prior mis-route to `array::at` |
+| `concat` | ★2 | ★1 | N | **✓ landed (098)** → the 080 `strConcat` (`format!`) — `a.concat(b,c)` ≡ `a+b+c` |
+| `substr` | ★2 | ★2 | **Tf** | **✓ landed (098)** `tslib::string::substr`/`substr_from` (deprecated; char-indexed, negative start) |
+| `split(sep, limit)` | ★3 | ★2 | **Tf** | **✓ landed (098)** `tslib::string::split_limit`/`split_chars_limit` (piece cap) |
+| `.length` | ★5 | ★1 | N | **✓ landed (083 as bytes, 098 as chars)** → `.chars().count()` (char-consistent with `slice`/`charAt`) |
+| `charCodeAt` / `codePointAt` / `String.fromCharCode` | ★3 | ★3 | — | **UTF-16 fork — deferred** (098 makes it a clean fail-loud). The `char`-indexed model covers characters; UTF-16 code units land only on demand |
 
 ### Object / JSON (Dep: serde)
 | Method | Pop | Cx | Route | Notes |

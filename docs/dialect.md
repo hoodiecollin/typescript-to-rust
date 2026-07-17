@@ -689,8 +689,33 @@ Supported: `Object.keys`, `Object.values`, `Object.entries`, `Object.assign`.
 
 Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
 `reduce`, `sort`, `find`, `some`, `every`, `flatMap`, `flat`, `at`, `slice`,
-`join`, `concat`, `forEach`; string `padStart`, `padEnd`; `Object.*` (above);
+`join`, `concat`, `forEach`; the string methods below; `Object.*` (above);
 `JSON.*` (below).
+
+**String methods (series 083 + 098).** `toUpperCase`/`toLowerCase`, `trim`/
+`trimStart`/`trimEnd`, `includes`/`startsWith`/`endsWith`, `repeat`, `replace`
+(first-only) / `replaceAll`, `split(sep)` / `split(sep, limit)` / `split("")`,
+`slice`/`substring`/`charAt`, `substr(start[, len])`, `padStart`/`padEnd` (1- and
+2-arg), `indexOf`/`indexOf(x, from)`, `lastIndexOf`, `at`, `concat`, and `.length`.
+
+- **`at(i)` → `string | undefined`** (JS-faithful): a negative `i` counts from the
+  end, out-of-range → `undefined` (a `None`, unlike `charAt`'s `""`) — consumed via
+  `??` / `!` / `if (x !== undefined)` narrowing like any optional (series 066).
+- **`.length` and `slice`/`substring`/`charAt`/`at`/`indexOf`/`substr` count Rust
+  `char`s**, not UTF-16 code units — correct for all BMP text, diverging from JS
+  only for astral (non-BMP) chars (the same documented `char`-vs-UTF-16 edge as
+  string ordering). `.length` lowers to `.chars().count()`.
+- **Residual:** `.length` (a `usize`) in an `f64`-mixing binary (`s.length - 1`,
+  `i < s.length` with an `f64` counter) is a pre-existing numeric-pass gap shared
+  with array `.len()`; the clean uses are Display print and index position.
+
+| Trigger | Kind | Message shape |
+|---------|------|---------------|
+| `charCodeAt` / `codePointAt` | Not yet | `.charCodeAt`/`.codePointAt` uses UTF-16 code units/points (deferred) |
+| `String.fromCharCode` / `fromCodePoint` | Not yet | `String.fromCharCode uses UTF-16 code units (deferred)` |
+| `match` / `matchAll` / `search` | Not yet | RegExp deferred (Tier 3) |
+| `localeCompare` / `normalize` / `toLocale*Case` | Not yet | locale-aware string ops not modeled |
+| `lastIndexOf(x, from)` (2-arg) | Not yet | falls through (bind/annotate) |
 
 **`flatMap` / `flat` (series 085 + 092).** `xs.flatMap(f)` with a uniform
 `U[]`-returning callback → `xs.iter().flat_map(f).collect::<Vec<_>>()` — the
