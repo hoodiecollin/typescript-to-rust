@@ -30,6 +30,20 @@ defineDifferential("type-annot-arrays", [
     src: `const bs = [true, false];\nconsole.log(bs.length);`,
     expected: "2",
   },
+  {
+    // Series 099 graduation: a non-scalar-element array whose element type the
+    // oracle infers to a modeled `RustType` now lowers (was 046b fail-loud). A
+    // nested `number[][]` → `Vec<Vec<f64>>`.
+    name: "TYP14a a nested number array now infers → Vec<Vec<f64>> (099)",
+    src: `const xs = [[1, 2], [3]];\nconsole.log(xs[0][1], xs[1][0]);`,
+    expected: "2 3",
+  },
+  {
+    // Series 099 graduation: an array of number-returning calls → `Vec<f64>`.
+    name: "TYP14b an array of call results now infers → Vec<f64> (099)",
+    src: `function f(): number { return 1; }\nconst xs = [f(), f()];\nconsole.log(xs[0], xs[1]);`,
+    expected: "1 1",
+  },
 ]);
 
 describe("046b non-obvious arrays fail loud", () => {
@@ -41,10 +55,8 @@ describe("046b non-obvious arrays fail loud", () => {
     expect(() => compile(`const xs = [1, "a"];`)).toThrow(UnsupportedError);
   });
 
-  test("TYP14 a non-scalar-element array is rejected", () => {
-    expect(() => compile(`const xs = [[1, 2], [3]];`)).toThrow(UnsupportedError);
-    expect(() =>
-      compile(`function f(): number { return 1; }\nconst xs = [f(), f()];`),
-    ).toThrow(UnsupportedError);
-  });
+  // TYP14 (non-scalar-element arrays) GRADUATED by series 099 — see the two
+  // TYP14a/TYP14b differentials above. What stays fail-loud is an element type the
+  // oracle can't model: TYP12 (empty → `never[]`) and TYP13 (heterogeneous → a
+  // wide union element).
 });

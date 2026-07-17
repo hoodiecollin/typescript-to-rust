@@ -57,10 +57,17 @@ console.log((p?.x) ?? -1);`,
 
 describe("042d optional chaining a?.b", () => {
   test("CHN3 a deeper chain is fail-loud", () => {
+    // The deeper-chain guard lives in the *expression* lowering (042d), so the
+    // un-annotated `y` binding infers `option<f64>` (series 099) — passing the
+    // annotation gate — and the throw comes from the real deeper-chain guard, not
+    // the annotation requirement. (`a` is a genuine `A | undefined`, not provably
+    // `undefined`, so inference lands on `option`.)
     expect(() =>
       compile(`interface A { b: B; }
 interface B { c: number; }
-const a: A | undefined = undefined;
+const bb: B = { c: 42 };
+const aa: A = { b: bb };
+const a: A | undefined = aa;
 const y = a?.b?.c;`),
     ).toThrow(UnsupportedError);
   });

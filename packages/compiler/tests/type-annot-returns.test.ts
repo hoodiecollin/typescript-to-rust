@@ -8,7 +8,6 @@
  */
 
 import { expect, test } from "bun:test";
-import { UnsupportedError } from "../src/lower";
 import { compile, defineDifferential } from "./_support/differential";
 
 defineDifferential("type-annot-returns", [
@@ -34,20 +33,26 @@ defineDifferential("type-annot-returns", [
   },
 ]);
 
-test("TYP15 a function with no return type is rejected", () => {
-  expect(() => compile(`function f(x: number) { return x; }`)).toThrow(
-    UnsupportedError,
-  );
+// 046c's "missing return type fails loud" rule was RELAXED by series 099: a
+// return type the lib-backed oracle infers to a modeled `RustType` now compiles.
+// TYP15/TYP18/TYP19 (formerly fail-loud pins) now infer `-> f64` — the graduation
+// is covered by inference-tier.test.ts (INF3-5). A parameter still has no
+// inferable type, so `parameter '<name>' without a type annotation` stays loud
+// (INF-FL7); a return whose inferred type is out of surface stays loud (INF-FL5/6).
+test("TYP15 a function with no return type infers (graduated by 099)", () => {
+  expect(() =>
+    compile(`function f(x: number) { return x; }\nconsole.log(f(2));`),
+  ).not.toThrow();
 });
 
-test("TYP18 a method with no return type is rejected", () => {
+test("TYP18 a method with no return type infers (graduated by 099)", () => {
   expect(() =>
     compile(`class C { m(x: number) { return x; } }`),
-  ).toThrow(UnsupportedError);
+  ).not.toThrow();
 });
 
-test("TYP19 a const-bound arrow with no return type is rejected", () => {
-  expect(() => compile(`const f = (x: number) => x;`)).toThrow(
-    UnsupportedError,
-  );
+test("TYP19 a const-bound arrow with no return type infers (graduated by 099)", () => {
+  expect(() =>
+    compile(`const f = (x: number) => x + 1;\nconsole.log(f(3));`),
+  ).not.toThrow();
 });

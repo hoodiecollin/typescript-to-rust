@@ -47,24 +47,30 @@ defineDifferential("type-annot-bindings", [
   },
 ]);
 
-describe("046a untyped non-literal bindings fail loud", () => {
-  test("TYP4 a call initializer with no annotation is rejected", () => {
+// 046a's "untyped non-literal binding fails loud" rule was RELAXED by series 099
+// (inference tier): a call / binary / unary-negative initializer whose type the
+// lib-backed oracle infers to a modeled `RustType` now compiles instead of failing
+// loud. TYP4/TYP5/TYP6 (formerly fail-loud pins) now infer `f64` — the graduation
+// is covered by inference-tier.test.ts (INF1-8). What stays fail-loud (TYP7) is an
+// initializer whose inferred type is NOT modeled (`null`/`undefined` alone).
+describe("046a→099 untyped non-literal bindings now infer", () => {
+  test("TYP4 a call initializer infers (graduated by 099)", () => {
     expect(() =>
-      compile(`function f(): number { return 1; }\nconst x = f();`),
-    ).toThrow(UnsupportedError);
+      compile(`function f(): number { return 1; }\nconst x = f();\nconsole.log(x);`),
+    ).not.toThrow();
   });
 
-  test("TYP5 a binary-expression initializer with no annotation is rejected", () => {
-    expect(() => compile(`const a = 1;\nconst b = 2;\nconst x = a + b;`)).toThrow(
-      UnsupportedError,
-    );
+  test("TYP5 a binary-expression initializer infers (graduated by 099)", () => {
+    expect(() =>
+      compile(`const a: number = 1;\nconst b: number = 2;\nconst x = a + b;`),
+    ).not.toThrow();
   });
 
-  test("TYP6 a unary-negative initializer with no annotation is rejected", () => {
-    expect(() => compile(`const x = -5;`)).toThrow(UnsupportedError);
+  test("TYP6 a unary-negative initializer infers (graduated by 099)", () => {
+    expect(() => compile(`const x = -5;\nconsole.log(x);`)).not.toThrow();
   });
 
-  test("TYP7 `null`/`undefined` initializers with no annotation are rejected", () => {
+  test("TYP7 `null`/`undefined` initializers stay fail-loud (unmodeled)", () => {
     expect(() => compile(`const x = null;`)).toThrow(UnsupportedError);
     expect(() => compile(`const y = undefined;`)).toThrow(UnsupportedError);
   });
