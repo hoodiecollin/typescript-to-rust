@@ -51,10 +51,25 @@ interface SpawnResult {
   stderr: string;
 }
 
+/**
+ * Program I/O fed **identically** to the Bun run and the Rust run of a
+ * differential spec (series 100): `stdin` bytes, extra `argv` (the user args
+ * after the binary/script name), and `env` overrides (merged over `process.env`
+ * — e.g. `T2R_TMP`, `T2R_BASE_URL`). Threaded through `run`/`runBatch` →
+ * `cargoRun`/`cargoBuildExamples` → the built binary, so a file-I/O round-trip,
+ * an `args()`/`env()` echo, or a `readStdin()` all observe the same inputs.
+ */
+export interface IoInput {
+  stdin?: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
 async function spawn(
   cmd: string[],
   cwd: string,
   stdin?: string,
+  envOverride?: Record<string, string>,
 ): Promise<SpawnResult> {
   const proc = Bun.spawn(cmd, {
     cwd,
@@ -62,8 +77,9 @@ async function spawn(
     stdout: "pipe",
     stderr: "pipe",
     // Inherit the environment so the user's rust toolchain (rustup shims, etc.)
-    // resolves exactly as it would in their shell.
-    env: { ...process.env },
+    // resolves exactly as it would in their shell; `envOverride` layers per-run
+    // I/O vars (series 100) on top.
+    env: { ...process.env, ...envOverride },
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -201,7 +217,10 @@ export async function cargoCheck(cwd: string): Promise<CargoResult> {
  * exists. Exec-ing the binary directly also yields pure program stdout, with no
  * cargo status noise to strip.
  */
-export async function cargoRun(cwd: string): Promise<CargoResult> {
+export async function cargoRun(
+  cwd: string,
+  io?: IoInput,
+): Promise<CargoResult> {
   const build = await runCargo(["build", "--bins"], cwd);
   const diagnostics = parseDiagnostics(build.stdout);
   const checked = classify(
@@ -213,7 +232,13 @@ export async function cargoRun(cwd: string): Promise<CargoResult> {
   if (!checked.ok) return checked;
 
   const bin = join(cwd, "target", "debug", "rust_oracle");
-  const { exitCode, stdout, stderr } = await spawn([bin], cwd);
+  // Thread the per-run I/O (series 100): argv after the binary, stdin, env.
+  const { exitCode, stdout, stderr } = await spawn(
+    [bin, ...(io?.args ?? [])],
+    cwd,
+    io?.stdin,
+    io?.env,
+  );
   return classify(exitCode, diagnostics, stdout, stderr);
 }
 
@@ -263,6 +288,7 @@ interface TargetedMessage extends CargoMessage {
 export async function cargoBuildExamples(
   cwd: string,
   ids: string[],
+  ioById?: ReadonlyMap<string, IoInput>,
 ): Promise<Map<string, CargoResult>> {
   const build = await runCargo(["build", "--examples", "--keep-going"], cwd);
 
@@ -298,7 +324,14 @@ export async function cargoBuildExamples(
   await mapBounded(ids, 8, async (id) => {
     const exe = execById.get(id);
     if (exe) {
-      const { exitCode, stdout, stderr } = await spawn([exe], cwd);
+      // Thread the per-example I/O (series 100): argv, stdin, env.
+      const io = ioById?.get(id);
+      const { exitCode, stdout, stderr } = await spawn(
+        [exe, ...(io?.args ?? [])],
+        cwd,
+        io?.stdin,
+        io?.env,
+      );
       out.set(id, classify(exitCode, [], stdout, stderr));
       return;
     }

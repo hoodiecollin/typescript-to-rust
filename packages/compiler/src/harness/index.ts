@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type CargoResult,
+  type IoInput,
   cargoBuildExamples,
   cargoCheck,
   cargoRun,
@@ -83,13 +84,13 @@ export class RustProject {
    * Compile `source` as a binary and run it, capturing program stdout. Requires
    * a `fn main`. Use for behavioral / differential assertions.
    */
-  run(source: string): Promise<CargoResult> {
+  run(source: string, io?: IoInput): Promise<CargoResult> {
     return this.lock(async () => {
       // A binary implicitly links the package library, so a `lib.rs` left
       // poisoned by a prior `check()` would break the build. Reset it.
       this.write("lib.rs", "");
       this.write("main.rs", source);
-      return cargoRun(this.dir);
+      return cargoRun(this.dir, io);
     });
   }
 
@@ -101,7 +102,7 @@ export class RustProject {
    * program `id` (each result's `.ok`/`.stdout`/`.errors` mirror `run()`).
    */
   runBatch(
-    programs: { id: string; src: string }[],
+    programs: { id: string; src: string; io?: IoInput }[],
   ): Promise<Map<string, CargoResult>> {
     return this.lock(async () => {
       // Reset the shared bin/lib so a program left by a prior run() can't break
@@ -112,15 +113,18 @@ export class RustProject {
       const exDir = join(this.dir, "examples");
       rmSync(exDir, { recursive: true, force: true });
       mkdirSync(exDir, { recursive: true });
+      const ioById = new Map<string, IoInput>();
       for (const p of programs) {
         writeFileSync(
           join(exDir, `${p.id}.rs`),
           p.src.endsWith("\n") ? p.src : `${p.src}\n`,
         );
+        if (p.io) ioById.set(p.id, p.io);
       }
       return cargoBuildExamples(
         this.dir,
         programs.map((p) => p.id),
+        ioById,
       );
     });
   }
@@ -135,8 +139,8 @@ export function checkRust(source: string): Promise<CargoResult> {
 }
 
 /** Convenience: compile + run, return the cargo result (`.stdout` = program output). */
-export function runRust(source: string): Promise<CargoResult> {
-  return harness.run(source);
+export function runRust(source: string, io?: IoInput): Promise<CargoResult> {
+  return harness.run(source, io);
 }
 
 /** Convenience: rustfmt-normalize a Rust source string. */
