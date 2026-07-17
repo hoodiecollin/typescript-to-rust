@@ -244,6 +244,15 @@ export interface ModuleAnalysis {
    */
   classes: Set<string>;
   /**
+   * Names that route a member access `X.y` to a Rust **path** `X::y` (series 050d,
+   * Axis 4) — a `namespace Foo` (its members live in `mod Foo`) and a namespace
+   * import alias (`import * as ns` → `use crate::n as ns;`, so `ns.f()` → `ns::f()`).
+   * The same routing enums/classes use (`E.Variant`/`Type.CONST`), so a member off
+   * one of these names lowers to a path segment, not a field read. Filled by
+   * `lower()` (namespaces) / `lowerCrate` (import aliases), empty from `analyzeModule`.
+   */
+  namespaces: Set<string>;
+  /**
    * Top-level free-function names (series 071 increment 2). A reference to one
    * inside a synthesized interface-literal method is a path (valid in a
    * non-capturing closure), not an environment capture.
@@ -1808,6 +1817,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     enums,
     panicScopes,
     classes,
+    // Namespace / import-alias path roots (050d) — filled by `lower()`/`lowerCrate`.
+    namespaces: new Set(),
     topLevelFns,
     rcScopes,
     arenaScopes,

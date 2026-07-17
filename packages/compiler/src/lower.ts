@@ -189,7 +189,11 @@ function synthesizeErrorEnum(analysis: ModuleAnalysis): HirErrorEnum | null {
  * Lower a whole program to HIR.
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
  */
-export function lower(program: Program, source?: string): HirModule {
+export function lower(
+  program: Program,
+  source?: string,
+  crateNamespaces?: ReadonlySet<string>,
+): HirModule {
   // Step 2: reject input forbidden by the dialect (`any`/`unknown`, …) — fail
   // loud with `DialectError`, distinct from the "not yet implemented" gate below.
   validate(program);
@@ -198,6 +202,10 @@ export function lower(program: Program, source?: string): HirModule {
   // it identically to a `function` (see normalizeArrows).
   const normalized = normalizeArrows(program);
   const analysis = analyzeModule(normalized);
+  // Namespace / import-alias path roots (series 050d, Axis 4): the crate layer
+  // passes its `import * as ns` aliases here so `ns.f()` routes to `ns::f()`; a
+  // `namespace Foo {}` in this program adds `Foo` below (after it is lowered out).
+  if (crateNamespaces) for (const n of crateNamespaces) analysis.namespaces.add(n);
   // Enum names are nominal types too — resolve them like structs in `lowerType`
   // (the emitter renders both as the bare name). They stay in `analysis.enums`
   // as well, so a member access `E.Variant` still lowers to a path, not a field.
@@ -739,6 +747,9 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
   /** modPath keys of pure-barrel modules → emitted as `pub use` facades. */
   const facadeKeys = new Set<string>();
 
+  /** `import * as ns` alias names (050d) → seed the merged lowering's path roots. */
+  const crateNamespaces = new Set<string>();
+
   for (const m of modules) {
     const uses = usesFor(modKeyOf(m));
     // A pure barrel (Axis 3) → a generated `pub use` facade module; it declares no
@@ -785,6 +796,13 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
             uses.push(
               crateUseLine(targetMod, DEFAULT_EXPORT_SYM, spec.local.name),
             );
+          } else if (spec.type === "ImportNamespaceSpecifier") {
+            // Namespace import → a Rust **module alias** (Axis 4, re-decided
+            // 2026-07-17): `import * as ns from "./n"` → `use crate::n as ns;`, and
+            // `ns.f()` routes to the path `ns::f()` (registered below). TS `import *`
+            // is *qualified* access (not an unqualified glob), so there is no capture.
+            uses.push(`use ${["crate", ...targetMod].join("::")} as ${spec.local.name};`);
+            crateNamespaces.add(spec.local.name);
           } else {
             throw new UnsupportedError({
               type: `unsupported import specifier (${spec.type})`,
@@ -892,7 +910,7 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
     start: 0,
     end: 0,
   };
-  const lowered = lower(merged);
+  const lowered = lower(merged, undefined, crateNamespaces);
 
   // Infer visibility across the whole crate (Axis 1): exported names + everything
   // signature-reachable from them → `pub(crate)`; purely local items stay private.
@@ -10746,6 +10764,28 @@ function lowerCall(
         ? { kind: "try", expr: callExpr }
         : callExpr;
     }
+    // A namespace / import-alias member call `Foo.bar(args)` (series 050d, Axis 4)
+    // → the module path call `Foo::bar(args)` — the member is a free fn living in
+    // `mod Foo` (a namespace) or in the aliased module (`import * as ns`). A member
+    // that throws is fallible by its own name (spliced as a top-level fn), so it
+    // `?`-propagates the same way a bare free-fn call does.
+    if (
+      m.object.type === "Identifier" &&
+      analysis.namespaces.has((m.object as Identifier).name)
+    ) {
+      const nsName = (m.object as Identifier).name;
+      const callExpr: HirExpr = {
+        kind: "call",
+        callee: `${nsName}::${methodName}`,
+        args: call.arguments.map((a) => ({
+          borrow: "owned",
+          expr: lowerExpr(a as Expression, analysis),
+        })),
+      };
+      return analysis.fallible.has(methodName)
+        ? { kind: "try", expr: callExpr }
+        : callExpr;
+    }
     // Class inheritance (series 053a): `super.m(args)` in a subclass method →
     // `self.base.m(args)` (dispatch the base's method on the embedded base). The
     // base's method is a trait default carrying its real body, so this composes
@@ -14519,6 +14559,19 @@ function lowerMember(
     if (
       member.object.type === "Identifier" &&
       analysis.classes.has((member.object as Identifier).name)
+    ) {
+      return {
+        kind: "path",
+        segments: [(member.object as Identifier).name, prop],
+      };
+    }
+    // `Foo.bar` where `Foo` is a namespace (series 050d, Axis 4) or a namespace
+    // import alias (`ns.f` after `import * as ns`) → the Rust module path `Foo::bar`
+    // / `ns::f`. A property read is a path; a call `Foo.bar()` recurses through
+    // here as its callee, so it lowers to the path-call `Foo::bar(...)`.
+    if (
+      member.object.type === "Identifier" &&
+      analysis.namespaces.has((member.object as Identifier).name)
     ) {
       return {
         kind: "path",
