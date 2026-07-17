@@ -6,6 +6,7 @@
   "scripts": {
     "ttr": "bun run packages/compiler/index.ts",
     "test": "bun test packages/compiler",
+    "test:changed": "bun run packages/compiler/scripts/test-changed.ts",
     "typecheck": "tsc -p packages/compiler/tsconfig.json --noEmit",
     "rust:check": "cargo check",
     "rust:test": "cargo test",
