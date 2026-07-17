@@ -17,6 +17,7 @@ import {
 } from "./analysis";
 import { refineArena } from "./arena";
 import { isTypePartialEq } from "./derives";
+import type { SourceModule } from "./crate";
 import type { StdShimName } from "./std-shim";
 import type {
   ArrayExpression,
@@ -75,6 +76,7 @@ import type {
   HirGenerator,
   HirItem,
   HirMatchArm,
+  HirMod,
   HirModule,
   HirParam,
   HirStmt,
@@ -85,6 +87,7 @@ import type {
   MapBuildPart,
   RustType,
   SelfRecv,
+  Vis,
 } from "./hir";
 import { refineBitwise } from "./bitwise";
 import { refineNumerics } from "./numeric";
@@ -490,6 +493,215 @@ export function lower(program: Program, source?: string): HirModule {
       ),
     ),
   );
+}
+
+/** The exported / crate-root name of a top-level declaration (series 050). */
+function crateDeclName(stmt: Statement): string | undefined {
+  const t = stmt.type;
+  if (
+    t === "FunctionDeclaration" ||
+    t === "ClassDeclaration" ||
+    t === "TSInterfaceDeclaration" ||
+    t === "TSEnumDeclaration" ||
+    t === "TSTypeAliasDeclaration" ||
+    t === "TSModuleDeclaration"
+  ) {
+    return (stmt as { id?: { name?: string } }).id?.name;
+  }
+  return undefined;
+}
+
+/** `use crate::<modPath>::<imported>[ as <local>];` for an import specifier. */
+function crateUseLine(
+  modPath: string[],
+  imported: string,
+  local: string,
+): string {
+  const path = ["crate", ...modPath].join("::");
+  return imported === local
+    ? `use ${path}::${imported};`
+    : `use ${path}::${imported} as ${local};`;
+}
+
+/**
+ * Lower a resolved multi-file **crate** (series 050) to a single `HirModule` whose
+ * non-entry files are carried in `mods`.
+ *
+ * The whole crate compiles as **one unit**, so instead of running (and merging)
+ * analysis per file, we splice every module's declarations into one synthetic
+ * `Program` and lower it through {@link lower} — every cross-module function,
+ * struct, class, and enum reference then resolves by construction (`analysis.fns`,
+ * `structs`, `methodNames` are all global). We only strip the module *plumbing*
+ * first: `./`-relative imports become each file's `use crate::…;` prelude, `export`
+ * marks a name's visibility, and each declaration is remembered against its owning
+ * module. After lowering, the flat item list is **partitioned back** to its files
+ * by declaration name; synthesized items (the `AppError` enum, lifted callbacks,
+ * anonymous unions) have no owner and stay at the crate root. Only the entry file
+ * may carry top-level statements (→ `fn main`); a statement in an imported module
+ * is fail-loud (import-time side effects have no sound Rust analog). The `@t2r/std`
+ * shim import is kept in the merged program (it is recognized by lowering, not a
+ * module edge).
+ */
+export function lowerCrate(modules: SourceModule[]): HirModule {
+  const entry = modules.find((m) => m.isEntry);
+  if (!entry) throw new UnsupportedError({ type: "crate has no entry module" });
+
+  const mergedBody: Statement[] = [];
+  /** Declaration name → owning module's `modPath` (`[]` = crate root/entry). */
+  const nameToModPath = new Map<string, string[]>();
+  /** Names carried in some module's `export` set → widened to `pub(crate)`. */
+  const exportedNames = new Set<string>();
+  /** modPath.join("/") → the module's `use crate::…;` prelude lines. */
+  const usesByMod = new Map<string, string[]>();
+  const modKeyOf = (m: SourceModule): string => m.modPath.join("/");
+  const usesFor = (key: string): string[] => {
+    const cur = usesByMod.get(key);
+    if (cur) return cur;
+    const fresh: string[] = [];
+    usesByMod.set(key, fresh);
+    return fresh;
+  };
+
+  for (const m of modules) {
+    const uses = usesFor(modKeyOf(m));
+    for (const stmt of m.program.body) {
+      const t = stmt.type;
+      if (t === "ImportDeclaration") {
+        const imp = stmt as unknown as {
+          source: { value: string };
+          specifiers: { type: string; imported?: { name: string }; local: { name: string } }[];
+        };
+        // The `@t2r/std` shim is not a module edge — keep it for lowering to see.
+        if (imp.source.value === "@t2r/std") {
+          mergedBody.push(stmt);
+          continue;
+        }
+        const targetMod = m.resolved.get(imp.source.value);
+        if (!targetMod) {
+          throw new UnsupportedError({
+            type: `unresolved import '${imp.source.value}'`,
+          });
+        }
+        for (const spec of imp.specifiers) {
+          if (spec.type !== "ImportSpecifier" || !spec.imported) {
+            throw new UnsupportedError({
+              type:
+                spec.type === "ImportDefaultSpecifier"
+                  ? "default import (named imports only)"
+                  : "namespace import (`import * as ns`) — glob binding risks silent name capture",
+            });
+          }
+          uses.push(crateUseLine(targetMod, spec.imported.name, spec.local.name));
+        }
+        continue;
+      }
+      if (t === "ExportNamedDeclaration") {
+        const exp = stmt as unknown as {
+          declaration: Statement | null;
+          specifiers: { local: { name: string }; exported: { name: string } }[];
+          source: { value: string } | null;
+        };
+        if (exp.source) {
+          // A re-export (`export { x } from "./y"`) — a facade only inside a pure
+          // barrel (Axis 3, series 050d); a mixed logic+re-export file is ambiguous.
+          throw new UnsupportedError({
+            type: "re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)",
+          });
+        }
+        if (exp.declaration) {
+          const name = crateDeclName(exp.declaration);
+          if (!name) {
+            throw new UnsupportedError({
+              type: `unsupported \`export\` form (${exp.declaration.type})`,
+            });
+          }
+          nameToModPath.set(name, m.modPath);
+          exportedNames.add(name);
+          mergedBody.push(exp.declaration);
+        } else {
+          // `export { a, b as c }` — mark each local exported. A rename with no
+          // declaration emits a `pub use self::… as …;` alias (series 050d); the
+          // plain case just widens visibility.
+          for (const spec of exp.specifiers) {
+            exportedNames.add(spec.local.name);
+          }
+        }
+        continue;
+      }
+      if (t === "ExportDefaultDeclaration") {
+        throw new UnsupportedError({
+          type: "`export default` (no named Rust analog)",
+        });
+      }
+      if (t === "ExportAllDeclaration") {
+        throw new UnsupportedError({
+          type: "re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)",
+        });
+      }
+      // A plain declaration or a top-level statement.
+      const name = crateDeclName(stmt);
+      if (name) {
+        nameToModPath.set(name, m.modPath);
+        mergedBody.push(stmt);
+      } else if (m.isEntry) {
+        // Entry-only: a top-level statement (→ `fn main`) or a script `const`.
+        mergedBody.push(stmt);
+      } else {
+        throw new UnsupportedError({
+          type: "top-level statement in an imported module (declarations only)",
+        });
+      }
+    }
+  }
+
+  // Lower the whole crate as one unit — every cross-module name resolves here.
+  const merged: Program = {
+    type: "Program",
+    body: mergedBody,
+    start: 0,
+    end: 0,
+  };
+  const lowered = lower(merged);
+
+  // Partition the flat items back to their owning module files, stamping the
+  // exported ones `pub(crate)`. Un-owned (synthesized) items stay at the root.
+  const rootItems: HirItem[] = [];
+  const itemsByMod = new Map<string, HirItem[]>();
+  for (const item of lowered.items) {
+    const name = (item as { name?: string }).name;
+    if (name && exportedNames.has(name)) {
+      (item as { vis?: Vis }).vis = "pub(crate)";
+    }
+    const owner = name ? nameToModPath.get(name) : undefined;
+    if (!owner || owner.length === 0) {
+      rootItems.push(item);
+      continue;
+    }
+    const key = owner.join("/");
+    const bucket = itemsByMod.get(key);
+    if (bucket) bucket.push(item);
+    else itemsByMod.set(key, [item]);
+  }
+
+  const mods: HirMod[] = [];
+  for (const m of modules) {
+    if (m.isEntry) continue;
+    const key = modKeyOf(m);
+    mods.push({
+      kind: "mod",
+      name: m.modPath[m.modPath.length - 1] ?? key,
+      modPath: m.modPath,
+      uses: usesByMod.get(key) ?? [],
+      items: itemsByMod.get(key) ?? [],
+    });
+  }
+
+  return {
+    ...lowered,
+    items: rootItems,
+    mods,
+    uses: usesByMod.get("") ?? [],
+  };
 }
 
 /**
