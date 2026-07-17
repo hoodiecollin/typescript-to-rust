@@ -17,6 +17,7 @@
 //! `as usize` cast.
 
 pub mod array;
+pub mod date;
 pub mod gen;
 pub mod http;
 pub mod io;

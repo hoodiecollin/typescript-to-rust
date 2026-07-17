@@ -24,6 +24,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # standard finite-automaton engine (linear-time; no backrefs/lookaround — those
 # fail loud at transpile time). Backs `regex::Regex`'s JS-shaped wrappers.
 regex = "1"
+# Date/time fidelity (series 102, epic #56 / Tier-3). UTC-only usage;
+# `default-features = false` drops the system-clock + tz-database code (and the
+# historical localtime advisory), leaving pure arithmetic. `to_rfc3339_opts`
+# gives exact JS `toISOString()` byte-parity. The test preload pre-warms this on
+# a cold cache (fix(harness) 3889f53), so no thundering-herd flake.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # for the JSON key-order parity test
