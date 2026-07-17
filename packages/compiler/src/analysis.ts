@@ -527,6 +527,23 @@ export interface ModuleAnalysis {
    * (`.await?`); a non-awaited one is fail-loud (the 051 un-polled-future rule).
    */
   ioAsyncNamespaces: Map<string, "fsAsync" | "http">;
+  /**
+   * Bindings whose value is a compiled regex (series 101) — a `tslib::regex::Regex`
+   * from `const re = /pat/flags` or `new RegExp("lit", "flags")`. The mapped
+   * `{ global }` records the JS `g` flag so a later `s.match(re)` picks the
+   * `captures` (no `g`) vs `find_all` (`g`) shape, and `matchAll`/`replaceAll`
+   * gate on it. A `re.test`/`re.exec` on such a binding routes to the regex
+   * method surface. Populated during lowering (statements lower top-to-bottom).
+   */
+  regexBindings: Map<string, { global: boolean }>;
+  /**
+   * Bindings whose value is a first-match regex result (series 101) — an
+   * `Option<tslib::regex::Match>` from `s.match(re)` (no `g`) or `re.exec(s)`. A
+   * positional index `m![i]` routes to `Match::get`, and `m!.groups!.name` to
+   * `Match::group`; both yield `Option<String>` (the 066 Option model, `None` →
+   * JS `undefined`). Populated during lowering.
+   */
+  matchBindings: Set<string>;
 }
 
 /** Scope key for the generated `fn main()` wrapping top-level script statements. */
@@ -1741,6 +1758,9 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     writerBindings: new Set(),
     httpResponseBindings: new Set(),
     ioAsyncNamespaces,
+    // Regex bindings + first-match result bindings (series 101), filled during lowering.
+    regexBindings: new Map(),
+    matchBindings: new Set(),
     // Union-type enums (093) — filled by the `collectUnions` pre-pass in `lower()`.
     unionEnums: new Map(),
     // Field types are filled in by `lower()` (they need `lowerType`); empty here.

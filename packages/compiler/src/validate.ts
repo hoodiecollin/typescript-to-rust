@@ -270,7 +270,55 @@ export function validate(program: Program): void {
     //    silently) and `process.argv`/`env`/`stdin` / `fetch(...)` all fail loud
     //    with an actionable message pointing at the blessed intrinsic.
     checkIoFootgunRedirect(n);
+    // 6. Stateful-RegExp footguns (series 101): `re.lastIndex` and the
+    //    `while ((m = re.exec(s)))` loop are the two stateful idioms the stateless
+    //    v1 model can't express — fail loud with the `matchAll` redirect. Both
+    //    `.lastIndex` and `.exec` are RegExp-exclusive names, so this is sound.
+    checkRegexFootgun(n);
   });
+}
+
+/**
+ * Fail loud on the two stateful-RegExp idioms (series 101, sub-decision RE-STATE)
+ * the stateless v1 model does not express: a `re.lastIndex` read/write, and the
+ * `while ((m = re.exec(s)) !== null)` loop (detected as an `exec` call feeding an
+ * assignment). Both name RegExp-exclusive members, so no other surface is caught.
+ * A single, non-looped `re.exec(s)` (a declarator init / direct test) is fine.
+ * `@throws {UnsupportedError}`.
+ */
+function checkRegexFootgun(n: AnyNode): void {
+  if (n.type === "MemberExpression") {
+    const m = n as { property?: AnyNode; computed?: boolean };
+    if (
+      !m.computed &&
+      m.property?.type === "Identifier" &&
+      (m.property as { name?: string }).name === "lastIndex"
+    ) {
+      throw new UnsupportedError({
+        type: "`RegExp.lastIndex` (stateful matching) is not modeled — the regex is a stateless value in v1; use `s.matchAll(re)` for iteration",
+      });
+    }
+  }
+  // `m = re.exec(s)` (assignment RHS) — the stateful `exec`-loop idiom. A supported
+  // single `exec` is a *declarator init* (`const m = re.exec(s)`), never an
+  // assignment expression, so this precisely targets the loop form.
+  if (n.type === "AssignmentExpression") {
+    const right = (n as { right?: AnyNode }).right;
+    if (right?.type === "CallExpression") {
+      const callee = (right as { callee?: AnyNode }).callee;
+      if (
+        callee?.type === "MemberExpression" &&
+        !(callee as { computed?: boolean }).computed &&
+        (callee as { property?: AnyNode }).property?.type === "Identifier" &&
+        ((callee as { property?: { name?: string } }).property as { name?: string })
+          .name === "exec"
+      ) {
+        throw new UnsupportedError({
+          type: "the stateful `RegExp.exec` loop is not modeled — use `s.matchAll(re)` (a single non-looped `re.exec(s)` is supported)",
+        });
+      }
+    }
+  }
 }
 
 /**

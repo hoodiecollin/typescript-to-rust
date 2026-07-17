@@ -60,6 +60,7 @@ import type {
   WhileStatement,
 } from "./ast";
 import { DialectError, UnsupportedError } from "./errors";
+import { translateRegex, translateReplacement } from "./regex-translate";
 import type {
   Borrow,
   ElemMode,
@@ -5743,6 +5744,18 @@ function lowerForOf(
     elemName != null &&
     forOfElementMutated(stmt.body, elemName);
 
+  // `for (const m of s.matchAll(re))` (series 101): the source is a
+  // `Vec<Vec<String>>`, so each element `m` is a `Vec<String>` (`[full, g1, …]`).
+  // Record its binding type so `m[i]` indexes the group array. Set before the
+  // body lowers.
+  const reSrcTy = regexResultTypeAst(stmt.right, analysis);
+  if (
+    reSrcTy?.kind === "vec" &&
+    reSrcTy.elem.kind === "vec" &&
+    elemName != null
+  ) {
+    analysis.bindingTypes.set(elemName, reSrcTy.elem);
+  }
   const iter: HirExpr =
     overGenerator || mutatesElement
       ? lowerExpr(stmt.right, analysis)
@@ -6795,6 +6808,29 @@ function optionExprType(
   e: Expression,
   analysis: ModuleAnalysis,
 ): Extract<RustType, { kind: "option" }> | null {
+  // A first-match group access (series 101) → `Option<String>` (checked before the
+  // generic MemberExpression block, which returns null for a computed / non-struct
+  // member): a positional `m![i]` and a named `m!.groups!.name` both render via
+  // `fmt_opt` and narrow through the 066 `=== undefined` machinery.
+  if (e.type === "MemberExpression") {
+    const me = e as MemberExpression;
+    if (me.computed && matchBindingName(me.object, analysis)) {
+      return { kind: "option", inner: { kind: "String" } };
+    }
+    if (!me.computed) {
+      const groupsMember = peelNonNull(me.object);
+      if (
+        groupsMember.type === "MemberExpression" &&
+        !(groupsMember as MemberExpression).computed &&
+        (groupsMember as MemberExpression).property.type === "Identifier" &&
+        ((groupsMember as MemberExpression).property as Identifier).name ===
+          "groups" &&
+        matchBindingName((groupsMember as MemberExpression).object, analysis)
+      ) {
+        return { kind: "option", inner: { kind: "String" } };
+      }
+    }
+  }
   if (e.type === "Identifier") {
     const name = (e as Identifier).name;
     // A name narrowed in an enclosing `if let Some(name)` block is a plain `T` here.
@@ -7064,6 +7100,21 @@ function receiverTypeOf(
     if (intr === "args" || intr === "readDir") {
       return { kind: "vec", elem: { kind: "String" } };
     }
+  }
+  // A non-null assertion `x!` (series 066/101): its type is the unwrapped inner of
+  // an `Option<T>` binding — so `all!.join(",")` / `all!.length` (the `Option<Vec>`
+  // from `s.match(/…/g)`) route through the `vec` gate. Only the identifier-binding
+  // case is resolved here (structurally, no oracle needed).
+  if (expr.type === "TSNonNullExpression") {
+    const inner = (expr as unknown as { expression: Expression }).expression;
+    if (inner.type === "Identifier") {
+      const t = analysis.bindingTypes.get((inner as Identifier).name);
+      if (t?.kind === "option") return t.inner;
+    }
+    // An inline `s.match(re)!` (series 101) — unwrap the `Option<Vec<String>>` so
+    // a chained `.join(",")` routes through the `vec` gate to `tslib::array::join`.
+    const rt = regexResultTypeAst(inner, analysis);
+    if (rt?.kind === "option") return rt.inner;
   }
   // Tier 1 — bare identifier → bindingTypes (the fast, pre-082 path).
   if (expr.type === "Identifier") {
@@ -7739,6 +7790,17 @@ function lowerVarDecl(
     // so the message is the redirect, not "binding without a type annotation".
     if (d.init) redirectBareJson(d.init);
     if (d.init) redirectBareMathRandom(d.init);
+    // A `const re = new RegExp(runtimeVar)` (series 101) fails loud with the
+    // inline-a-literal redirect — run before the annotation gate so the message is
+    // the RE-PORT redirect, not "binding without a type annotation".
+    if (
+      d.init &&
+      d.init.type === "NewExpression" &&
+      (d.init as NewExpression).callee.type === "Identifier" &&
+      ((d.init as NewExpression).callee as Identifier).name === "RegExp"
+    ) {
+      lowerNew(d.init as NewExpression, analysis);
+    }
     const declKind = (decl as { kind: string }).kind;
     const gated = declKind === "const" || declKind === "let" || declKind === "var";
     if (
@@ -7775,7 +7837,11 @@ function lowerVarDecl(
       // An `@t2r/std` I/O intrinsic binding (series 100) — `const s = readFile(p)`,
       // `const w = stdout()`, `const res = await http.get(u)` — is typed by
       // construction (the `tslib` return); Rust infers it, so no annotation.
-      !isStdIoInit(d.init, analysis)
+      !isStdIoInit(d.init, analysis) &&
+      // A regex value or a regex `match`/`exec`/`split`/`test`/`search`/`replace`
+      // result (series 101) is typed by construction (the `tslib::regex` return);
+      // Rust infers it, so no annotation is required (like `.find`/`.at`).
+      !isRegexInit(d.init, analysis)
     ) {
       // Series 099 inference tier: before failing loud, ask the lib-backed oracle
       // to infer the initializer's type *through* built-in signatures and
@@ -7882,6 +7948,37 @@ function lowerVarDecl(
       d.id.type === "Identifier"
     ) {
       analysis.httpResponseBindings.add((d.id as Identifier).name);
+    }
+    // Track a regex value binding (series 101): `const re = /pat/g` /
+    // `new RegExp("lit","g")` records the `g` flag so a later `s.match(re)` picks
+    // `captures` vs `find_all`, and `re.test`/`re.exec` route to the regex surface.
+    if (d.id.type === "Identifier") {
+      const reInfo = regexLiteralInfo(d.init);
+      if (reInfo) {
+        analysis.regexBindings.set((d.id as Identifier).name, {
+          global: reInfo.flags.includes("g"),
+        });
+      }
+      // A first-match result binding (`const m = s.match(re)` no `g`, or
+      // `const m = re.exec(s)`) is an `Option<Match>`: record it so `m![i]` /
+      // `m!.groups!.name` route to the `Match` surface, and `m !== null` narrows.
+      // A `const all = s.match(/…/g)!` unwraps at the binding (peel the `!`) → the
+      // inner `Vec<String>`, so `all.length`/`all.join` route through the vec gate.
+      const unwrappedInit = d.init.type === "TSNonNullExpression";
+      const reInitInner = unwrappedInit
+        ? (d.init as unknown as { expression: Expression }).expression
+        : d.init;
+      const reTy = regexResultTypeAst(reInitInner, analysis);
+      if (reTy) {
+        if (unwrappedInit && reTy.kind === "option") {
+          analysis.bindingTypes.set((d.id as Identifier).name, reTy.inner);
+        } else {
+          analysis.bindingTypes.set((d.id as Identifier).name, reTy);
+          if (reTy.kind === "option" && reTy.inner === REGEX_MATCH_TYPE) {
+            analysis.matchBindings.add((d.id as Identifier).name);
+          }
+        }
+      }
     }
     // Record the `RustType` of an I/O intrinsic binding (series 100) so a later
     // method call resolves by type — e.g. `.join(",")` on a `Vec<String>` from
@@ -8724,8 +8821,13 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
         (expr as unknown as { expression: Expression }).expression,
         analysis,
       );
-    case "Literal":
+    case "Literal": {
+      // A regex literal `/pat/flags` (series 101) → the compiled `tslib::regex`
+      // value, translated + validated at transpile time.
+      const reInfo = regexLiteralInfo(expr as Literal);
+      if (reInfo) return lowerRegexValue(reInfo);
       return lowerLiteral(expr as Literal);
+    }
     case "Identifier": {
       const name = (expr as Identifier).name;
       // `undefined` is an identifier in ESTree (not a literal); it is the absent
@@ -10494,6 +10596,14 @@ function lowerCall(
         type: "sort with a non-arrow comparator (pass `(a, b) => …` or no argument)",
       });
     }
+    // RegExp methods (series 101) — a regex receiver (`re.test`/`re.exec`) or a
+    // string receiver with a regex argument (`s.match(re)`/`.replace(re, …)`/…).
+    // Runs before the string/Map dispatch so a regex arg claims `.split`/`.replace`
+    // over the plain string routing; returns null (falls through) otherwise.
+    if (!isUserMethod) {
+      const regexRouted = tryRegexMethod(methodName, m, call, analysis);
+      if (regexRouted) return regexRouted;
+    }
     // `Map`/`Set` class methods (series 061) route by the receiver's binding type
     // to their `IndexMap`/`IndexSet` equivalents. Guarded by `!isUserMethod` so a
     // user method named `get`/`set`/`has`/`add`/`delete` stays a native call.
@@ -11536,6 +11646,326 @@ function tryTslibMethod(
     };
   }
   return null;
+}
+
+// ── RegExp dispatch (series 101, epic #56) ────────────────────────────────────
+
+/** A Rust string literal for an already-translated regex pattern / replacement. */
+function rustStrLit(s: string): string {
+  return (
+    '"' +
+    s
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, "\\n")
+      .replace(/\r/g, "\\r")
+      .replace(/\t/g, "\\t") +
+    '"'
+  );
+}
+
+/**
+ * The `{pattern, flags}` of a **statically-known** regex value — a `/pat/flags`
+ * literal, or `new RegExp("lit"[, "flags"])` with a string-literal pattern. `null`
+ * for a non-regex expression (a `new RegExp(runtimeVar)` is handled in `lowerNew`).
+ */
+function regexLiteralInfo(
+  e: Expression,
+): { pattern: string; flags: string } | null {
+  if (e.type === "Literal" && (e as Literal).regex) {
+    return (e as Literal).regex ?? null;
+  }
+  if (e.type === "NewExpression") {
+    const n = e as NewExpression;
+    if (
+      n.callee.type === "Identifier" &&
+      (n.callee as Identifier).name === "RegExp"
+    ) {
+      const p = n.arguments[0];
+      if (p && p.type === "Literal" && typeof (p as Literal).value === "string") {
+        const f = n.arguments[1];
+        const flags =
+          f && f.type === "Literal" && typeof (f as Literal).value === "string"
+            ? ((f as Literal).value as string)
+            : "";
+        return { pattern: (p as Literal).value as string, flags };
+      }
+    }
+  }
+  return null;
+}
+
+/** Lower a statically-known regex value to `tslib::regex::Regex::new_lit(pat, g)`. */
+function lowerRegexValue(info: { pattern: string; flags: string }): HirExpr {
+  const t = translateRegex(info.pattern, info.flags);
+  return {
+    kind: "call",
+    callee: "tslib::regex::Regex::new_lit",
+    args: [
+      { borrow: "owned", expr: { kind: "raw", text: rustStrLit(t.rustPattern) } },
+      { borrow: "owned", expr: { kind: "bool", value: t.global } },
+    ],
+  };
+}
+
+/**
+ * The JS `g` (global) flag of a regex-valued expression — a `/…/` literal, a
+ * `new RegExp(...)`, or an identifier bound to a regex (`regexBindings`). `null`
+ * when the expression is **not** a regex value (so a `.split`/`.replace` with a
+ * string argument falls through to the plain string-method path).
+ */
+function regexArgGlobal(e: Expression, analysis: ModuleAnalysis): boolean | null {
+  const info = regexLiteralInfo(e);
+  if (info) return info.flags.includes("g");
+  if (
+    e.type === "Identifier" &&
+    analysis.regexBindings.has((e as Identifier).name)
+  ) {
+    return analysis.regexBindings.get((e as Identifier).name)?.global ?? false;
+  }
+  return null;
+}
+
+/** Is `e` a regex value (literal, `new RegExp`, or a `regexBindings` identifier)? */
+function isRegexValueExpr(e: Expression, analysis: ModuleAnalysis): boolean {
+  return regexArgGlobal(e, analysis) !== null;
+}
+
+/** Lower a regex value to the Rust **receiver** of a `tslib::regex::Regex` method
+ *  — a literal/`new` inlines its `new_lit(...)`; a binding lowers to its name. */
+function lowerRegexReceiver(e: Expression, analysis: ModuleAnalysis): HirExpr {
+  const info = regexLiteralInfo(e);
+  if (info) return lowerRegexValue(info);
+  return lowerExpr(e, analysis);
+}
+
+/** The Rust `Match` struct type (first-match result); an `Option<Match>` binding. */
+const REGEX_MATCH_TYPE: RustType = { kind: "struct", name: "tslib::regex::Match" };
+
+/**
+ * The by-construction `RustType` of a regex string/`exec` result (series 101),
+ * gated on a genuine regex receiver/arg — used both to exempt the binding from the
+ * annotation gate and to record its type (so `m![i]` / `all!.join` / the for-of
+ * over `matchAll` route correctly). `null` for a non-regex call.
+ */
+function regexResultTypeAst(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): RustType | null {
+  if (e.type !== "CallExpression") return null;
+  const callee = (e as CallExpression).callee;
+  if (callee.type !== "MemberExpression") return null;
+  const cm = callee as MemberExpression;
+  if (cm.property.type !== "Identifier") return null;
+  const method = (cm.property as Identifier).name;
+  // `re.exec(s)` — receiver is a regex value → `Option<Match>`.
+  if (method === "exec" && isRegexValueExpr(cm.object as Expression, analysis)) {
+    return { kind: "option", inner: REGEX_MATCH_TYPE };
+  }
+  // `s.match/matchAll/split(re)` — string receiver, regex first argument.
+  const reArg = (e as CallExpression).arguments[0] as Expression | undefined;
+  if (!reArg) return null;
+  const g = regexArgGlobal(reArg, analysis);
+  if (g === null) return null;
+  if (method === "match") {
+    return g
+      ? { kind: "option", inner: { kind: "vec", elem: { kind: "String" } } }
+      : { kind: "option", inner: REGEX_MATCH_TYPE };
+  }
+  if (method === "split") return { kind: "vec", elem: { kind: "String" } };
+  if (method === "matchAll") {
+    return { kind: "vec", elem: { kind: "vec", elem: { kind: "String" } } };
+  }
+  return null;
+}
+
+/**
+ * A regex-init binding (series 101) is typed by construction — no annotation
+ * required (like `.find`/`.at`): a regex value itself, a match/`exec`/`split`
+ * result, or a `test`/`search`/`replace` scalar result.
+ */
+function isRegexInit(e: Expression | null, analysis: ModuleAnalysis): boolean {
+  if (!e) return false;
+  // `const all = s.match(/…/g)!` unwraps at the binding — peel the `!` so the
+  // regex result is still recognized (typed `Vec<String>` by construction).
+  const peeled = peelNonNull(e);
+  if (isRegexValueExpr(peeled, analysis)) return true;
+  if (regexResultTypeAst(peeled, analysis)) return true;
+  if (peeled.type === "CallExpression") {
+    const callee = (peeled as CallExpression).callee;
+    if (
+      callee.type === "MemberExpression" &&
+      (callee as MemberExpression).property.type === "Identifier"
+    ) {
+      const cm = callee as MemberExpression;
+      const method = (cm.property as Identifier).name;
+      if (method === "test" && isRegexValueExpr(cm.object as Expression, analysis)) {
+        return true;
+      }
+      const reArg = (peeled as CallExpression).arguments[0] as
+        | Expression
+        | undefined;
+      if (
+        reArg &&
+        regexArgGlobal(reArg, analysis) !== null &&
+        (method === "search" || method === "replace" || method === "replaceAll")
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Peel one non-null assertion (`x!` → `x`); identity otherwise. */
+function peelNonNull(e: Expression): Expression {
+  return e.type === "TSNonNullExpression"
+    ? (e as unknown as { expression: Expression }).expression
+    : e;
+}
+
+/** The bound name if `e` (through an optional `!`) is a first-match `matchBindings`
+ *  identifier (an `Option<Match>` binding); else null. */
+function matchBindingName(e: Expression, analysis: ModuleAnalysis): string | null {
+  const inner = peelNonNull(e);
+  if (
+    inner.type === "Identifier" &&
+    analysis.matchBindings.has((inner as Identifier).name)
+  ) {
+    return (inner as Identifier).name;
+  }
+  return null;
+}
+
+/** `<name>.as_ref().unwrap()` — a **borrowing** unwrap of an `Option<Match>`
+ *  binding, so repeated `m![i]` / `m!.groups!.n` access does not move `m`
+ *  (`Match::get`/`group` take `&self`). */
+function matchBorrowUnwrap(name: string): HirExpr {
+  return {
+    kind: "method",
+    receiver: {
+      kind: "method",
+      receiver: { kind: "ident", name },
+      name: "as_ref",
+      args: [],
+    },
+    name: "unwrap",
+    args: [],
+  };
+}
+
+/** The translated replacement arg of a regex `.replace`/`.replaceAll` — a string
+ *  literal (so `$`-templates translate); a function replacer / non-literal is
+ *  fail-loud (sub-decisions RE-FNREPL / literal-only). A raw `&str` HirExpr. */
+function regexReplArg(replExpr: Expression): HirExpr {
+  if (
+    replExpr.type === "ArrowFunctionExpression" ||
+    replExpr.type === "FunctionExpression"
+  ) {
+    throw new UnsupportedError({
+      type: "a function replacer in `.replace` is not modeled (v1) — use a string replacement template (`$1`, `$<name>`, `$&`)",
+    });
+  }
+  if (
+    replExpr.type !== "Literal" ||
+    typeof (replExpr as Literal).value !== "string"
+  ) {
+    throw new UnsupportedError({
+      type: "a regex `.replace` replacement must be a string literal so its `$`-templates translate at transpile time",
+    });
+  }
+  const translated = translateReplacement((replExpr as Literal).value as string);
+  return { kind: "raw", text: rustStrLit(translated) };
+}
+
+/**
+ * Route a regex method call (series 101), or return `null` to fall through:
+ *   - **receiver is a regex** → `re.test(s)` → `is_match`; `re.exec(s)` → `exec`.
+ *   - **string receiver + regex argument** → the regex-taking string methods,
+ *     with the receiver/argument **flipped** (`s.match(re)` → `re.captures(&s)`).
+ * The regex is the Rust receiver; the string is passed by `&`. Called from
+ * `lowerCall` before `tryPrimitiveMethod` so a regex arg wins over string routing.
+ */
+function tryRegexMethod(
+  methodName: string,
+  m: MemberExpression,
+  call: CallExpression,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  // Case A — the receiver is a regex value: `re.test` / `re.exec`.
+  if (isRegexValueExpr(m.object as Expression, analysis)) {
+    const receiver = lowerRegexReceiver(m.object as Expression, analysis);
+    const arg = call.arguments[0] as Expression | undefined;
+    if (methodName === "test" && arg) {
+      return {
+        kind: "method",
+        receiver,
+        name: "is_match",
+        args: [refExpr(lowerExpr(arg, analysis))],
+      };
+    }
+    if (methodName === "exec" && arg) {
+      return {
+        kind: "method",
+        receiver,
+        name: "exec",
+        args: [refExpr(lowerExpr(arg, analysis))],
+      };
+    }
+    throw new UnsupportedError({
+      type: `\`.${methodName}\` on a RegExp — only \`.test(s)\` and a single \`.exec(s)\` are modeled (a stateful \`exec\` loop / \`.lastIndex\` is not — use \`s.matchAll(re)\`)`,
+    });
+  }
+  // Case B — a string receiver with a regex first argument.
+  const reArg = call.arguments[0] as Expression | undefined;
+  if (!reArg) return null;
+  const global = regexArgGlobal(reArg, analysis);
+  if (global === null) return null; // not a regex arg → plain string method
+  const receiver = lowerRegexReceiver(reArg, analysis);
+  const strArg = refExpr(lowerExpr(m.object as Expression, analysis));
+  const method = (name: string, extra: HirExpr[] = []): HirExpr => ({
+    kind: "method",
+    receiver,
+    name,
+    args: [strArg, ...extra],
+  });
+  switch (methodName) {
+    case "match":
+      // `g` → full matches (`find_all`, `Option<Vec<String>>`); no `g` → the
+      // capture array (`captures`, `Option<Match>`).
+      return method(global ? "find_all" : "captures");
+    case "matchAll":
+      // JS `matchAll` requires the `g` flag (TypeError otherwise) — mirror it.
+      if (!global) {
+        throw new UnsupportedError({
+          type: "`s.matchAll(re)` requires the `g` flag on the regex (as in JS)",
+        });
+      }
+      return method("captures_all");
+    case "search":
+      return method("search");
+    case "split":
+      return method("split");
+    case "replace": {
+      const repl = call.arguments[1] as Expression | undefined;
+      if (!repl) return null;
+      // `s.replace(re/g, r)` replaces all; a non-`g` regex replaces the first.
+      return method(global ? "replace_all" : "replace_first", [regexReplArg(repl)]);
+    }
+    case "replaceAll": {
+      const repl = call.arguments[1] as Expression | undefined;
+      if (!repl) return null;
+      // JS `replaceAll` requires the `g` flag on a regex arg (TypeError otherwise).
+      if (!global) {
+        throw new UnsupportedError({
+          type: "`s.replaceAll(re, …)` requires the `g` flag on the regex (as in JS)",
+        });
+      }
+      return method("replace_all", [regexReplArg(repl)]);
+    }
+    default:
+      return null;
+  }
 }
 
 // ── Primitive-method dispatch (series 083) ────────────────────────────────────
@@ -13153,6 +13583,17 @@ function lowerNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
     throw new UnsupportedError({ type: "new with a non-identifier callee" });
   }
   const className = (expr.callee as Identifier).name;
+  // `new RegExp(pat[, flags])` (series 101) — a **string-literal** `pat` is
+  // translated + validated at transpile time (same as a `/…/` literal); a
+  // non-literal `pat` cannot be vetted against the Rust `regex` engine and is
+  // fail-loud (sub-decision RE-PORT: never emit an un-vetted pattern).
+  if (className === "RegExp") {
+    const info = regexLiteralInfo(expr);
+    if (info) return lowerRegexValue(info);
+    throw new UnsupportedError({
+      type: "a `RegExp` built from a non-literal pattern cannot be validated against the Rust `regex` engine — inline the pattern as a literal (`/…/`) so backreferences/lookaround are rejected at transpile time",
+    });
+  }
   // Explicit call-site type arguments `new Box<string>(x)` (series 081) — the
   // dialect is inference-only (rustc infers `T` from the ctor arg), so an explicit
   // arg is fail-loud. (`Map`/`Set` carry their own turbofish path below and are
@@ -13188,6 +13629,19 @@ function lowerMember(
   analysis: ModuleAnalysis,
 ): HirExpr {
   if (member.computed) {
+    // Positional group index on a first-match result (series 101) — `m![i]` →
+    // `m.unwrap().get(i)` → `Option<String>` (`None` = out-of-range / a
+    // non-participating group → JS `undefined`, the 066 model). Gated on the base
+    // (through `!`) being a `matchBindings` name; the `!` lowers to `.unwrap()`.
+    const posMatch = matchBindingName(member.object, analysis);
+    if (posMatch) {
+      return {
+        kind: "method",
+        receiver: matchBorrowUnwrap(posMatch),
+        name: "get",
+        args: [lowerExpr(member.property, analysis)],
+      };
+    }
     // Pair index on an `Object.entries` element — `es[i][0]` / `es[i][1]` →
     // tuple field `.0` / `.1` (series 043). The base must be `<entriesBinding>[i]`
     // and the index the literal `0` or `1`.
@@ -13235,6 +13689,29 @@ function lowerMember(
   }
   if (member.property.type === "Identifier") {
     const prop = (member.property as Identifier).name;
+    // Named-group access on a first-match result (series 101) — `m!.groups!.name`
+    // → `m.unwrap().group("name")` → `Option<String>` (`None` = non-participating
+    // → JS `undefined`). Detects the `.groups` hop (through the optional `!`s)
+    // whose base is a `matchBindings` name; the innermost `!` lowers to `.unwrap()`.
+    {
+      const groupsMember = peelNonNull(member.object);
+      const groupBase =
+        groupsMember.type === "MemberExpression" &&
+        !(groupsMember as MemberExpression).computed &&
+        (groupsMember as MemberExpression).property.type === "Identifier" &&
+        ((groupsMember as MemberExpression).property as Identifier).name ===
+          "groups"
+          ? matchBindingName((groupsMember as MemberExpression).object, analysis)
+          : null;
+      if (groupBase) {
+        return {
+          kind: "method",
+          receiver: matchBorrowUnwrap(groupBase),
+          name: "group",
+          args: [{ kind: "raw", text: rustStrLit(prop) }],
+        };
+      }
+    }
     // Bare `Math.random` as a *value* (uncalled, e.g. assigned or passed) is
     // fail-loud (series 089) — redirect to `rng(seed)` from "@t2r/std". The
     // *called* form `Math.random()` is caught earlier in `lowerNumberStatic`.

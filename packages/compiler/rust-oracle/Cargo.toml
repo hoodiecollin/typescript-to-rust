@@ -72,6 +72,14 @@ thiserror = "2"
 # exactly (`NaN == NaN`, `-0.0`/`+0.0` collapse), so a number-keyed `Map`/`Set`
 # translates faithfully. Unused by float-key-free output (costs nothing at check).
 ordered-float = "4"
+# regex backs the RegExp surface (series 101, epic #56): `/pat/flags` and
+# `new RegExp("lit")` → `tslib::regex::Regex` over the `regex` crate. Pinned so
+# the offline cache stays warm; the harness fetches it (+ aho-corasick, memchr,
+# regex-syntax) online on a cold cache. The test preload pre-warms this (and
+# every dep) once before any spec runs (`ensureDepsWarm`), so a cold add no
+# longer flakes mid-suite. Unused by regex-free output (costs nothing at check
+# time).
+regex = "1"
 
 [lib]
 name = "rust_oracle"

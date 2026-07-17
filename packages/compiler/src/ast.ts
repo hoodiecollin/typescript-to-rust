@@ -49,6 +49,8 @@ export interface Literal extends Span {
   type: "Literal";
   value: string | number | boolean | null;
   raw: string;
+  /** Present iff this is a regex literal `/pat/flags` (series 101); `value` is `{}`. */
+  regex?: { pattern: string; flags: string };
 }
 
 export interface BinaryExpression extends Span {
