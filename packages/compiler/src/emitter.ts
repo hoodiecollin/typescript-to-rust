@@ -281,8 +281,13 @@ export function emitCrate(mod: HirModule): CrateFile[] {
       addDecl(m.modPath.slice(0, i - 1).join("/"), m.modPath[i - 1] as string);
     }
   }
+  // `pub(crate) mod` (not bare `mod`): a nested module path (`crate::util::math`)
+  // is only reachable crate-wide if every segment is at least `pub(crate)` — a
+  // private child `mod math;` inside `util` would make `crate::util::math` an
+  // E0603 ("module is private") from the root. Visibility-only, so behavior is
+  // unchanged; a single-segment module was already reachable but stays consistent.
   const declLines = (parent: string): string[] =>
-    [...(declsByParent.get(parent) ?? [])].map((c) => `mod ${rid(c)};`);
+    [...(declsByParent.get(parent) ?? [])].map((c) => `pub(crate) mod ${rid(c)};`);
 
   // Inline namespace mods (Axis 4) render *within* their parent file as `mod n { … }`.
   const inlineMods = mods.filter((m) => m.inline);
