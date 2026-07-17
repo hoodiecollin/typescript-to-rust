@@ -55,12 +55,15 @@ console.log(m.has("a"), m.get("a") ?? -1);`,
     },
   },
   {
-    name: "RT-REG2 identifier / array .length still .len()",
+    name: "RT-REG2 string .length → char count (098); array .length stays .len()",
     src: `const s: string = "abcd";
 const xs: Array<number> = [1, 2, 3];
 console.log(s.length, xs.length);`,
     expected: "4 3",
-    extra: ({ rust }) => expect(rust).toContain(".len()"),
+    extra: ({ rust }) => {
+      expect(rust).toContain("s.chars().count()");
+      expect(rust).toContain("xs.len()");
+    },
   },
 ]);
 
