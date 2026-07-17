@@ -371,6 +371,15 @@ lands anything touching the directive surface.
 - **Not yet:** dynamic `import()`; bare/package imports; top-level statements in
   an imported module; namespace+value declaration merging; an **anonymous value**
   default export (`export default 42/{}/() =>` — no named Rust analog).
+- **Not yet (crate-merge inference gap):** the 099 type-oracle infers an untyped
+  `const p = new Point(1,2)` / builtin-call binding *by construction*, but it is
+  built from a single file's **source + spans**. `lowerCrate` lowers a **synthetic
+  merged** program (spliced from N files, no coherent source), so the oracle is
+  absent there — a cross-module binding whose type would come from oracle inference
+  must carry an **explicit annotation** (`const p: Point = new Point(1,2)`), the
+  pre-099 dialect baseline. Wiring a **per-module** oracle (keyed by module + span)
+  through the merge is a follow-on; until then annotate. (Same-file inference in a
+  single-file program is unaffected.)
 - **Lifted (no longer residuals):** **renamed exports** (`export { x as y }` — now a
   `pub use … as y;`) and **pure re-export barrels** (now `pub use` facades, Axis 3);
   **namespace imports** (`import * as ns` — now a `use crate::n as ns;` module alias)
