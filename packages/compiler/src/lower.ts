@@ -520,6 +520,50 @@ function crateDeclName(stmt: Statement): string | undefined {
   return undefined;
 }
 
+/**
+ * A **pure barrel** (series 050d, Axis 3): a non-entry module whose body is *only*
+ * `./`-relative re-exports (`export { x } from "./y"` / `export * from "./y"`), no
+ * runtime logic or own declarations. It translates to a generated `pub use` facade
+ * module (differential-neutral name routing). A **mixed** file (a re-export plus
+ * any other statement) is NOT a pure barrel → it stays fail-loud.
+ */
+function isPureBarrel(program: Program): boolean {
+  if (program.body.length === 0) return false;
+  return program.body.every((stmt) => {
+    const s = stmt as { type: string; source?: { value?: unknown } | null };
+    return (
+      (s.type === "ExportNamedDeclaration" ||
+        s.type === "ExportAllDeclaration") &&
+      !!s.source &&
+      typeof s.source.value === "string"
+    );
+  });
+}
+
+/**
+ * The `pub use crate::<target>::…;` facade line(s) for one re-export statement in a
+ * pure barrel. `export { a, b as c } from "./y"` → `pub use crate::y::a;` +
+ * `pub use crate::y::b as c;`; `export * from "./y"` → `pub use crate::y::*;`.
+ */
+function facadeUseLines(
+  stmt: Statement,
+  targetMod: string[],
+): string[] {
+  // `pub(crate) use` (not `pub use`): the re-exported items are `pub(crate)` (the
+  // crate's visibility granularity), and Rust forbids `pub use` re-exporting a
+  // `pub(crate)` item beyond the crate (E0364). The facade routes names crate-wide.
+  const path = ["crate", ...targetMod].join("::");
+  if (stmt.type === "ExportAllDeclaration") return [`pub(crate) use ${path}::*;`];
+  const exp = stmt as unknown as {
+    specifiers: { local: { name: string }; exported: { name: string } }[];
+  };
+  return exp.specifiers.map((sp) =>
+    sp.local.name === sp.exported.name
+      ? `pub(crate) use ${path}::${sp.local.name};`
+      : `pub(crate) use ${path}::${sp.local.name} as ${sp.exported.name};`,
+  );
+}
+
 /** `use crate::<modPath>::<imported>[ as <local>];` for an import specifier. */
 function crateUseLine(
   modPath: string[],
@@ -692,8 +736,26 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
     return fresh;
   };
 
+  /** modPath keys of pure-barrel modules → emitted as `pub use` facades. */
+  const facadeKeys = new Set<string>();
+
   for (const m of modules) {
     const uses = usesFor(modKeyOf(m));
+    // A pure barrel (Axis 3) → a generated `pub use` facade module; it declares no
+    // items of its own, so it never contributes to the merged program.
+    if (!m.isEntry && isPureBarrel(m.program)) {
+      facadeKeys.add(modKeyOf(m));
+      for (const stmt of m.program.body) {
+        const src = (stmt as unknown as { source: { value: string } }).source
+          .value;
+        const targetMod = m.resolved.get(src);
+        if (!targetMod) {
+          throw new UnsupportedError({ type: `unresolved re-export '${src}'` });
+        }
+        uses.push(...facadeUseLines(stmt, targetMod));
+      }
+      continue;
+    }
     for (const stmt of m.program.body) {
       const t = stmt.type;
       if (t === "ImportDeclaration") {
@@ -863,6 +925,7 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
       modPath: m.modPath,
       uses: usesByMod.get(key) ?? [],
       items: itemsByMod.get(key) ?? [],
+      facade: facadeKeys.has(key) || undefined,
     });
   }
 

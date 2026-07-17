@@ -259,6 +259,14 @@ export function validate(program: Program): void {
     if (reason) throw new DialectError(reason);
     // 2. Forbidden flags on modeled nodes (generators, `using`, decorators, …).
     checkForbiddenFlags(n);
+    // 2b. Dynamic `import()` (series 050) — an `ImportExpression` has no static
+    //     Rust analog (runtime module loading); reject with a dedicated message
+    //     rather than the generic default-deny below.
+    if (n.type === "ImportExpression") {
+      throw new UnsupportedError({
+        type: "dynamic `import()` (only static `import`/`export` are modeled)",
+      });
+    }
     // 3. Default-deny: an unmodeled node type is not implemented yet.
     if (!MODELED.has(n.type)) throw new UnsupportedError(n);
     // 4. The only modeled import is `@t2r/std` (series 084). Any other specifier,
