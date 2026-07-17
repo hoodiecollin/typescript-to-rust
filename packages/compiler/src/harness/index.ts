@@ -16,13 +16,7 @@
  */
 
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
   type CargoResult,
@@ -35,6 +29,23 @@ import {
 } from "./cargo";
 
 const ORACLE_DIR = join(import.meta.dir, "..", "..", "rust-oracle");
+
+/**
+ * Write `content` to `path` only if it differs from what's already there.
+ *
+ * Cargo's incremental fingerprint keys on a source file's mtime, so rewriting a
+ * byte-identical example would still invalidate its cache and force a needless
+ * recompile. Skipping the write when nothing changed keeps the mtime stable and
+ * lets an unchanged example genuinely cache-hit across runs (see `runBatch`).
+ */
+function writeIfChanged(path: string, content: string): void {
+  try {
+    if (readFileSync(path, "utf8") === content) return;
+  } catch {
+    // Missing/unreadable → fall through and write it.
+  }
+  writeFileSync(path, content);
+}
 
 /** A cargo crate the harness can write source into and compile/run. */
 export class RustProject {
@@ -71,7 +82,13 @@ export class RustProject {
   }
 
   private write(target: "lib.rs" | "main.rs", source: string): void {
-    writeFileSync(
+    // Conditional write (see `writeIfChanged`): every example links the crate
+    // lib, so churning `lib.rs`/`main.rs`'s mtime with byte-identical content —
+    // e.g. `runBatch` resetting them to the same empty lib / trivial main on
+    // every call — would recompile the lib and cascade into recompiling every
+    // example. Keeping the mtime stable when nothing changed lets examples truly
+    // cache-hit across runs.
+    writeIfChanged(
       join(this.dir, "src", target),
       source.endsWith("\n") ? source : `${source}\n`,
     );
@@ -129,16 +146,20 @@ export class RustProject {
   ): Promise<Map<string, CargoResult>> {
     return this.lock(async () => {
       // Reset the shared bin/lib so a program left by a prior run() can't break
-      // the example build, and rewrite the examples dir from scratch so only
-      // this batch's programs are present.
+      // the example build.
       this.write("lib.rs", "");
       this.write("main.rs", "fn main() {}");
+      // The examples dir PERSISTS across runs (no wipe): cargo builds only this
+      // batch's ids via explicit `--example` flags, so leftover programs from
+      // other files / prior runs are never compiled — but their unchanged
+      // artifacts stay cached, so a re-run recompiles only what changed. Writing
+      // a file only when its content differs preserves the mtime cargo
+      // fingerprints on, making an unchanged example a true cache hit.
       const exDir = join(this.dir, "examples");
-      rmSync(exDir, { recursive: true, force: true });
       mkdirSync(exDir, { recursive: true });
       const ioById = new Map<string, IoInput>();
       for (const p of programs) {
-        writeFileSync(
+        writeIfChanged(
           join(exDir, `${p.id}.rs`),
           p.src.endsWith("\n") ? p.src : `${p.src}\n`,
         );

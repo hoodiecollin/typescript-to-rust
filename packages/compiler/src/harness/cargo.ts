@@ -291,9 +291,8 @@ export async function mapBounded<T, R>(
       out[i] = await fn(items[i] as T, i);
     }
   }
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    () => worker(),
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () =>
+    worker(),
   );
   await Promise.all(workers);
   return out;
@@ -311,20 +310,26 @@ interface TargetedMessage extends CargoMessage {
  *
  * All programs are `examples/<id>.rs` in the shared oracle crate, so the heavy
  * dependency rlibs are compiled **once** and reused across every example (and the
- * carve-out programs that are *expected* to fail). `--keep-going` builds every
- * example that can compile even when others fail; `--message-format=json`
- * attributes each compile error to its example target, and each produced binary
- * to its `executable` path. Programs that build are executed (bounded
- * concurrency) for their stdout; programs that fail to build — or that build but
- * exit non-zero at runtime — come back as `ok: false`, which is exactly what the
- * fail-loud carve-out specs assert. Returns a map keyed by `id`.
+ * carve-out programs that are *expected* to fail). Only *this batch's* ids are
+ * built — via explicit `--example <id>` flags rather than `--examples` — so the
+ * persistent examples dir can hold every file's programs (see `runBatch`) without
+ * this invocation recompiling anyone else's; unchanged examples from a prior run
+ * stay cache-hit. `--keep-going` builds every listed example that can compile even
+ * when others fail; `--message-format=json` attributes each compile error to its
+ * example target, and each produced binary to its `executable` path. Programs that
+ * build are executed (bounded concurrency) for their stdout; programs that fail to
+ * build — or that build but exit non-zero at runtime — come back as `ok: false`,
+ * which is exactly what the fail-loud carve-out specs assert. Returns a map keyed
+ * by `id`.
  */
 export async function cargoBuildExamples(
   cwd: string,
   ids: string[],
   ioById?: ReadonlyMap<string, IoInput>,
 ): Promise<Map<string, CargoResult>> {
-  const build = await runCargo(["build", "--examples", "--keep-going"], cwd);
+  if (ids.length === 0) return new Map();
+  const exampleFlags = ids.flatMap((id) => ["--example", id]);
+  const build = await runCargo(["build", ...exampleFlags, "--keep-going"], cwd);
 
   const execById = new Map<string, string>();
   const errsById = new Map<string, RustDiagnostic[]>();
