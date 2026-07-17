@@ -6765,7 +6765,32 @@ function optionExprType(
       ?.find((f) => f.name === field)?.ty;
     return fty?.kind === "option" ? fty : null;
   }
+  // A string `.at(i)` call → `Option<String>` (series 098), so a direct
+  // `console.log(s.at(i))` renders via `fmt_opt` (`None` → `undefined`).
+  if (e.type === "CallExpression" && isStringAtCall(e, analysis)) {
+    return { kind: "option", inner: { kind: "String" } };
+  }
   return null;
+}
+
+/**
+ * Is `init` a string `.at(i)` call (series 098)? Typed by construction as
+ * `Option<String>` — drives both the untyped-binding exemption and the binding-type
+ * registration in `lowerVarDecl`, and the `optionExprType` recognizer.
+ */
+function isStringAtCall(
+  init: Expression | null,
+  analysis: ModuleAnalysis,
+): boolean {
+  if (!init || init.type !== "CallExpression") return false;
+  const callee = (init as CallExpression).callee;
+  if (callee.type !== "MemberExpression" || (callee as MemberExpression).computed)
+    return false;
+  const cm = callee as MemberExpression;
+  if (cm.property.type !== "Identifier" || (cm.property as Identifier).name !== "at")
+    return false;
+  if ((init as CallExpression).arguments.length !== 1) return false;
+  return receiverTypeOf(cm.object as Expression, analysis)?.kind === "String";
 }
 
 /**
@@ -6979,8 +7004,15 @@ function receiverTypeOf(
   }
   // Tier 1 — bare identifier → bindingTypes (the fast, pre-082 path).
   if (expr.type === "Identifier") {
-    const t = analysis.bindingTypes.get((expr as Identifier).name);
-    if (t) return t;
+    const name = (expr as Identifier).name;
+    const t = analysis.bindingTypes.get(name);
+    if (t) {
+      // A binding narrowed inside an `if let Some(x)` block is its inner `T` here
+      // (series 098) — so a method call on the narrowed value routes by the
+      // unwrapped type (`last.toUpperCase()` sees `String`, not `Option<String>`).
+      if (t.kind === "option" && analysis.narrowedOptions.has(name)) return t.inner;
+      return t;
+    }
   }
   // Tier 2 — `this.field` / `local.field` → structFields (no oracle needed).
   if (expr.type === "MemberExpression") {
@@ -7064,7 +7096,36 @@ const STRING_RETURNING_STRING_METHODS = new Set([
   "slice",
   "substring",
   "charAt",
+  // series 098
+  "substr",
+  "concat",
+  "padStart",
+  "padEnd",
 ]);
+
+/**
+ * Deferred `String.prototype` surface (series 098) — for a `String` receiver
+ * these throw a clean transpiler fail-loud (with the reason) instead of falling
+ * through to a native `s.method(...)` emit rustc then rejects. The UTF-16 fork
+ * (`charCodeAt`/`codePointAt`) is deferred per the campaign's "non-index-first"
+ * direction; RegExp and locale ops are Tier-3 / unmodeled.
+ */
+const STRING_METHOD_DEFERRED: Record<string, string | undefined> = {
+  charCodeAt:
+    "`.charCodeAt` uses UTF-16 code units (deferred) — use `.charAt(i)` / `.at(i)` for a character",
+  codePointAt:
+    "`.codePointAt` uses UTF-16 code points (deferred) — use `.charAt(i)` / `.at(i)` for a character",
+  match: "`.match` needs RegExp (deferred, Tier 3)",
+  matchAll: "`.matchAll` needs RegExp (deferred, Tier 3)",
+  search: "`.search` needs RegExp (deferred, Tier 3)",
+  localeCompare:
+    "`.localeCompare` — locale-aware string ordering is not modeled",
+  normalize: "`.normalize` — Unicode normalization is not modeled",
+  toLocaleUpperCase:
+    "`.toLocaleUpperCase` — locale-aware casing is not modeled (use `.toUpperCase`)",
+  toLocaleLowerCase:
+    "`.toLocaleLowerCase` — locale-aware casing is not modeled (use `.toLowerCase`)",
+};
 
 /** Number methods (series 083) whose Rust target returns a `String`. */
 const NUMBER_RETURNING_STRING_METHODS = new Set([
@@ -7644,7 +7705,10 @@ function lowerVarDecl(
       !isGeneratorCall(d.init, analysis) &&
       // `Array.from(src, fn)` (075) → a `Vec` typed by the lifted callback's return;
       // Rust infers it (like `<array>.map(fn)`), so no annotation is required.
-      !isArrayFromMapCall(d.init)
+      !isArrayFromMapCall(d.init) &&
+      // A string `.at(i)` (098) → `Option<String>`, typed by construction; Rust
+      // infers it, so no annotation is required (like an `<array>.find(…)`).
+      !isStringAtCall(d.init, analysis)
     ) {
       throw new UnsupportedError({
         type: `binding '${d.id.name}' without a type annotation`,
@@ -7659,6 +7723,15 @@ function lowerVarDecl(
     // Track an `Object.entries(...)` binding so `es[i][0]`/`es[i][1]` can lower to
     // tuple field access (series 043).
     if (isObjectEntriesCall(d.init)) analysis.entriesBindings.add(d.id.name);
+    // A `const c = s.at(i)` binding is `Option<String>` (series 098) — record it so
+    // a later bare `console.log(c)` renders via `fmt_opt` and `c !== undefined`
+    // narrows via `if let Some` (the 066 machinery keys on the binding type).
+    if (d.id.type === "Identifier" && isStringAtCall(d.init, analysis)) {
+      analysis.bindingTypes.set((d.id as Identifier).name, {
+        kind: "option",
+        inner: { kind: "String" },
+      });
+    }
     // Track a `JoinHandle` binding (series 051c increment 1): a binding whose
     // lowered init is a `{kind:"spawn"}` node (an un-awaited async call) is a
     // `JoinHandle<T>`. A later `await h` on it lowers to `joinHandleAwait`
@@ -9883,6 +9956,20 @@ function lowerCall(
     ) {
       return lowerObjectStatic(methodName, call, analysis);
     }
+    // `String.fromCharCode(…)` / `String.fromCodePoint(…)` are UTF-16 statics on
+    // the global `String` (series 098) — deferred (the "non-index-first" fork), so
+    // fail loud clearly instead of emitting a broken native call. Gated on `String`
+    // being the global (not a user binding).
+    if (
+      m.object.type === "Identifier" &&
+      (m.object as Identifier).name === "String" &&
+      !analysis.bindingTypes.has("String") &&
+      (methodName === "fromCharCode" || methodName === "fromCodePoint")
+    ) {
+      throw new UnsupportedError({
+        type: `\`String.${methodName}\` uses UTF-16 code units (deferred)`,
+      });
+    }
     // `Array.from(iter)` (series 065) → `iter.collect::<Vec<_>>()` — the eager
     // consumer of a generator's `impl Iterator`. The mapping overload
     // `Array.from(src, fn)` (series 075) reuses 057's callback-lift: it lowers to
@@ -11547,6 +11634,124 @@ function stringMethod(
       args: [primRecvRef(m, analysis), ownedArg(args[0], analysis)],
     };
   }
+  // `.at(i)` → `tslib::string::str_at` → `Option<String>` (series 098): negative
+  // from the end, out-of-range → `None` → JS `undefined` (the 066 model; distinct
+  // from `charAt`'s `""`). Fixes the prior mis-route to `tslib::array::at`.
+  if (methodName === "at" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::str_at",
+      args: [primRecvRef(m, analysis), ownedArg(args[0], analysis)],
+    };
+  }
+  // `.indexOf(needle[, from])` → `tslib::string::index_of` → `f64` (`-1` sentinel,
+  // char-indexed). Omitted `from` defaults to 0 (series 098).
+  if (
+    methodName === "indexOf" &&
+    (args.length === 1 || args.length === 2) &&
+    args[0]
+  ) {
+    const from: HirArg =
+      args.length === 2 && args[1]
+        ? ownedArg(args[1], analysis)
+        : { borrow: "owned", expr: { kind: "number", value: 0 } };
+    return {
+      kind: "call",
+      callee: "tslib::string::index_of",
+      args: [
+        primRecvRef(m, analysis),
+        { borrow: "owned", expr: strPatternArg(args[0], analysis) },
+        from,
+      ],
+    };
+  }
+  // `.lastIndexOf(needle)` → `tslib::string::last_index_of` → `f64` (series 098).
+  // The 2-arg `fromIndex` form stays a residual (falls through).
+  if (methodName === "lastIndexOf" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::last_index_of",
+      args: [
+        primRecvRef(m, analysis),
+        { borrow: "owned", expr: strPatternArg(args[0], analysis) },
+      ],
+    };
+  }
+  // `.padStart(n)` / `.padEnd(n)` — the 1-arg default-space form (series 098);
+  // the 2-arg form falls through to `tryTslibMethod` (already shipped in 083).
+  if (
+    (methodName === "padStart" || methodName === "padEnd") &&
+    args.length === 1 &&
+    args[0]
+  ) {
+    const fn = methodName === "padStart" ? "pad_start" : "pad_end";
+    return {
+      kind: "call",
+      callee: `tslib::string::${fn}`,
+      args: [
+        primRecvRef(m, analysis),
+        ownedArg(args[0], analysis),
+        { borrow: "ref", expr: { kind: "string", value: " " } },
+      ],
+    };
+  }
+  // `a.concat(b, c, …)` ≡ `a + b + c` → the 080 `strConcat` node (`format!`);
+  // series 098. A spread arg isn't modeled (falls through).
+  if (
+    methodName === "concat" &&
+    args.length >= 1 &&
+    args.every((a) => a.type !== "SpreadElement")
+  ) {
+    return {
+      kind: "strConcat",
+      parts: [recv(), ...args.map((a) => lowerExpr(a as Expression, analysis))],
+    };
+  }
+  // `.split(sep, limit)` — truncate to at most `limit` pieces (series 098). An
+  // empty-string separator keeps the `split_chars` char-unit quirk.
+  if (methodName === "split" && args.length === 2 && args[0] && args[1]) {
+    const sep = args[0];
+    if (sep.type === "Literal" && (sep as Literal).value === "") {
+      return {
+        kind: "call",
+        callee: "tslib::string::split_chars_limit",
+        args: [primRecvRef(m, analysis), ownedArg(args[1], analysis)],
+      };
+    }
+    return {
+      kind: "call",
+      callee: "tslib::string::split_limit",
+      args: [
+        primRecvRef(m, analysis),
+        { borrow: "owned", expr: strPatternArg(sep, analysis) },
+        ownedArg(args[1], analysis),
+      ],
+    };
+  }
+  // `.substr(start[, length])` — deprecated but common (series 098); char-indexed,
+  // negative `start` from the end.
+  if (methodName === "substr" && args.length === 1 && args[0]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::substr_from",
+      args: [primRecvRef(m, analysis), ownedArg(args[0], analysis)],
+    };
+  }
+  if (methodName === "substr" && args.length === 2 && args[0] && args[1]) {
+    return {
+      kind: "call",
+      callee: "tslib::string::substr",
+      args: [
+        primRecvRef(m, analysis),
+        ownedArg(args[0], analysis),
+        ownedArg(args[1], analysis),
+      ],
+    };
+  }
+  // Deferred surface (series 098): a `String` receiver calling a known-unsupported
+  // method fails loud with the reason, not a downstream cargo error.
+  const deferred = STRING_METHOD_DEFERRED[methodName];
+  if (deferred) throw new UnsupportedError({ type: deferred });
   return null;
 }
 
@@ -12681,9 +12886,20 @@ function lowerMember(
         type: `\`.${prop}\` on a JsonValue must be called (\`get\`/\`at\`/\`asNumber\`/… are methods); only \`.length\` is a property`,
       });
     }
-    // `.length` is a property in TS but a method in Rust.
-    if (prop === "length")
-      return { kind: "len", object: lowerExpr(member.object, analysis) };
+    // `.length` is a property in TS but a method in Rust. A **string** receiver
+    // (series 098) counts Rust `char`s (`.chars().count()`) — JS `.length` counts
+    // UTF-16 code units, and the dialect's char-indexed `slice`/`charAt` model
+    // makes char-count the consistent choice (byte `.len()` diverges for any
+    // non-ASCII). Any other receiver (array/…) keeps `.len()`.
+    if (prop === "length") {
+      const recv = receiverTypeOf(member.object, analysis);
+      const chars = recv?.kind === "String" || recv?.kind === "str";
+      return {
+        kind: "len",
+        object: lowerExpr(member.object, analysis),
+        ...(chars ? { chars: true } : {}),
+      };
+    }
     // `Map`/`Set` `.size` → `.len()` (series 061), routed by receiver type so a
     // user struct field named `size` stays an ordinary field read.
     if (prop === "size") {

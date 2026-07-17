@@ -1789,7 +1789,7 @@ function emitExpr(expr: HirExpr): string {
     case "jsOp":
       return `${emitExpr(expr.receiver)}.${expr.method}(&${emitExpr(expr.arg)})`;
     case "len":
-      return `${emitExpr(expr.object)}.len()`;
+      return `${emitExpr(expr.object)}.${expr.chars ? "chars().count()" : "len()"}`;
     case "field":
       return `${emitExpr(expr.object)}.${rid(expr.name)}`;
     case "index":

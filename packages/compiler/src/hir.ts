@@ -277,8 +277,13 @@ export type HirExpr =
   | { kind: "index"; object: HirExpr; index: HirExpr }
   /** `obj.field` (non-method member access). */
   | { kind: "field"; object: HirExpr; name: string }
-  /** `arr.length` → `arr.len()`. */
-  | { kind: "len"; object: HirExpr }
+  /**
+   * `arr.length` → `arr.len()`; a **string** receiver (series 098) sets
+   * `chars: true` → `s.chars().count()` (JS counts UTF-16 code units; the dialect
+   * counts Rust `char`s, consistent with the char-indexed `slice`/`charAt` model,
+   * and diverges from a byte `.len()`).
+   */
+  | { kind: "len"; object: HirExpr; chars?: boolean }
   /** array literal → `vec![...]`. */
   | { kind: "array"; elements: HirExpr[] }
   /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */
