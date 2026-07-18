@@ -41,7 +41,8 @@
  * The out-of-reach boundary (indirect/dynamic dispatch, or an alias the analysis
  * cannot resolve to a promotable component) stays cargo-loud — cargo is the
  * ultimate backstop, never a silent divergence. The mutate-during-iteration guard
- * stays the 062 `DialectError` (issue #41 owns its robust lowering).
+ * is the 062 fail-loud residual (`UnsupportedError`; issue #41 owns its robust
+ * lowering).
  *
  * The promoted-set representation (`AutoRcResult`) is the shared foundation the
  * downstream ownership items (#35 owned-self, #45 field-collection, #41
@@ -50,7 +51,7 @@
 
 import { SCRIPT_SCOPE } from "./analysis";
 import { buildStructTable, isTypeCloneable } from "./derives";
-import { DialectError } from "./errors";
+import { UnsupportedError } from "./errors";
 import type {
   HirClass,
   HirExpr,
@@ -98,8 +99,8 @@ export interface AutoRcResult {
    * the receiver. A candidate whose receiver **is** reused after the call is
    * excluded (demoted): that receiver promotes to `Rc<RefCell<T>>` (via `promoted`,
    * the same union-find), so the method must fall back to `&self` + clone — and if
-   * the moved-out field is non-`Clone`, `computeAutoRc` already threw a
-   * `DialectError` (the documented reconciliation boundary). The downstream
+   * the moved-out field is non-`Clone`, `computeAutoRc` already threw an
+   * `UnsupportedError` (the documented reconciliation boundary). The downstream
    * owned-`self` pass reads this set to set `recv: "owned"`.
    */
   consumingMethods: Set<string>;
@@ -551,7 +552,7 @@ export function computeAutoRc(
    * consuming-candidate method, consult CFG liveness on `obj`'s root binding: if it
    * is **live after** the call's statement, the receiver is reused — force-promote
    * it to `Rc<RefCell<T>>` and demote the method (it falls back to `&self` + clone;
-   * a non-`Clone` moved-out field under reuse is the documented `DialectError`
+   * a non-`Clone` moved-out field under reuse is the documented `UnsupportedError`
    * boundary). A dead-after receiver is a clean move (the fast path, no promotion).
    * Liveness reuses `ownership.ts`'s engine over the class bindings we track.
    */
@@ -582,7 +583,7 @@ export function computeAutoRc(
    *   - a **live-after** local binding (the receiver is reused), which additionally
    *     force-promotes that binding to `Rc<RefCell<T>>`.
    * A non-`Clone` moved-out field under either demotion is the documented
-   * `DialectError` (a shared/borrowed receiver can't clone the field out).
+   * `UnsupportedError` (a shared/borrowed receiver can't clone the field out).
    */
   const findConsuming = (
     e: HirExpr,
@@ -604,11 +605,12 @@ export function computeAutoRc(
         if (liveAfter) forcePromote.add(localKey(scope, recv.name));
         const info = candidateField.get(e.name);
         if (info && !isTypeCloneable(info.field, structs)) {
-          throw new DialectError(
-            `consuming method '${e.name}' on a ${liveAfter ? "reused" : "borrowed/field"} ` +
+          throw new UnsupportedError({
+            type:
+              `consuming method '${e.name}' on a ${liveAfter ? "reused" : "borrowed/field"} ` +
               `receiver whose moved-out field is not \`Clone\` (cannot move out of a ` +
-              `shared/borrowed receiver)`,
-          );
+              `shared/borrowed receiver — series 086 fail-loud residual)`,
+          });
         }
       }
     }

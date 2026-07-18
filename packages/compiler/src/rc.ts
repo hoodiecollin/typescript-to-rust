@@ -29,7 +29,7 @@
 import { SCRIPT_SCOPE } from "./analysis";
 import type { AutoRcResult } from "./alias-escape";
 import { buildStructTable, isTypeCloneable } from "./derives";
-import { DialectError, UnsupportedError } from "./errors";
+import { UnsupportedError } from "./errors";
 import type { HirExpr, HirFn, HirModule, HirStmt, RustType } from "./hir";
 
 export interface RcOpts {
@@ -419,12 +419,13 @@ function rcBody(
           rc.has(e.receiver.name) &&
           e.args.some((a) => readsRcIdent(a, e.receiver.kind === "ident" ? e.receiver.name : "", rc))
         ) {
-          throw new DialectError(
-            `re-entrant mutation of a shared \`Rc<RefCell>\` container '${e.receiver.name}' — ` +
+          throw new UnsupportedError({
+            type:
+              `re-entrant mutation of a shared \`Rc<RefCell>\` container '${e.receiver.name}' — ` +
               `a mutating call whose argument reads the same cell (\`.borrow_mut()\` held ` +
               `across a \`.borrow()\`) would panic at runtime; split the read out into a ` +
               `local before the write (series 086 / 062 re-entrant fail-loud residual)`,
-          );
+          });
         }
         const recv = rewrite(e.receiver, ownerFieldMut);
         const args = e.args.map((a) => rewrite(a));
@@ -665,11 +666,12 @@ function rcBody(
 
     const elemNonClone = (elem: RustType): void => {
       if (!isTypeCloneable(elem, structs)) {
-        throw new DialectError(
-          "mutate-during-iteration over an aliased container whose element is not " +
+        throw new UnsupportedError({
+          type:
+            "mutate-during-iteration over an aliased container whose element is not " +
             "`Clone` — cannot clone the element out per step to release the borrow " +
             "(series 077 fail-loud residual)",
-        );
+        });
       }
     };
 
@@ -805,11 +807,12 @@ function rcBody(
       // (add vs delete) → fail-loud; a visible insert is instrumented, a visible
       // delete rides the live recheck.
       if (mut === "opaque") {
-        throw new DialectError(
-          "mutate-during-iteration over an aliased Map/Set through an opaque cell " +
+        throw new UnsupportedError({
+          type:
+            "mutate-during-iteration over an aliased Map/Set through an opaque cell " +
             "mutation (a call the emitter can't see through) — a mid-iteration add " +
             "can't be enqueued for a faithful visitation (series 077 fail-loud residual)",
-        );
+        });
       }
       const keyTy = cty.kind === "hashmap" ? cty.key : cty.elem;
       elemNonClone(keyTy);
