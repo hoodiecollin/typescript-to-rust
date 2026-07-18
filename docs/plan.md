@@ -1,5 +1,15 @@
 # TypeScript → Rust Translator — Plan
 
+> **Status of this document (2026-07-18):** historical status/architecture record,
+> not the live backlog. The **architecture, memory-model decision, and pipeline
+> intent below remain authoritative.** The **feature-status prose is a snapshot**
+> that lags the code: much of what the "Type mapping" table and Status section below
+> call "deferred" (async methods & arrows, class inheritance/generics, `try`/`catch`,
+> Map/Set methods, unions, the `Option` model for `?? `/`undefined`, modules, the
+> `@ttr/std` shim, sync generators, RegExp/Date) has since **shipped** through series
+> 102 — see `docs/work/_archive/` and the git log. The live backlog is **GitHub
+> Issues** + the [TTR Roadmap project](https://github.com/users/hoodiecollin/projects/4).
+
 ## Goal (scoped honestly)
 
 Translate a **strict, explicitly-enforced subset of TypeScript** into **idiomatic
@@ -84,6 +94,12 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 [architecture.md](./architecture.md) for the harness design.
 
 ## Type mapping (current + intended)
+
+> Snapshot ~series 037. Several "deferred" notes below have **shipped** since
+> (class inheritance/generics 053/081, async methods/arrows 054, `try`/`catch`
+> 021, Map/Set methods 041/061/072, the `Option` model for `undefined`/`??` 066,
+> unions 093). Treat the *type-mapping shapes* as authoritative and the *deferral
+> annotations* as historical; the code + `_archive/` are ground truth.
 
 | TypeScript            | Rust (today)                  | Notes |
 |-----------------------|-------------------------------|-------|
@@ -325,141 +341,12 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   method resolution (name-based can over-`?`; cargo backstops); `try`/`catch`
   inside a method; fallible getters/setters/static/`async` methods.
 
-**Next** (order reflects decisions made 2026-07-01)
-- [ ] Two gaps surfaced by **series 030** (fixture-coverage expansion) remain
-      open. The three *fail-loud holes* it surfaced — (A) integer-arg retyping
-      across call boundaries, (C) Rust-keyword identifier hygiene, (E) HashMap
-      index-assignment → `.insert` — are **closed in series 031**
-      (docs/work/_archive/031-fail-loud-lowering-holes): each now compiles+behaves
-      for the common case and fails loud (`UnsupportedError`) on the residual
-      instead of emitting broken Rust. Still open:
-      - **(B)** nested/inferred struct literals — **CLOSED in series 032**
-        (docs/work/_archive/032-nested-struct-literals): `analysis.structFields`
-        + a `lowerTyped(expr, ty)` pass recurse an object/array literal into a
-        struct-typed field / `Vec` element by its declared type. Function-argument
-        struct literals (no binding annotation) remain the residual.
-      - **(D)** `ParenthesizedExpression` + precedence — **CLOSED (026 first
-        slice)**: the validator now models `ParenthesizedExpression`, lowering
-        unwraps it (grouping is structural), and the emitter parenthesizes a
-        `binary` operand from a `BINARY_PREC` table (left-assoc: right same-prec
-        operand wraps). The full rust-ast.ts/printer.ts rewrite stays deferred
-        (026 doc trigger: 027 method-chain nesting). Specs in precedence.test.ts.
-- [ ] Finish generalizing ownership (**GitHub epic #1** — the backlog now lives in
-      issues, see CLAUDE.md). **CFG + liveness LANDED (series 037a):**
-      `refineMoves` → `refineOwnership` (`ownership.ts`) now runs real **backward
-      liveness over a control-flow graph** instead of the straight-line last-use
-      heuristic — a `.clone()` is placed at a move site iff the moved binding is
-      *live* after it, so **loop back-edges** (a move live across iterations) and
-      **branch joins** (dead-after-a-mutually-exclusive-branch → no needless clone)
-      are both correct. Still a *may*-analysis that only ever adds clones →
-      fail-loud preserved (unprovable shapes stay bare → cargo-loud). Supersedes
-      the 034 `refineMoves` heuristic; all 034 cases preserved
-      (`tests/ownership-cfg.test.ts`). **Struct derives LANDED (series 037b):** a
-      shared `structDeriveClause` (`src/derives.ts`) gives every interface/class
-      struct `#[derive(Clone, Debug)]` on-demand (gated by field eligibility;
-      `Clone` for the ownership pass, `Debug` for `console.log` per issue #22), and
-      `refineOwnership` folds `struct` into the movable set via the same
-      cloneability test — so struct moves clone in lockstep with the derive. The
-      refine chain reorders so `refineOwnership` runs **last** (after
-      `refineRc`/`refineArena`), letting the directives impose their ownership model
-      first. Specs: `tests/struct-derives.test.ts`. **First increment was series
-      034** (use-after-move → `.clone()`, straight-line; see
-      docs/work/_archive/034-ownership-clone-moves). **Move coverage COMPLETE
-      (series 038):** move-through-store (a name moved into a struct/array/hashmap
-      literal, a by-value method arg, or an assignment value) and move-out-of-place
-      (a non-Copy `field`/`index` projection read by value that moves out of an
-      index, a borrowed param, or a reused owned base — partial moves +
-      move-out-of-borrow, `E0382`/`E0507`), driven by a per-body type environment +
-      `refParams`. So the epic-#1 sub-parts — conditional/loop/shadowed moves
-      (037a), struct `Clone` (037b), and stores/projections (038) — are all done;
-      the frontier that stays fail-loud is owned-`self` receiver moves and
-      dynamic-shape moves (out of dialect). The `PartialEq`/`===` struct-equality
-      decision is issue #28. Read-only-string `&str` params are done (`strings.ts`).
-- [ ] Extend the dialect validator further (default-deny landed in series 024 —
-      rejects `any`/`unknown`, `for await`, `await using`, decorators, `abstract`,
-      `declare`, and any unmodeled node type; **sync finite-yield generators now
-      supported** — series 035 — while async/method generators stay rejected):
-      still open are missing-annotation enforcement (with the trivial-literal
-      exception), class `extends` inheritance, dynamic object manipulation,
-      escaping mutable aliasing.
-- [x] Logical operators `&&`/`||` → Rust short-circuit ops (series 036); `??`
-      stays fail-loud (needs `Option`). Rode the 026 `BINARY_PREC` table — no new
-      HIR. See docs/work/_archive/036-logical-operators.
-- [ ] Formal plans drafted (docs/work/025–029, design-only, spec-first when
-      picked up). **Recommended sequence** (decided 2026-07-06):
-      1. **025** esoteric *support* — **025a/b/c LANDED** (parameter properties →
-         field+assign; `enum` → C-like Rust enum with `Copy`/`PartialEq` +
-         `E.Variant`→`E::Variant` path + by-value enum params; `using` +
-         `[Symbol.dispose]` → `impl Drop`, reverse-order RAII). **Sync
-         generators→`impl Iterator` LANDED as series 035** — straight-line
-         finite-yield `function*` → `fn -> impl Iterator` via `vec![…].into_iter()`
-         (no state machine; `for-of` consumes it directly). Deferred: yield in a
-         loop/branch (state machine / adapter chain), `yield*`, non-`for-of`
-         consumption. Async-iteration and `await using` deferred; **decorators
-         permanently rejected**. See docs/work/_archive/025-esoteric-feature-support
-         and docs/work/_archive/035-sync-generators.
-      2. **closures** — **FIRST SLICE LANDED** (series 033): a single-param arrow
-         to `map`/`filter`/`forEach` over `Array<number>` → iterator chains
-         (`iterMap`/`iterFilter` HIR exprs; `forEach`→`forIn`). Deferred:
-         index/array params, non-Copy elements, `reduce`/`find`/…, closures in
-         non-method value positions (`Fn`/`FnMut` + capture analysis). See
-         docs/work/_archive/033-value-position-closures.
-      3. **027 + 029** — **027 FIRST SLICE LANDED**: `crates/tslib` fidelity
-         crate + hybrid routing (`Array.at` negative index, `String.padStart`/
-         `padEnd` → `tslib`; user methods guarded by `analysis.methodNames`).
-         Unary `-`/`!` added as the `at(-1)` prerequisite (also enables negative
-         literals). 029 catalog folded in the `Tf`/`Tm` route column. Next slices:
-         `reduce`/`find`/`sort`/`slice`, Object/JSON. See
-         docs/work/027-tslib-runtime-crate.
-      4. **`"use panic"`** (028a) — **LANDED**. A leading `"use panic"` directive
-         makes a free fn / script infallible: `throw` → `panic!("{}", msg)`, the
-         signature stays non-`Result`, callers don't `?`. `takeDirectives`
-         validates directives (unknown `"use …"` → `DialectError`; `"use rc"`/
-         `"use arena"` → `UnsupportedError` "not yet"). See
-         docs/work/028-compiler-directives.
-      5. **026** Rust-AST + pretty-printer — *downstream of 027* by dependency
-         order (it cleans up 027's nested/chained output); build signal is an
-         oracle-caught precedence defect on a fixture we write, not a schedule.
-      6. **`"use rc"`** (028b) — **FIRST SLICE LANDED**. A `"use rc"` scope
-         (free fn / script) wraps class-typed bindings in `Rc<RefCell<T>>`:
-         construct → `Rc::new(RefCell::new(C::new(…)))`, alias `const b = a` →
-         `Rc::clone(&a)`, read `a.f` → `a.borrow().f`, write → `a.borrow_mut().f`.
-         A post-lowering `refineRc` pass (`src/rc.ts`), unblocked by the 034
-         ownership increment. Deferred (cargo-loud): `rc` method calls, `rc`
-         fields/params, cross-call `rc` values. See
-         docs/work/028-compiler-directives + rc-directive.test.ts.
-      7. **`"use arena"`** (028c) — **FIRST SLICE LANDED**. A `"use arena"` scope
-         builds `Vec` literals from a bump arena: `let arena = bumpalo::Bump::new();`
-         + `bumpalo::vec![in &arena; …]` (type annotation dropped → lifetime
-         inferred, so no `'a` is written). A post-lowering `refineArena` pass
-         (`src/arena.ts`); `bumpalo` pinned in `rust-oracle/Cargo.toml`. **Soundness
-         by the oracle:** an escaping arena value is a cargo lifetime error —
-         cargo *is* the escape analysis, no bespoke pass needed. Deferred: arena
-         `String`/trees, arena values in signatures/fields, nested arenas. See
-         docs/work/028-compiler-directives/arena-spike.md + arena-directive.test.ts.
-- [ ] Control-flow refinements (deferred, revisit as needed): or-pattern
-      (`1 | 2 =>`) and string/range literal `match` arms; native `continue`-in-range,
-      downward/non-unit-step and bound-driven `i64` ranges; for…of element
-      ergonomics (owned/`&mut`, destructuring); labeled/stacked jumps. All are
-      optimizations or edge cases over today's correct lowerings — not blockers.
-      (The C-`for` `continue` desugar shipped in series 018; integer literal-pattern
-      `match` in series 019; index-driven `for i in a..b` ranges in series 020.)
-- [ ] Value-yielding `try`/`catch` — a `try`/`catch` that computes a function's
-      return value (the closure's `Ok` payload carries the returned value; both
-      arms yield it), plus `try`/`finally` without a handler and `instanceof`-based
-      catch discrimination (downcast). Series 021 shipped statement-level recovery.
-- [ ] Finish all deferred work — sweep the fail-loud deferrals accumulated across
-      the shipped slices (arrows: `let`/value-position/`async`/capturing arrows;
-      async: un-awaited calls, `await` of a sync call, `async` methods, `Promise`
-      combinators; errors: value-yielding `try`/`catch`, catch discrimination,
-      error enums; classes/interfaces/records/control-flow deferrals) rather
-      than starting new fixture areas. The error trio landed 2026-07-06 —
-      `try`/`catch`/`finally` (021), custom error types → `Box<dyn Error>` (022),
-      throw-in-method/ctor (023). `09_modules` (`import`/`export`) **shipped
-      2026-07-17** as series 050 (a–d): multi-file crate emission, `pub(crate)`
-      visibility inference, pure-barrel `pub use` facades, default import/export
-      via `__default_export`, namespace imports (module alias), `namespace`→inline
-      `mod`, and prelude generation. See `docs/work/_archive/050-module-system/`.
+**Next** — the live backlog is **GitHub Issues** (`hoodiecollin/typescript-to-rust`)
+and the [TTR Roadmap project](https://github.com/users/hoodiecollin/projects/4), **not**
+this section (per [CLAUDE.md](../CLAUDE.md)). This document is a historical
+status/architecture record. Its former inline "Next" list — the decisions from
+2026-07-01 through the series-050 module system — has since shipped and been archived
+under `docs/work/_archive/`; the roadmap now lives in the issue tracker.
 
 The `tests/fixtures/**` tree enumerates these as `test.todo` targets; each flips
 to a real compile/behave test as the feature lands.
