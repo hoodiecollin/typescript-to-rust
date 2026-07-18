@@ -242,6 +242,14 @@ export type HirExpr =
    * (series 056, `~` in TS → `!` in Rust; `bitwise` set). */
   | { kind: "unary"; op: string; operand: HirExpr; bitwise?: boolean }
   /**
+   * A Rust deref `(*expr)` (series 050, #70). A cross-module `import def from "./m"`
+   * of a **value** default binds a `LazyLock<T>` (Rc-wrapped for a non-scalar `T`);
+   * a use of `def` derefs the lazy cell to the underlying value. Auto-deref then
+   * carries method/field access through, and the ownership pass clones on an owned
+   * use (a cheap `Rc::clone` for a non-scalar). Emitted parenthesized: `(*def)`.
+   */
+  | { kind: "deref"; expr: HirExpr }
+  /**
    * `((value as u128) >> shift) as i128` — JS's logical (zero-fill) right shift
    * `>>>` (series 056). Its own node because, unlike the other bitwise operators,
    * it needs the `u128` round-trip cast a bare `binary` node cannot carry.
@@ -1552,6 +1560,28 @@ export interface HirGenerator {
  */
 export type Vis = "pub" | "pub(crate)" | "priv";
 
+/**
+ * A module-level lazy value item (series 050, #70) — a `export default <value>`
+ * whose default has no fn/class analog (`export default 42 / [1,2,3] / {…} / fn()`).
+ * Emitted as `pub(crate) static <name>: LazyLock<<ty>> = LazyLock::new(|| <init>);`,
+ * evaluated once on first access (TS module-eval-once). A non-scalar payload is
+ * `Rc`-wrapped (`LazyLock<Rc<T>>`, init `Rc::new(<value>)`) so a cross-module
+ * consumer's owned use is a cheap `Rc::clone`, not a deep copy.
+ */
+export interface HirLazyStatic {
+  kind: "lazyStatic";
+  /** The item name (the reserved `__default_export`, aliased from a hashed name). */
+  name: string;
+  /** Rust visibility (series 050); a crate default export is widened to `pub(crate)`. */
+  vis?: Vis;
+  /** The payload type `T` (the value's inferred type; NOT the `Rc`/`LazyLock` wrapper). */
+  ty: RustType;
+  /** True when `T` is non-scalar → stored as `Rc<T>` for cheap clone-on-use. */
+  rc: boolean;
+  /** The initializer expression, evaluated once inside the `LazyLock::new(|| …)`. */
+  init: HirExpr;
+}
+
 /** A top-level Rust item: a function, a struct, a class, an enum, or the error enum. */
 export type HirItem =
   | HirFn
@@ -1562,7 +1592,8 @@ export type HirItem =
   | HirEnum
   | HirUnionEnum
   | HirTrait
-  | HirGenerator;
+  | HirGenerator
+  | HirLazyStatic;
 
 /**
  * A non-entry crate module (series 050) — one TS file → one Rust source file at

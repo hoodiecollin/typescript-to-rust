@@ -33,6 +33,7 @@ import type {
   HirFn,
   HirGenerator,
   HirItem,
+  HirLazyStatic,
   HirMatchArm,
   HirModule,
   HirStmt,
@@ -192,6 +193,15 @@ function stdImports(items: HirItem[], main: HirStmt[]): string[] {
   // (tslib); import it so the `impl Steppable` / `step()` arms name it unqualified.
   if (items.some((i) => i.kind === "generator"))
     imports.push("use tslib::gen::GenStep;");
+  // A module-level value default (#70) → a `LazyLock` static; a non-scalar payload
+  // is `Rc`-wrapped. Import each unqualified (deduped against the `rc` branch above).
+  if (items.some((i) => i.kind === "lazyStatic"))
+    imports.push("use std::sync::LazyLock;");
+  if (
+    items.some((i) => i.kind === "lazyStatic" && i.rc) &&
+    !imports.includes("use std::rc::Rc;")
+  )
+    imports.push("use std::rc::Rc;");
   return imports;
 }
 
@@ -423,7 +433,24 @@ function emitItem(
       return emitTrait(item);
     case "generator":
       return emitGenerator(item);
+    case "lazyStatic":
+      return emitLazyStatic(item);
   }
+}
+
+/**
+ * A module-level value default (#70) → `pub(crate) static <name>: LazyLock<T> =
+ * LazyLock::new(|| <init>);`. A non-scalar payload is `Rc`-wrapped so a
+ * cross-module consumer's owned use is a cheap `Rc::clone`.
+ */
+function emitLazyStatic(item: HirLazyStatic): string {
+  const vis =
+    item.vis === "pub(crate)" ? "pub(crate) " : item.vis === "pub" ? "pub " : "";
+  const tyText = item.rc ? `Rc<${emitType(item.ty)}>` : emitType(item.ty);
+  const initText = item.rc
+    ? `Rc::new(${emitExpr(item.init)})`
+    : emitExpr(item.init);
+  return `${vis}static ${rid(item.name)}: LazyLock<${tyText}> = LazyLock::new(|| ${initText});`;
 }
 
 /**
@@ -1848,6 +1875,10 @@ function emitExpr(expr: HirExpr): string {
         expr.operand.kind === "binary" || expr.operand.kind === "unary";
       return `${expr.op}${wrap ? `(${inner})` : inner}`;
     }
+    case "deref":
+      // `(*expr)` (#70) — deref a `LazyLock` value default to its payload; always
+      // parenthesized so a following `.method()` / operator binds correctly.
+      return `(*${emitExpr(expr.expr)})`;
     case "assign":
       return `${emitExpr(expr.target)} ${expr.op} ${emitExpr(expr.value)}`;
     case "update": {
