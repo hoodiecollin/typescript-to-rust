@@ -87,13 +87,19 @@ describe("024: forbidden flags → DialectError", () => {
 
 describe("024: default-deny on unmodeled node type → UnsupportedError", () => {
   // EF10/EF12: `enum` and parameter properties graduated to supported in series
-  // 025; see esoteric.test.ts for their behavioral specs.
+  // 025; EF11 (`namespace`) graduated in series 050d (Axis 4) — see
+  // module-namespace.test.ts for its behavioral specs.
   test("EF10 enum is now accepted (025 → Rust enum)", () => {
     expect(() => compile(`enum E { A, B }`)).not.toThrow();
   });
 
-  test("EF11 namespace is not implemented", () => {
-    expect(() => compile(`namespace N {}`)).toThrow(UnsupportedError);
+  test("EF11 namespace is now accepted (050d → inline Rust mod)", () => {
+    // `namespace N { … }` → an inline `mod N { … }` (Axis 4). An empty namespace
+    // is a well-formed empty `mod`.
+    expect(() => compile(`namespace N {}`)).not.toThrow();
+    expect(compile(`namespace N { export function f(): number { return 1; } }`)).toContain(
+      "mod N {",
+    );
   });
 
   test("EF12 parameter property is now accepted (025)", () => {
