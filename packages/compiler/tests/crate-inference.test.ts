@@ -111,4 +111,69 @@ console.log(aliased());`,
       expect(main).toContain("use crate::source::real as aliased;");
     },
   },
+  {
+    // #70 — a scalar value `export default` → a `LazyLock<f64>` static; a consumer
+    // derefs it (a scalar is `Copy`, so read/move both work).
+    name: "DEF1 scalar `export default 42` read cross-module",
+    files: {
+      "cfg.ts": `export default 42;`,
+      "main.ts": `import n from "./cfg";
+console.log(n + 1);`,
+    },
+    expected: "43",
+    extra: ({ files }) => {
+      const cfg = files?.find((f) => f.path === "cfg.rs")?.content ?? "";
+      expect(cfg).toContain("LazyLock<f64>");
+    },
+  },
+  {
+    // #70 — a string default → `LazyLock<String>`; a method read auto-derefs.
+    name: "DEF2 string `export default` with a method read",
+    files: {
+      "cfg.ts": `export default "hello";`,
+      "main.ts": `import s from "./cfg";
+console.log(s.toUpperCase());`,
+    },
+    expected: "HELLO",
+  },
+  {
+    // #70 — an array default → `LazyLock<Vec<f64>>`; index + `.length` read.
+    name: "DEF3 array `export default` index + length read",
+    files: {
+      "cfg.ts": `export default [10, 20, 30];`,
+      "main.ts": `import xs from "./cfg";
+console.log(xs[1], xs.length);`,
+    },
+    expected: "20 3",
+  },
+  {
+    // #70 — a `new <Struct>()` default (oracle-typed); read its fields cross-module.
+    name: "DEF4 `export default new Point(3,4)` field read",
+    files: {
+      "pt.ts": `export class Point {
+  x: number;
+  y: number;
+  constructor(x: number, y: number) { this.x = x; this.y = y; }
+}
+export default new Point(3, 4);`,
+      "main.ts": `import p from "./pt";
+console.log(p.x + p.y);`,
+    },
+    expected: "7",
+  },
+  {
+    // #70 — an arrow default is a real `fn` (via normalizeArrows), not a lazy static.
+    name: "DEF5 arrow `export default` → a fn",
+    files: {
+      "dbl.ts": `export default (x: number): number => x * 2;`,
+      "main.ts": `import f from "./dbl";
+console.log(f(21));`,
+    },
+    expected: "42",
+    extra: ({ files }) => {
+      const dbl = files?.find((f) => f.path === "dbl.rs")?.content ?? "";
+      expect(dbl).toContain("fn __default_export");
+      expect(dbl).not.toContain("LazyLock");
+    },
+  },
 ]);

@@ -933,7 +933,7 @@ only the entry runs top-level statements, so there is no init-order hazard).
 
 | Trigger (fail-loud) | Kind | Message |
 |---|---|---|
-| an anonymous **value** `export default 42/{}` | Not yet | `anonymous value \`export default\` (only a named fn/class default has a Rust symbol)` |
+| an **owned move** of a non-scalar value `export default` (`const x = def`, `return def`) | Not yet | `owned move of the value \`export default\` import '<x>' (a LazyLock value can't be moved out …)` |
 | a **glob** re-export (`export * from`) in a **mixed** (non-pure-barrel) file | Forbidden | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
 | dynamic `import("./x")` (`ImportExpression`) | Not yet | `dynamic \`import()\` (only static \`import\`/\`export\` are modeled)` |
 | a top-level statement in an **imported** (non-entry) module | Not yet | `top-level statement in an imported module (declarations only)` |
@@ -954,6 +954,17 @@ declarations, and a consumer importing a re-exported name binds directly to the 
 that **defines** it (`use crate::<src>::x`), bypassing the re-exporter. The chain is
 chased through mixed intermediaries (a cycle is fail-loud). Only a **glob** `export *
 from` in a mixed file stays forbidden (ambiguous).
+
+**Value `export default` (series 050, #70):** a default whose value is not a fn/class
+is accepted. An **arrow** (`export default (x) => …`) becomes a real `fn`. Any other
+value (`export default 42 / "s" / [1,2,3] / new Point(…)`) becomes a module-level
+`static NAME: LazyLock<T> = LazyLock::new(|| <value>)` (evaluated once; `T` inferred by
+the crate oracle, or straight from a primitive literal). A cross-module default-import
+derefs the cell — reads (index / field / method / a scalar's value) auto-deref, and
+mutating one is fail-loud (can't `&mut` through the deref). An **owned move** of a
+non-scalar default (`const x = def`) is fail-loud for now (you can't move out of a
+`LazyLock`; read it in place). `Rc` is intentionally not used — it isn't `Sync`, so it
+can't live in a `static`; the bare payload is `Sync + Send`.
 
 ## JSON (bare `JSON.*` — forbidden, redirected to `@ttr/std`)
 

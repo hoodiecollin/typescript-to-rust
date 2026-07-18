@@ -28,17 +28,20 @@ describe("050d module fail-loud residuals", () => {
     ).toThrow(/re-export outside a pure barrel/);
   });
 
-  // ── MOD17 — an anonymous VALUE default export ─────────────────────────────
-  test("MOD17 `export default 42` (value) → anonymous value export default", () => {
+  // MOD17 (`export default 42`) is no longer fail-loud — a value default graduated
+  // to a `LazyLock` static (#70); see the crate-inference `DEF*` specs. What stays
+  // fail-loud is an **owned move** of a non-scalar value default (you can't move out
+  // of the `LazyLock` cell — read it in place instead).
+  test("MOD17b owned move of a non-scalar value `export default` → fail-loud", () => {
     expect(() =>
       compileCrate(
         {
-          "val.ts": `export default 42;`,
-          "main.ts": `import v from "./val";\nconsole.log(v);`,
+          "cfg.ts": `export default [1, 2, 3];`,
+          "main.ts": `import xs from "./cfg";\nconst local = xs;\nconsole.log(local.length);`,
         },
         "main.ts",
       ),
-    ).toThrow(/anonymous value `export default`/);
+    ).toThrow(/owned move of the value `export default`/);
   });
 
   // ── MOD21 — dynamic import() ──────────────────────────────────────────────

@@ -253,7 +253,7 @@ default-deny) via new `checkForbiddenFlags`-style guards:
 
 | Shape | Node | Kind | Message |
 |---|---|---|---|
-| anonymous **value** default export | `ExportDefaultDeclaration` of a non-fn/class | Not yet | `anonymous value \`export default\` (only a named fn/class default has a Rust symbol)` |
+| ~~anonymous **value** default export~~ **LIFTED by #70** — an arrow → a `fn`; any other value → a module-level `LazyLock<T>` static (an owned move of a non-scalar stays fail-loud) | — | (graduated) |
 | ~~re-export in a **mixed** file~~ **named** case LIFTED by #71 (lineage rewrite — consumer routes to the real source); only a **glob** `ExportAllDeclaration` in a mixed file stays Forbidden | `ExportAllDeclaration` outside a pure barrel | Forbidden (glob only) | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
 | dynamic import | `ImportExpression` | Not yet | `dynamic \`import()\`` |
 | bare/package import | `ImportDeclaration` whose `.source` has no leading `.` | Not yet | `bare/package import (only \`./\`-relative imports; no node_modules)` |

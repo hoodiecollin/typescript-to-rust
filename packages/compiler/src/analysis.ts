@@ -332,6 +332,12 @@ export interface ModuleAnalysis {
    */
   bindingTypes: Map<string, RustType>;
   /**
+   * Cross-module default-import locals that bind a **value** `export default`
+   * (#70) — each is a `LazyLock` static, so a use of the name derefs the cell
+   * (`(*def)`) and (for a non-scalar) clones the `Rc` on an owned use.
+   */
+  lazyDefaultLocals: Set<string>;
+  /**
    * Names currently narrowed from `Option<T>` to their inner `T` (series 066).
    * Inside an `if let Some(x) = x { … }` block, `x` is a plain `T`, so the
    * arithmetic-on-optional fail-loud guard (and the print/truthiness Option paths)
@@ -1837,6 +1843,8 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     bidirectionalGenerators: new Set(),
     // Filled in by `lower()` (needs `lowerType`); empty/zero here.
     bindingTypes: new Map(),
+    // Cross-module value-default import locals (#70); seeded by `lower()` for a crate.
+    lazyDefaultLocals: new Set(),
     // Names currently narrowed to their inner `T` (series 066): inside an
     // `if let Some(x)` block `x` is a plain `T`, not `Option<T>`, so the arithmetic
     // fail-loud guard must skip it. Pushed/popped by `lowerIf` around the some-body.

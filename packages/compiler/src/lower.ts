@@ -193,11 +193,23 @@ function synthesizeErrorEnum(analysis: ModuleAnalysis): HirErrorEnum | null {
  * Lower a whole program to HIR.
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
  */
+/** A Copy scalar payload (#70) needs no `Rc` wrapper around a value default. */
+function isScalarType(t: RustType): boolean {
+  return (
+    t.kind === "f64" ||
+    t.kind === "i64" ||
+    t.kind === "i128" ||
+    t.kind === "usize" ||
+    t.kind === "bool"
+  );
+}
+
 export function lower(
   program: Program,
   source?: string,
   crateNamespaces?: ReadonlySet<string>,
   crateOracleFiles?: OracleFile[],
+  crateDefaults?: CrateDefaults,
 ): HirModule {
   // Extract `namespace Foo { … }` blocks (series 050d, Axis 4) **before** the
   // dialect gate — each lowers recursively to an inline `mod Foo { pub … }` below,
@@ -250,6 +262,105 @@ export function lower(
   // and a receiver's element type. Needs `lowerType`, so it runs here, not in
   // `analyzeModule`.
   analysis.bindingTypes = collectBindingTypes(normalized, analysis.structs);
+  // Value `export default` pre-pass (#70): infer each lazy static's payload type
+  // via the crate oracle (available now), then seed every consumer default-import
+  // local with that type and mark it for deref. `lazyInfo` feeds the item loop.
+  const lazyInfo = new Map<
+    string,
+    { ty: RustType; rc: boolean; init: Expression }
+  >();
+  if (crateDefaults) {
+    for (const stmt of normalized.body) {
+      if (stmt.type !== "VariableDeclaration") continue;
+      for (const dcl of (stmt as VariableDeclaration).declarations) {
+        const nm = (dcl.id as { name?: string }).name;
+        if (!nm || !crateDefaults.lazyNames.has(nm) || !dcl.init) continue;
+        const init = dcl.init;
+        // A bare primitive literal confuses tsc's `getTypeAtLocation` under
+        // `export default` (it reports `any`), so type it straight from the AST;
+        // everything else (array, `new X()`, a call, …) goes through the oracle.
+        let ty: RustType | null = null;
+        if (init.type === "Literal") {
+          const v = (init as Literal).value;
+          if (typeof v === "number") ty = { kind: "f64" };
+          else if (typeof v === "string") ty = { kind: "String" };
+          else if (typeof v === "boolean") ty = { kind: "bool" };
+        }
+        if (!ty) {
+          ty =
+            analysis.typeOracle?.inferredRustType(init.start, init.end) ?? null;
+        }
+        if (!ty) {
+          throw new UnsupportedError({
+            type: "value `export default` whose type can't be inferred (annotate the value, or default-export a named fn/class)",
+            start: init.start,
+          });
+        }
+        // `Rc` can't live in a `static` (not `Sync`); the bare payload (`Vec`,
+        // `String`, a data struct) is `Sync + Send`, so store `LazyLock<T>` directly
+        // and deep-clone on an owned use. `rc` stays false (kept for a future `Arc`).
+        lazyInfo.set(nm, { ty, rc: false, init });
+      }
+    }
+    for (const [local, modKey] of crateDefaults.importLocals) {
+      const sym = crateDefaults.symByMod.get(modKey);
+      const info = sym ? lazyInfo.get(sym) : undefined;
+      if (info) analysis.bindingTypes.set(local, info.ty);
+      analysis.lazyDefaultLocals.add(local);
+    }
+    // A non-scalar value default is a `LazyLock<T>` accessed by deref — reads
+    // borrow fine, but an **owned move** (`const x = def`, `return def`, `x = def`,
+    // an object/array element) can't move out of the cell. Rather than emit code
+    // cargo rejects (E0507), fail loud with guidance. A borrow (`def[i]`, `def.m()`,
+    // `console.log(def)`) is unaffected. (Owned-move support is a follow-on.)
+    const isOwnedMoveOfLazy = (e: unknown): string | null => {
+      const n = e as { type?: string; name?: string } | null;
+      if (!n || n.type !== "Identifier" || !n.name) return null;
+      if (!analysis.lazyDefaultLocals.has(n.name)) return null;
+      const ty = analysis.bindingTypes.get(n.name);
+      return ty && !isScalarType(ty) ? n.name : null;
+    };
+    const failOwned = (name: string): never => {
+      throw new UnsupportedError({
+        type: `owned move of the value \`export default\` import '${name}' (a LazyLock value can't be moved out — read its fields/elements in place, or default-export a named fn/class)`,
+      });
+    };
+    const guardOwned = (node: unknown): void => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        for (const el of node) guardOwned(el);
+        return;
+      }
+      const rec = node as Record<string, unknown> & { type?: string };
+      const check = (slot: unknown): void => {
+        const nm = isOwnedMoveOfLazy(slot);
+        if (nm) failOwned(nm);
+      };
+      switch (rec.type) {
+        case "VariableDeclarator":
+          check(rec.init);
+          break;
+        case "ReturnStatement":
+          check(rec.argument);
+          break;
+        case "AssignmentExpression":
+          check(rec.right);
+          break;
+        case "Property":
+          check(rec.value);
+          break;
+        case "ArrayExpression":
+          for (const el of (rec.elements as unknown[]) ?? []) check(el);
+          break;
+      }
+      for (const k in rec) {
+        if (k === "start" || k === "end") continue;
+        const v = rec[k];
+        if (v && typeof v === "object") guardOwned(v);
+      }
+    };
+    guardOwned(normalized);
+  }
   // Manual-`step()` generator consumers (series 075): a whole-program scan for
   // `it.next()` / `g().next()`, `const [a, b] = g()`, and `const r = yield* inner()`
   // that forces the referenced generator to the state-machine struct (the surface
@@ -389,6 +500,25 @@ export function lower(
       if (!isErrorSubclass(stmt)) {
         items.push(lowerClass(stmt as ClassDeclaration, analysis));
       }
+    } else if (
+      stmt.type === "VariableDeclaration" &&
+      lazyInfo.has(
+        ((stmt as VariableDeclaration).declarations[0]?.id as { name?: string })
+          ?.name ?? "",
+      )
+    ) {
+      // A synthesized value `export default` (#70) → a module-level `LazyLock`
+      // static. Its payload type was inferred in the pre-pass; lower the value.
+      const dcl = (stmt as VariableDeclaration).declarations[0]!;
+      const name = (dcl.id as Identifier).name;
+      const info = lazyInfo.get(name)!;
+      items.push({
+        kind: "lazyStatic",
+        name,
+        ty: info.ty,
+        rc: info.rc,
+        init: lowerTyped(info.init, null, analysis),
+      });
     } else {
       script.push(stmt);
     }
@@ -562,6 +692,31 @@ export function lower(
  * a default import binds it via `use crate::<mod>::__default_export as <local>;`.
  */
 const DEFAULT_EXPORT_SYM = "__default_export";
+
+/** A short deterministic FNV-1a hash (base-36) — used to give each module's value
+ *  default a unique item name (#70), aliased back to `__default_export`. */
+function shortHash(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * What a crate's value-`export default`s (#70) need threaded from `lowerCrate` into
+ * `lower`: the synthesized lazy-static item names to build, the consumer import
+ * locals that bind them (→ deref + typed binding), and each module's default sym.
+ */
+export interface CrateDefaults {
+  /** Synthesized `const <sym> = <value>` names that become `HirLazyStatic` items. */
+  lazyNames: Set<string>;
+  /** A default-import local name → the `modKey` whose value default it binds. */
+  importLocals: Map<string, string>;
+  /** `modKey` → its value default's synthesized sym (for the item's inferred type). */
+  symByMod: Map<string, string>;
+}
 
 /** The exported / crate-root name of a top-level declaration (series 050). */
 function crateDeclName(stmt: Statement): string | undefined {
@@ -819,6 +974,10 @@ function signatureRefs(item: HirItem): Set<string> {
       for (const p of item.params) nominalNamesOf(p.ty, out);
       for (const f of item.localFields) nominalNamesOf(f.ty, out);
       break;
+    case "lazyStatic":
+      // A value default's payload type (#70) — keep a referenced struct reachable.
+      nominalNamesOf(item.ty, out);
+      break;
     // `enum` (C-like, unit variants) and `errorEnum` (synthesized, crate-root)
     // reference no other nominal type.
     default:
@@ -1021,6 +1180,34 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
     }
   };
 
+  // ── Value `export default` pre-pass (#70) ─────────────────────────────────
+  // A default whose declaration is neither a fn/class nor an arrow (a literal,
+  // array, object, call, …) has no item analog → it becomes a module-level
+  // `LazyLock` static. Detect them up front (a consumer may import one before its
+  // defining module is merged) so a default-import can bind + deref it.
+  const crateDefaults: CrateDefaults = {
+    lazyNames: new Set(),
+    importLocals: new Map(),
+    symByMod: new Map(),
+  };
+  const valueDefaultSym = (m: SourceModule): string =>
+    `${DEFAULT_EXPORT_SYM}_${shortHash(modKeyOf(m) || "root")}`;
+  for (const m of modules) {
+    for (const stmt of m.program.body) {
+      if (stmt.type !== "ExportDefaultDeclaration") continue;
+      const d = (stmt as unknown as { declaration: { type: string } })
+        .declaration;
+      if (
+        d.type === "FunctionDeclaration" ||
+        d.type === "ClassDeclaration" ||
+        d.type === "ArrowFunctionExpression"
+      ) {
+        continue;
+      }
+      crateDefaults.symByMod.set(modKeyOf(m), valueDefaultSym(m));
+    }
+  }
+
   for (const m of modules) {
     const uses = usesFor(modKeyOf(m));
     // A pure barrel (Axis 3) → a generated `pub use` facade module; it declares no
@@ -1071,6 +1258,14 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
             uses.push(
               crateUseLine(targetMod, DEFAULT_EXPORT_SYM, spec.local.name),
             );
+            // A default that is a VALUE (#70) binds a `LazyLock` — record the local
+            // so `lower` types it + derefs its uses.
+            if (crateDefaults.symByMod.has(targetMod.join("/"))) {
+              crateDefaults.importLocals.set(
+                spec.local.name,
+                targetMod.join("/"),
+              );
+            }
           } else if (spec.type === "ImportNamespaceSpecifier") {
             // Namespace import → a Rust **module alias** (Axis 4, re-decided
             // 2026-07-17): `import * as ns from "./n"` → `use crate::n as ns;`, and
@@ -1150,11 +1345,36 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
           }
           continue;
         }
-        // An anonymous VALUE default (`export default 42 / {} / () => …`) has no
-        // named Rust analog → fail-loud.
-        throw new UnsupportedError({
-          type: "anonymous value `export default` (only a named fn/class default has a Rust symbol)",
-        });
+        // A non-fn/class default (#70). Synthesize `const <sym> = <value>` and
+        // alias `<sym>` as the reserved default symbol. An **arrow** → a fn (via
+        // `normalizeArrows`); any other **value** → a module-level `LazyLock` static
+        // (built in `lower`, its type inferred by the crate oracle).
+        const span = d as unknown as { start: number; end: number };
+        const sym = valueDefaultSym(m);
+        const synthConst = {
+          type: "VariableDeclaration",
+          kind: "const",
+          start: span.start,
+          end: span.end,
+          declarations: [
+            {
+              type: "VariableDeclarator",
+              start: span.start,
+              end: span.end,
+              id: { type: "Identifier", name: sym, start: 0, end: 0 },
+              init: d,
+            },
+          ],
+        } as unknown as Statement;
+        nameToModPath.set(sym, m.modPath);
+        exportedNames.add(sym);
+        uses.push(`pub(crate) use self::${sym} as ${DEFAULT_EXPORT_SYM};`);
+        if (d.type !== "ArrowFunctionExpression") {
+          // A value → a lazy static (an arrow flows through as a fn instead).
+          crateDefaults.lazyNames.add(sym);
+        }
+        mergedBody.push(synthConst);
+        continue;
       }
       if (t === "ExportAllDeclaration") {
         throw new UnsupportedError({
@@ -1184,7 +1404,13 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
     start: 0,
     end: 0,
   };
-  const lowered = lower(merged, undefined, crateNamespaces, crateOracleFiles);
+  const lowered = lower(
+    merged,
+    undefined,
+    crateNamespaces,
+    crateOracleFiles,
+    crateDefaults,
+  );
 
   // Infer visibility across the whole crate (Axis 1): exported names + everything
   // signature-reachable from them → `pub(crate)`; purely local items stay private.
@@ -9630,6 +9856,13 @@ function lowerExpr(expr: Expression, analysis: ModuleAnalysis): HirExpr {
       if (name === "NaN") return { kind: "path", segments: ["f64", "NAN"] };
       if (name === "Infinity")
         return { kind: "path", segments: ["f64", "INFINITY"] };
+      // A cross-module value-`export default` import (#70) binds a `LazyLock`
+      // static — deref the cell to its payload. Auto-deref then carries method /
+      // field access through, and the ownership pass clones the `Rc` on an owned
+      // use (a non-scalar); a scalar payload is `Copy`, so `*def` is a plain read.
+      if (analysis.lazyDefaultLocals.has(name)) {
+        return { kind: "deref", expr: { kind: "ident", name } };
+      }
       return { kind: "ident", name };
     }
     case "ChainExpression":
