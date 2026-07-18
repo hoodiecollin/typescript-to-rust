@@ -2,6 +2,16 @@
 
 Implementation details and decisions that aren't obvious from the code.
 
+> **Scope note (2026-07-18):** the invariants and design rationale here are
+> accurate but describe a **~series-037 snapshot**. Passes and packages added
+> since are **not** reflected below — notably the TypeScript `TypeOracle`
+> (`type-oracle.ts`, 082), the crate/module front-stage (`crate.ts`, 050), the
+> `@ttr/std` shim package (`packages/std/`, 084), and `unions.ts`/`rc.ts`/
+> `arena.ts`/`regex-translate.ts`/`std-shim.ts`. The repo-layout tree and pipeline
+> diagram are partial; `packages/compiler/src/` is the ground truth for the current
+> pass set. (Note: "oracle" here = the Rust verification harness crate `rust-oracle/`,
+> which is distinct from the TypeScript `TypeOracle` type-resolution layer.)
+
 ## Repo layout
 
 ```
