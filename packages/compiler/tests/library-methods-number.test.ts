@@ -54,6 +54,14 @@ console.log(Math.min(a + b, 2));`,
     },
   },
   {
+    // #73 — a Math method over a receiver of **bare literals** (no typed variable
+    // to anchor inference) must cast the receiver to `f64`, else Rust rejects the
+    // method call on an ambiguous `{float}` (E0689).
+    name: "NUMN1d Math unary/min over a bare-literal arithmetic receiver (#73)",
+    src: `console.log(Math.floor(1.2 + 2.9), Math.sqrt(9 + 16), Math.abs(3 - 8), Math.min(1 + 2, 10));`,
+    expected: "4 5 5 3",
+  },
+  {
     name: "NUMT1 toFixed(d) — rounding + formatting",
     src: `const n: number = 3.14159;
 console.log(n.toFixed(2));

@@ -13547,14 +13547,22 @@ function lowerNumberStatic(
   // A method receiver that is a bare number literal (`3.7`) is an ambiguous
   // `{float}` in Rust (`3.7.floor()` fails E0689) — cast a literal receiver to
   // `f64` (`(3.7 as f64).floor()`). A non-literal `f64` receiver is unambiguous.
+  // A receiver built ONLY from numeric literals (a single literal, or literal
+  // arithmetic like `1.2 + 2.9`) has no typed leaf to anchor Rust's inference, so a
+  // `.floor()`/`.sqrt()` on it is rejected as an ambiguous `{float}` (E0689, #73). A
+  // receiver holding any identifier / call is already anchored. Arithmetic ops only:
+  // a bitwise binary is already concrete (`i128`), so it needs no cast.
+  const isPureNumericLiteral = (e: HirExpr): boolean =>
+    e.kind === "number" ||
+    (e.kind === "unary" && e.op === "-" && isPureNumericLiteral(e.operand)) ||
+    (e.kind === "binary" &&
+      !e.bitwise &&
+      ["+", "-", "*", "/", "%"].includes(e.op) &&
+      isPureNumericLiteral(e.left) &&
+      isPureNumericLiteral(e.right));
   const f64Recv = (e: Expression): HirExpr => {
     const lowered = lowerExpr(e, analysis);
-    const isLiteralNum =
-      lowered.kind === "number" ||
-      (lowered.kind === "unary" &&
-        lowered.op === "-" &&
-        lowered.operand.kind === "number");
-    return isLiteralNum
+    return isPureNumericLiteral(lowered)
       ? { kind: "cast", expr: lowered, ty: { kind: "f64" } }
       : lowered;
   };
