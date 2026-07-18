@@ -96,7 +96,11 @@ import { refineTaskEscape } from "./task-escape";
 import { refineRc } from "./rc";
 import { computeAutoRc } from "./alias-escape";
 import { refineStrings } from "./strings";
-import { createTypeOracle } from "./type-oracle";
+import {
+  createCrateTypeOracle,
+  createTypeOracle,
+  type OracleFile,
+} from "./type-oracle";
 import { validate } from "./validate";
 import {
   anonDiscUnionName,
@@ -193,6 +197,7 @@ export function lower(
   program: Program,
   source?: string,
   crateNamespaces?: ReadonlySet<string>,
+  crateOracleFiles?: OracleFile[],
 ): HirModule {
   // Extract `namespace Foo { … }` blocks (series 050d, Axis 4) **before** the
   // dialect gate — each lowers recursively to an inline `mod Foo { pub … }` below,
@@ -229,7 +234,12 @@ export function lower(
   // here (enums merged), so a struct-typed Map key/elem resolves nominally. When
   // absent, `collectionOf` falls back to the `bindingTypes` path alone (exactly
   // pre-082 behavior), so every existing `lower(program)` call site is unchanged.
-  if (source !== undefined) {
+  if (crateOracleFiles) {
+    // Crate lowering (#68): one oracle over ALL crate sources so tsc resolves
+    // `./`-relative imports — a cross-module untyped binding infers *through* the
+    // import. Built here (not in `lowerCrate`) so `structs` is the crate-global set.
+    analysis.typeOracle = createCrateTypeOracle(crateOracleFiles, analysis.structs);
+  } else if (source !== undefined) {
     analysis.typeOracle = createTypeOracle(source, analysis.structs);
   }
   // Struct field types (series 032) — a pre-pass so a struct object literal can
@@ -884,9 +894,49 @@ function inferCrateVisibility(items: HirItem[], exported: Set<string>): void {
  * shim import is kept in the merged program (it is recognized by lowering, not a
  * module edge).
  */
+/**
+ * Add `delta` to every `start`/`end` in an oxc AST subtree (#68) — used to shift a
+ * crate module's spans into its disjoint offset window so a merged node routes back
+ * to its file in the crate oracle. A `WeakSet` guards against any shared/cyclic
+ * reference; `delta === 0` (the entry module) short-circuits.
+ */
+function shiftSpans(node: unknown, delta: number, seen?: WeakSet<object>): void {
+  if (delta === 0 || node === null || typeof node !== "object") return;
+  const visited = seen ?? new WeakSet<object>();
+  if (visited.has(node)) return;
+  visited.add(node);
+  if (Array.isArray(node)) {
+    for (const el of node) shiftSpans(el, delta, visited);
+    return;
+  }
+  const rec = node as Record<string, unknown>;
+  if (typeof rec.start === "number" && typeof rec.end === "number") {
+    rec.start += delta;
+    rec.end += delta;
+  }
+  for (const k in rec) {
+    if (k === "start" || k === "end") continue;
+    const v = rec[k];
+    if (v !== null && typeof v === "object") shiftSpans(v, delta, visited);
+  }
+}
+
 export function lowerCrate(modules: SourceModule[]): HirModule {
   const entry = modules.find((m) => m.isEntry);
   if (!entry) throw new UnsupportedError({ type: "crate has no entry module" });
+
+  // Give each module a disjoint offset window and shift its AST spans into it (#68),
+  // so a merged node's *global* span routes back to its owning file + file-local
+  // span in the crate oracle. tsc parses each file's ORIGINAL source, so the windows
+  // only touch the merged oxc AST — never the oracle's SourceFiles. The entry gets
+  // base 0 (a no-op shift), keeping its nodes at their source offsets.
+  const crateOracleFiles: OracleFile[] = [];
+  let spanBase = 0;
+  for (const m of modules) {
+    shiftSpans(m.program, spanBase);
+    crateOracleFiles.push({ key: m.key, source: m.source, base: spanBase });
+    spanBase += m.source.length + 1;
+  }
 
   const mergedBody: Statement[] = [];
   /** Declaration name → owning module's `modPath` (`[]` = crate root/entry). */
@@ -1070,7 +1120,7 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
     start: 0,
     end: 0,
   };
-  const lowered = lower(merged, undefined, crateNamespaces);
+  const lowered = lower(merged, undefined, crateNamespaces, crateOracleFiles);
 
   // Infer visibility across the whole crate (Axis 1): exported names + everything
   // signature-reachable from them → `pub(crate)`; purely local items stay private.

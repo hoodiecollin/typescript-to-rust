@@ -940,12 +940,13 @@ only the entry runs top-level statements, so there is no init-order hazard).
 | a non-declaration `namespace` member (statement / bare `const` / re-export) | Not yet | `namespace member must be a declaration …` |
 | a bare/package import (`import x from "lodash"`) | Not yet | `import from '<x>' — only "@ttr/std" is a recognized module …` |
 
-**Crate-merge oracle-inference gap (residual):** `lowerCrate` lowers a *synthetic
-merged* program (spliced from N files, no coherent source), so the 099 type-oracle is
-absent there — a **cross-module** untyped `new`/builtin-call binding needs an explicit
-annotation (`const p: Point = new Point(1,2)`), the pre-099 baseline. Same-file
-inference in a single-file program is unaffected. Per-module oracle threading is a
-follow-on.
+**Cross-module inference (series 050, #68):** the 099 type-oracle compiles the WHOLE
+crate — tsc walks the `./`-relative imports — so a **cross-module** untyped
+`new`/builtin-call binding infers *through* the import, exactly as a same-file binding
+does (`const p = new Point(1,2)` with an imported `Point`, or `` const g = `hi ${who()}` ``
+over an imported `who()`, needs no annotation). Each module is given a disjoint offset
+window so a merged AST node routes back to its owning file + file-local span; tsc parses
+each file's original source, so the windows only touch the merged oxc AST.
 
 ## JSON (bare `JSON.*` — forbidden, redirected to `@ttr/std`)
 

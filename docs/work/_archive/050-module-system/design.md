@@ -400,15 +400,14 @@ lands anything touching the directive surface.
 - **Not yet:** dynamic `import()`; bare/package imports; top-level statements in
   an imported module; namespace+value declaration merging; an **anonymous value**
   default export (`export default 42/{}/() =>` — no named Rust analog).
-- **Not yet (crate-merge inference gap):** the 099 type-oracle infers an untyped
-  `const p = new Point(1,2)` / builtin-call binding *by construction*, but it is
-  built from a single file's **source + spans**. `lowerCrate` lowers a **synthetic
-  merged** program (spliced from N files, no coherent source), so the oracle is
-  absent there — a cross-module binding whose type would come from oracle inference
-  must carry an **explicit annotation** (`const p: Point = new Point(1,2)`), the
-  pre-099 dialect baseline. Wiring a **per-module** oracle (keyed by module + span)
-  through the merge is a follow-on; until then annotate. (Same-file inference in a
-  single-file program is unaffected.)
+- **~~Not yet (crate-merge inference gap)~~ — LIFTED by #68:** the 099 type-oracle
+  now compiles the **whole crate** (tsc walks the `./`-relative imports), so a
+  cross-module untyped `const p = new Point(1,2)` / builtin-call binding infers
+  *through* the import — no annotation. `createCrateTypeOracle` builds one tsc
+  program over all crate sources; `lowerCrate` gives each module a disjoint offset
+  **window** and shifts its AST spans into it, so a merged node routes back to its
+  file + local span (the "keyed by module + span" lookup). tsc parses each file's
+  original source, so the windows only touch the merged oxc AST.
 - **Lifted (no longer residuals):** **renamed exports** (`export { x as y }` — now a
   `pub use … as y;`) and **pure re-export barrels** (now `pub use` facades, Axis 3);
   **namespace imports** (`import * as ns` — now a `use crate::n as ns;` module alias)
