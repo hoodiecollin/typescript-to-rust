@@ -26,7 +26,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, posix } from "node:path";
 import type * as TS from "typescript";
 import { DialectError } from "./errors";
 import type { RustType } from "./hir";
@@ -96,44 +96,152 @@ export interface TypeOracle {
 }
 
 /**
- * Build a `TypeOracle` over `source`. `structs` is the module's set of nominal
- * struct/class/enum names, so a struct-typed Map key/elem maps to `{kind:
+ * One source file participating in an oracle program. A single-file oracle has a
+ * lone entry with `base: 0`; a **crate** oracle gives each module a disjoint
+ * offset `base` (its window), so a merged AST node's *global* span routes back to
+ * its owning file and its file-local span.
+ */
+export interface OracleFile {
+  /** The file's module key = its tsc file name (must match import resolution). */
+  key: string;
+  /** The raw source text. */
+  source: string;
+  /** The global-span window base: a node here has span `[base + localStart, …)`. */
+  base: number;
+}
+
+/**
+ * Build a `TypeOracle` over a single `source`. `structs` is the module's set of
+ * nominal struct/class/enum names, so a struct-typed Map key/elem maps to `{kind:
  * "struct"}` exactly as `lowerType`/`lowerMapKeyType` do.
  */
 export function createTypeOracle(source: string, structs: Set<string>): TypeOracle {
-  const sf = ts.createSourceFile(ORACLE_FILE, source, ts.ScriptTarget.Latest, true);
+  return buildOracle([{ key: ORACLE_FILE, source, base: 0 }], structs);
+}
+
+/**
+ * Build a crate-wide `TypeOracle` over ALL of a crate's source files (series 050,
+ * #68). tsc compiles the whole program — walking `./`-relative imports — so a
+ * cross-module binding (`const p = new Point(1,2)` with an imported `Point`, or
+ * `importedFn().map(…)`) infers *through* the import exactly as a same-file binding
+ * does. Each file carries a disjoint offset `base`; a merged AST node's global
+ * `[start,end]` routes to the owning file and its local span, so the caller-facing
+ * `(start,end)` `TypeOracle` interface is unchanged.
+ */
+export function createCrateTypeOracle(
+  files: OracleFile[],
+  structs: Set<string>,
+): TypeOracle {
+  return buildOracle(files, structs);
+}
+
+function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
+  /** Canonicalize a key exactly as `resolveCrate` does (posix-normalize, drop a
+   *  leading `./`) so routing, module resolution, and SourceFile lookup all agree. */
+  const canon = (k: string): string => {
+    const n = posix.normalize(k);
+    return n.startsWith("./") ? n.slice(2) : n;
+  };
+  const normed = files.map((f) => ({
+    key: canon(f.key),
+    source: f.source,
+    base: f.base,
+  }));
+  const byKey = new Map(normed.map((f) => [f.key, f]));
+
+  // Offset windows (sorted by base): a global span whose `start` falls in
+  // `[base, base+len]` belongs to that file; its file-local span subtracts `base`.
+  const windows = normed
+    .map((f) => ({ key: f.key, base: f.base, hi: f.base + f.source.length }))
+    .sort((a, b) => a.base - b.base);
+  const route = (start: number): { key: string; base: number } | null => {
+    for (const w of windows) {
+      if (start >= w.base && start <= w.hi) return { key: w.key, base: w.base };
+    }
+    return null;
+  };
+
+  /** Resolve a `./`-relative import to a crate file key — mirrors `resolveCrate`
+   *  (`./x` → `x.ts` / `x/index.ts`). A bare / lib / `@ttr/std` specifier returns
+   *  undefined (left to tsc's lib resolution, or harmlessly unresolved: such
+   *  bindings are separately exempt from the annotation gate). */
+  const resolveModuleNames = (
+    names: string[],
+    containingFile: string,
+  ): (TS.ResolvedModule | undefined)[] =>
+    names.map((name) => {
+      if (!name.startsWith(".")) return undefined;
+      const dir = posix.dirname(canon(containingFile));
+      const base = canon(posix.join(dir, name));
+      for (const cand of [`${base}.ts`, posix.join(base, "index.ts"), base]) {
+        const hit = byKey.get(canon(cand));
+        if (hit) return { resolvedFileName: hit.key };
+      }
+      return undefined;
+    });
+
+  /** Fresh crate SourceFiles for a program (each program owns its SourceFiles). */
+  const crateSfs = (target: TS.ScriptTarget): Map<string, TS.SourceFile> => {
+    const m = new Map<string, TS.SourceFile>();
+    for (const f of normed) {
+      m.set(f.key, ts.createSourceFile(f.key, f.source, target, true));
+    }
+    return m;
+  };
+
+  // ── noLib tier (fast, explicit annotations) ───────────────────────────────
+  const sfs = crateSfs(ts.ScriptTarget.Latest);
   const host: TS.CompilerHost = {
-    getSourceFile: (f) => (f === ORACLE_FILE ? sf : undefined),
+    getSourceFile: (f) => sfs.get(canon(f)),
     getDefaultLibFileName: () => "lib.d.ts",
     writeFile: () => {},
     getCurrentDirectory: () => "",
     getDirectories: () => [],
-    fileExists: (f) => f === ORACLE_FILE,
-    readFile: (f) => (f === ORACLE_FILE ? source : undefined),
-    getCanonicalFileName: (f) => f,
+    fileExists: (f) => sfs.has(canon(f)),
+    readFile: (f) => byKey.get(canon(f))?.source,
+    getCanonicalFileName: (f) => canon(f),
     useCaseSensitiveFileNames: () => true,
     getNewLine: () => "\n",
+    resolveModuleNames,
   };
   const program = ts.createProgram(
-    [ORACLE_FILE],
+    normed.map((f) => f.key),
     { noLib: true, target: ts.ScriptTarget.Latest },
     host,
   );
   const checker = program.getTypeChecker();
 
-  /** tsc node whose [getStart, getEnd] === the oxc [start, end], or null. */
-  function findBySpan(node: TS.Node, start: number, end: number): TS.Node | null {
+  /** tsc node whose [getStart, getEnd] === the (file-local) [start, end], or null. */
+  function findBySpan(
+    node: TS.Node,
+    sf: TS.SourceFile,
+    start: number,
+    end: number,
+  ): TS.Node | null {
     let best: TS.Node | null = null;
     if (node.getStart(sf) === start && node.getEnd() === end) best = node;
     ts.forEachChild(node, (c) => {
-      const r = findBySpan(c, start, end);
+      const r = findBySpan(c, sf, start, end);
       if (r) best = r;
     });
     return best;
   }
 
+  /** Route a global span to the owning file's SourceFile in `prog` + its node. */
+  function nodeAt(
+    prog: TS.Program,
+    gstart: number,
+    gend: number,
+  ): TS.Node | null {
+    const w = route(gstart);
+    if (!w) return null;
+    const sf = prog.getSourceFile(w.key);
+    if (!sf) return null;
+    return findBySpan(sf, sf, gstart - w.base, gend - w.base);
+  }
+
   function typeAtSpan(start: number, end: number): TS.Type | null {
-    const node = findBySpan(sf, start, end);
+    const node = nodeAt(program, start, end);
     return node ? checker.getTypeAtLocation(node) : null;
   }
 
@@ -213,8 +321,8 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
   // SECOND, lib-enabled program is built lazily on the first inference query and
   // memoized — a fully-annotated module never triggers it (zero perf change).
 
-  /** Memoized lib-backed `{ sf, checker }`, built on first inference query. */
-  let libTier: { sf: TS.SourceFile; checker: TS.TypeChecker } | null = null;
+  /** Memoized lib-backed `{ prog, checker }`, built on first inference query. */
+  let libTier: { prog: TS.Program; checker: TS.TypeChecker } | null = null;
 
   /** Resolve a requested lib file name to its on-disk path in `TS_LIB_DIR`. */
   function libPath(f: string): string | undefined {
@@ -222,13 +330,16 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
     return existsSync(cand) ? cand : undefined;
   }
 
-  function libProgram(): { sf: TS.SourceFile; checker: TS.TypeChecker } {
+  function libProgram(): { prog: TS.Program; checker: TS.TypeChecker } {
     if (libTier) return libTier;
-    const libSf = ts.createSourceFile(ORACLE_FILE, source, ts.ScriptTarget.Latest, true);
+    // The lib-enabled program is multi-file too (each crate SourceFile + the libs),
+    // so cross-module inference resolves *through* imports (#68).
+    const libSfs = crateSfs(ts.ScriptTarget.Latest);
     const cache = new Map<string, TS.SourceFile>();
     const libHost: TS.CompilerHost = {
       getSourceFile: (f, langVersion) => {
-        if (f === ORACLE_FILE) return libSf;
+        const crate = libSfs.get(canon(f));
+        if (crate) return crate;
         const cached = cache.get(f);
         if (cached) return cached;
         const full = libPath(f);
@@ -242,15 +353,17 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
       writeFile: () => {},
       getCurrentDirectory: () => "",
       getDirectories: () => [],
-      fileExists: (f) => f === ORACLE_FILE || libPath(f) !== undefined,
+      fileExists: (f) => libSfs.has(canon(f)) || libPath(f) !== undefined,
       readFile: (f) =>
-        f === ORACLE_FILE ? source : (libPath(f) ? readFileSync(libPath(f)!, "utf8") : undefined),
-      getCanonicalFileName: (f) => f,
+        byKey.get(canon(f))?.source ??
+        (libPath(f) ? readFileSync(libPath(f)!, "utf8") : undefined),
+      getCanonicalFileName: (f) => canon(f),
       useCaseSensitiveFileNames: () => true,
       getNewLine: () => "\n",
+      resolveModuleNames,
     };
     const libProg = ts.createProgram(
-      [ORACLE_FILE],
+      normed.map((f) => f.key),
       // `strict` (→ `strictNullChecks`) is REQUIRED: without it `undefined` is
       // absorbed into every type, so a `.find(…)` → `T | undefined` collapses to
       // `T` and the nullish-union → `option` mapping never fires (INF5/INF8).
@@ -263,7 +376,7 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
       },
       libHost,
     );
-    libTier = { sf: libSf, checker: libProg.getTypeChecker() };
+    libTier = { prog: libProg, checker: libProg.getTypeChecker() };
     return libTier;
   }
 
@@ -296,15 +409,15 @@ export function createTypeOracle(source: string, structs: Set<string>): TypeOrac
   }
 
   function inferredRustType(start: number, end: number): RustType | null {
-    const { sf: libSf, checker: chk } = libProgram();
-    const node = findBySpan(libSf, start, end);
+    const { prog, checker: chk } = libProgram();
+    const node = nodeAt(prog, start, end);
     if (!node) return null;
     return inferValueType(chk.getTypeAtLocation(node), chk);
   }
 
   function inferredReturnRustType(start: number, end: number): RustType | null {
-    const { sf: libSf, checker: chk } = libProgram();
-    const node = findBySpan(libSf, start, end);
+    const { prog, checker: chk } = libProgram();
+    const node = nodeAt(prog, start, end);
     if (!node) return null;
     const sig = chk.getSignatureFromDeclaration(node as TS.SignatureDeclaration);
     if (!sig) return null;
