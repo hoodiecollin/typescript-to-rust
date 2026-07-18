@@ -10,19 +10,9 @@ import { describe, expect, test } from "bun:test";
 import { compileCrate } from "./_support/differential";
 
 describe("050d module fail-loud residuals", () => {
-  // ── MOD25 — a mixed logic + re-export file is not a pure barrel ────────────
-  test("MOD25 mixed barrel (re-export + own decl) → re-export outside a pure barrel", () => {
-    expect(() =>
-      compileCrate(
-        {
-          "math.ts": `export function add(a: number, b: number): number { return a + b; }`,
-          "mixed.ts": `export { add } from "./math";\nexport function extra(): number { return 1; }`,
-          "main.ts": `import { extra } from "./mixed";\nconsole.log(extra());`,
-        },
-        "main.ts",
-      ),
-    ).toThrow(/re-export outside a pure barrel/);
-  });
+  // MOD25 (a *named* re-export in a mixed file) is no longer fail-loud — it
+  // graduated to re-export lineage (#71); see the crate-inference suite. Only a
+  // **glob** `export * from` in a mixed file (MOD18) stays fail-loud (ambiguous).
 
   // ── MOD18 — `export * from` in a mixed file ───────────────────────────────
   test("MOD18 `export * from` in a mixed file → re-export outside a pure barrel", () => {

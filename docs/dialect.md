@@ -934,7 +934,7 @@ only the entry runs top-level statements, so there is no init-order hazard).
 | Trigger (fail-loud) | Kind | Message |
 |---|---|---|
 | an anonymous **value** `export default 42/{}` | Not yet | `anonymous value \`export default\` (only a named fn/class default has a Rust symbol)` |
-| a re-export (`export * from` / `export { x } from`) in a **mixed** (non-pure-barrel) file | Forbidden | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
+| a **glob** re-export (`export * from`) in a **mixed** (non-pure-barrel) file | Forbidden | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
 | dynamic `import("./x")` (`ImportExpression`) | Not yet | `dynamic \`import()\` (only static \`import\`/\`export\` are modeled)` |
 | a top-level statement in an **imported** (non-entry) module | Not yet | `top-level statement in an imported module (declarations only)` |
 | a non-declaration `namespace` member (statement / bare `const` / re-export) | Not yet | `namespace member must be a declaration …` |
@@ -947,6 +947,13 @@ does (`const p = new Point(1,2)` with an imported `Point`, or `` const g = `hi $
 over an imported `who()`, needs no annotation). Each module is given a disjoint offset
 window so a merged AST node routes back to its owning file + file-local span; tsc parses
 each file's original source, so the windows only touch the merged oxc AST.
+
+**Mixed re-export lineage (series 050, #71):** a **named** re-export in a *mixed* file
+(own declarations + `export { x } from "./y"`) is accepted — the file emits only its own
+declarations, and a consumer importing a re-exported name binds directly to the module
+that **defines** it (`use crate::<src>::x`), bypassing the re-exporter. The chain is
+chased through mixed intermediaries (a cycle is fail-loud). Only a **glob** `export *
+from` in a mixed file stays forbidden (ambiguous).
 
 ## JSON (bare `JSON.*` — forbidden, redirected to `@ttr/std`)
 

@@ -960,6 +960,67 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
   /** `import * as ns` alias names (050d) → seed the merged lowering's path roots. */
   const crateNamespaces = new Set<string>();
 
+  // ── Re-export lineage (#71) ───────────────────────────────────────────────
+  // A **mixed** file (own logic + `export { x } from "./y"`) is no longer fail-loud.
+  // Record each named re-export edge (`modKey → exportedName → real source`) so a
+  // consumer importing a re-exported name routes to the module that actually
+  // *defines* it, bypassing the re-exporter (which emits only its own decls). The
+  // chain is followed through mixed intermediaries; `export * from` in a mixed file
+  // stays fail-loud (glob is ambiguous — handled in the merge loop below).
+  const reexportEdges = new Map<
+    string,
+    Map<string, { targetMod: string[]; sourceName: string }>
+  >();
+  for (const m of modules) {
+    if (m.isEntry || isPureBarrel(m.program)) continue;
+    for (const stmt of m.program.body) {
+      const s = stmt as unknown as {
+        type: string;
+        source: { value: string } | null;
+        specifiers?: { local: { name: string }; exported: { name: string } }[];
+      };
+      if (s.type !== "ExportNamedDeclaration" || !s.source || !s.specifiers) {
+        continue;
+      }
+      const targetMod = m.resolved.get(s.source.value);
+      if (!targetMod) {
+        throw new UnsupportedError({
+          type: `unresolved re-export '${s.source.value}'`,
+        });
+      }
+      const key = modKeyOf(m);
+      const edges =
+        reexportEdges.get(key) ??
+        reexportEdges.set(key, new Map()).get(key)!;
+      for (const sp of s.specifiers) {
+        edges.set(sp.exported.name, { targetMod, sourceName: sp.local.name });
+      }
+    }
+  }
+  /** Chase a re-export chain to the module that actually defines `name`, bypassing
+   *  mixed intermediaries (#71). A cycle in the chain is fail-loud. */
+  const resolveReexport = (
+    modPath: string[],
+    name: string,
+  ): { modPath: string[]; name: string } => {
+    let mod = modPath;
+    let nm = name;
+    const seen = new Set<string>();
+    for (;;) {
+      const step = `${mod.join("/")}::${nm}`;
+      if (seen.has(step)) {
+        throw new UnsupportedError({
+          type: `re-export cycle resolving '${name}'`,
+        });
+      }
+      seen.add(step);
+      const edge = reexportEdges.get(mod.join("/"))?.get(nm);
+      if (!edge) return { modPath: mod, name: nm };
+      mod = edge.targetMod;
+      nm = edge.sourceName;
+    }
+  };
+
   for (const m of modules) {
     const uses = usesFor(modKeyOf(m));
     // A pure barrel (Axis 3) → a generated `pub use` facade module; it declares no
@@ -997,9 +1058,13 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
         }
         for (const spec of imp.specifiers) {
           if (spec.type === "ImportSpecifier" && spec.imported) {
-            uses.push(
-              crateUseLine(targetMod, spec.imported.name, spec.local.name),
-            );
+            // Route through re-export lineage (#71): if the imported name is a
+            // re-export of the target module, bind directly to the REAL source
+            // module (bypassing the mixed re-exporter) and mark the real definition
+            // crate-visible so `use crate::<src>::<name>` resolves.
+            const real = resolveReexport(targetMod, spec.imported.name);
+            exportedNames.add(real.name);
+            uses.push(crateUseLine(real.modPath, real.name, spec.local.name));
           } else if (spec.type === "ImportDefaultSpecifier") {
             // Default import → the reserved `__default_export` symbol, bound to the
             // local name via `as` (Axis 4, re-decided 2026-07-17).
@@ -1028,11 +1093,10 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
           source: { value: string } | null;
         };
         if (exp.source) {
-          // A re-export (`export { x } from "./y"`) — a facade only inside a pure
-          // barrel (Axis 3, series 050d); a mixed logic+re-export file is ambiguous.
-          throw new UnsupportedError({
-            type: "re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)",
-          });
+          // A named re-export (`export { x } from "./y"`) in a mixed file (#71) —
+          // its lineage was recorded in the pre-pass; consumers route to the real
+          // source, so the re-exporter itself emits nothing for it here.
+          continue;
         }
         if (exp.declaration) {
           const name = crateDeclName(exp.declaration);

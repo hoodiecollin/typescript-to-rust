@@ -254,7 +254,7 @@ default-deny) via new `checkForbiddenFlags`-style guards:
 | Shape | Node | Kind | Message |
 |---|---|---|---|
 | anonymous **value** default export | `ExportDefaultDeclaration` of a non-fn/class | Not yet | `anonymous value \`export default\` (only a named fn/class default has a Rust symbol)` |
-| re-export in a **mixed** (non-pure-barrel) file | `ExportAllDeclaration`; `ExportNamedDeclaration` with a non-null `.source` **outside a pure barrel** | Forbidden | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
+| ~~re-export in a **mixed** file~~ **named** case LIFTED by #71 (lineage rewrite — consumer routes to the real source); only a **glob** `ExportAllDeclaration` in a mixed file stays Forbidden | `ExportAllDeclaration` outside a pure barrel | Forbidden (glob only) | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
 | dynamic import | `ImportExpression` | Not yet | `dynamic \`import()\`` |
 | bare/package import | `ImportDeclaration` whose `.source` has no leading `.` | Not yet | `bare/package import (only \`./\`-relative imports; no node_modules)` |
 | top-level statement in an imported module | any non-declaration at a non-entry file's top level | Not yet | `top-level statement in an imported module (declarations only)` |

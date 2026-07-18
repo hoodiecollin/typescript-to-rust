@@ -55,4 +55,60 @@ console.log(s + 1);`,
     },
     expected: "6",
   },
+  {
+    // #71 — a *named* re-export in a **mixed** file (own logic + re-export) is no
+    // longer fail-loud: a consumer routes the re-exported name to the REAL source
+    // module, and the mixed file emits only its own declarations.
+    name: "RXP1 mixed file re-export routes the consumer to the real source",
+    files: {
+      "source.ts": `export function real(): number { return 42; }`,
+      "mixed.ts": `export function own(): number { return 1; }
+export { real } from "./source";`,
+      "main.ts": `import { own, real } from "./mixed";
+console.log(own() + real());`,
+    },
+    expected: "43",
+    extra: ({ files }) => {
+      const main = files?.find((f) => f.path === "main.rs")?.content ?? "";
+      // The re-exported name binds to the real source, bypassing the mixed module.
+      expect(main).toContain("use crate::source::real;");
+      const mixed = files?.find((f) => f.path === "mixed.rs")?.content ?? "";
+      expect(mixed).toContain("fn own");
+      expect(mixed).not.toContain("fn real");
+    },
+  },
+  {
+    // #71 — the chain is followed through a mixed intermediary to the definition.
+    name: "RXP2 transitive re-export chased through a mixed intermediary",
+    files: {
+      "z.ts": `export function deep(): number { return 7; }`,
+      "mid.ts": `export function midOwn(): number { return 2; }
+export { deep } from "./z";`,
+      "mixed.ts": `export function own(): number { return 1; }
+export { deep } from "./mid";`,
+      "main.ts": `import { deep } from "./mixed";
+console.log(deep());`,
+    },
+    expected: "7",
+    extra: ({ files }) => {
+      const main = files?.find((f) => f.path === "main.rs")?.content ?? "";
+      expect(main).toContain("use crate::z::deep;");
+    },
+  },
+  {
+    // #71 — a renamed re-export in a mixed file resolves to the original name.
+    name: "RXP3 renamed re-export in a mixed file",
+    files: {
+      "source.ts": `export function real(): number { return 42; }`,
+      "mixed.ts": `export function own(): number { return 1; }
+export { real as aliased } from "./source";`,
+      "main.ts": `import { aliased } from "./mixed";
+console.log(aliased());`,
+    },
+    expected: "42",
+    extra: ({ files }) => {
+      const main = files?.find((f) => f.path === "main.rs")?.content ?? "";
+      expect(main).toContain("use crate::source::real as aliased;");
+    },
+  },
 ]);
