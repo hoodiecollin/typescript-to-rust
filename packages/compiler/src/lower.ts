@@ -661,6 +661,34 @@ function extractNamespaces(program: Program): {
 }
 
 /**
+ * The `mod prelude { pub(crate) use … }` re-export lines (series 050d, Axis 5):
+ * every crate-visible (`pub`/`pub(crate)`) item across the library (non-entry,
+ * non-facade, non-inline) module files, gathered so each file can `use
+ * crate::prelude::*;` and cut `use` noise. Name-routing only → differential-neutral.
+ * A name exported by **more than one** module is ambiguous in a single prelude
+ * module (E0252), so it is dropped — those keep their explicit per-file `use`. The
+ * re-export is `pub(crate) use` (not `pub use`): the items are `pub(crate)`, and
+ * Rust forbids `pub use` re-exporting one beyond the crate (E0364).
+ */
+function buildPrelude(mods: HirMod[]): string[] {
+  const byName = new Map<string, string[] | null>();
+  for (const m of mods) {
+    if (m.facade || m.inline) continue;
+    for (const it of m.items) {
+      const name = (it as { name?: string }).name;
+      const vis = (it as { vis?: string }).vis;
+      if (!name || (vis !== "pub" && vis !== "pub(crate)")) continue;
+      byName.set(name, byName.has(name) ? null : m.modPath);
+    }
+  }
+  const lines: string[] = [];
+  for (const [name, modPath] of byName) {
+    if (modPath) lines.push(`pub(crate) use ${["crate", ...modPath].join("::")}::${name};`);
+  }
+  return lines;
+}
+
+/**
  * A **pure barrel** (series 050d, Axis 3): a non-entry module whose body is *only*
  * `./`-relative re-exports (`export { x } from "./y"` / `export * from "./y"`), no
  * runtime logic or own declarations. It translates to a generated `pub use` facade
@@ -1083,6 +1111,28 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
   // routes as `Foo::bar` crate-wide). They render within the root file, not as
   // their own source file.
   if (lowered.mods) mods.push(...lowered.mods);
+
+  // Prelude generation (series 050d, Axis 5): gather the library modules' crate-
+  // visible items into an inline `mod prelude { pub(crate) use … }` and glob it
+  // into each library module file (`use crate::prelude::*;`), cutting `use` noise.
+  // A local definition shadows the same-named glob (glob is lower priority), so the
+  // re-import is harmless; the prelude drops cross-module name collisions. Emitted
+  // only when there is something to gather.
+  const preludeLines = buildPrelude(mods);
+  if (preludeLines.length > 0) {
+    for (const mm of mods) {
+      if (mm.facade || mm.inline) continue;
+      mm.uses = ["use crate::prelude::*;", ...mm.uses];
+    }
+    mods.push({
+      kind: "mod",
+      name: "prelude",
+      modPath: ["prelude"],
+      uses: preludeLines,
+      items: [],
+      inline: true,
+    });
+  }
 
   return {
     ...lowered,
