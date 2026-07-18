@@ -22,7 +22,7 @@ Every rejection is one of two kinds:
 
 - **Forbidden** (`DialectError`) — *fix your input.* The construct is outside the
   accepted dialect and will **never** be translated as written (e.g. `any`,
-  decorators, `abstract`). Change the code.
+  `unknown`, decorators, `declare`, Proxy/Reflect). Change the code.
 - **Not yet** (`UnsupportedError`) — *in the dialect, not built.* The construct is
   intended to work eventually but the compiler does not lower it today. It may
   graduate in a later series. The workaround is to rewrite into a supported shape.
@@ -31,36 +31,36 @@ The distinction lives in [`packages/compiler/src/errors.ts`](../packages/compile
 The **error message string is the stable anchor** — line numbers drift, messages
 don't. Each row below quotes the message the compiler prints.
 
-> **Census + reconciliation note (2026-07-18, housekeeping #81).** A ground-truth
-> sweep of the actual throw sites found: **16 `DialectError` sites** (~12 distinct
-> "Forbidden" walls) and **354 `UnsupportedError` sites** (`lower.ts` 319, `validate.ts`
-> 9, `regex-translate.ts` 8, `task-escape.ts` 5, `crate.ts` 5, `numeric.ts` 4,
-> `bitwise.ts` 2, `rc.ts` 1, `emitter.ts` 1). Two alignment items are **pending
-> decision under [#80](https://github.com/hoodiecollin/typescript-to-rust/issues/80)**
-> (reconsider the "permanent" walls as dialect exclusions — memory-model /
-> `needs-user-input`, so not reclassified here unilaterally):
+> **Census + reconciliation note (2026-07-18, housekeeping #81 → #80).** A ground-truth
+> sweep found **16 `DialectError`** and **354 `UnsupportedError`** throw sites; the
+> [#80](https://github.com/hoodiecollin/typescript-to-rust/issues/80) re-examination then
+> **reclassified 9 walls** forbidden → deferral, leaving **7 `DialectError`** (permanent)
+> and **363 `UnsupportedError`** (deferral) sites.
 >
-> 1. **Kind mismatch on the ownership residuals.** `alias-escape.ts:607` and
->    `rc.ts:422/668/808` throw `DialectError` (permanent) yet their own messages call
->    themselves "fail-loud residuals" (series 086/062/077) intended to graduate. `#80`
->    must decide whether these stay permanent or become `UnsupportedError`. The
->    `rc.ts:422` re-entrant-`Rc<RefCell>` row below is tabled "Not yet" but the code
->    throws `DialectError` — same open question.
-> 2. **Glob re-export** (`export * from` in a mixed file) is tabled **Forbidden** but
->    the code throws `UnsupportedError` (deferrable). Decide the intended kind.
+> - **Reclassified → deferral (`UnsupportedError`):** async generators, generator
+>   methods / expressions, `for await`, `abstract` classes, and the four ownership/borrow
+>   residuals (`rc.ts:422/668/808`, `alias-escape.ts:607`). `await using` too — deferral,
+>   low-priority, **opt-in experimental** ([#84](https://github.com/hoodiecollin/typescript-to-rust/issues/84)).
+>   Their rows below now read **"Not yet"**.
+> - **Stay permanent (`DialectError`):** `any`, `unknown`, decorators, `declare`,
+>   **Proxy / Reflect** (metaprogramming, no sound target — policy exclusion, not yet a
+>   dedicated site), an unrecognized `"use …"` directive (`lower.ts:2473`), and assignment
+>   to a `readonly` field (`lower.ts:9812`).
+> - **Glob re-export** (`export * from` in a mixed file): the code throws
+>   `UnsupportedError` — a deferral; its row is corrected to "Not yet" below.
 >
-> **Undocumented rejection sites to add** once the above is settled: `bitwise.ts:95`
-> (fractional literal as a bitwise operand), `bitwise.ts:109` (negative shift count),
-> `lower.ts:9812` (assignment to a `readonly` field), the two `rc.ts` mutate-during-
-> iteration sites, `alias-escape.ts:607`, and the `crate.ts` module-resolver I/O
-> errors.
+> **Sites still undocumented as their own rows** (all deferrals): `bitwise.ts:95`
+> (fractional literal as a bitwise operand), `bitwise.ts:109` (negative shift count), the
+> two `rc.ts` mutate-during-iteration residuals, `alias-escape.ts:607`, and the `crate.ts`
+> module-resolver I/O errors.
 
 ## The two gates (where rejection happens)
 
 1. **Validator** (`validate.ts`) — a whole-tree walk run first. It enforces the
    parse-level allowlist (default-deny: any AST node type not modeled is rejected),
-   the forbidden *types* (`any`/`unknown`), and forbidden *flags*
-   (`async function*`, `for await`, decorators, `abstract`, `declare`, …).
+   the forbidden *types* (`any`/`unknown`), the permanent *flags* (decorators,
+   `declare`), and the deferral *flags* (`async function*`, `for await`,
+   `await using`, `abstract` — "Not yet", #80).
 2. **Lowering** (`lower.ts`, with `numeric.ts` refinement) — the single semantic
    gate. Everything that is syntactically modeled but cannot be soundly lowered in
    a given *shape* is rejected here.
@@ -257,8 +257,8 @@ A **named, non-async `function*`** annotated `Generator<T>` /
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `async function*` (async generator) | Forbidden | `async generator functions (`async function*`)` |
-| Generator method or generator *expression* (`function*` not a top-level decl) | Forbidden | `generator methods / expressions (`function*`)` |
+| `async function*` (async generator) | Not yet | `` `async function*` (async generator — needs `Stream`, out of std) `` |
+| Generator method or generator *expression* (`function*` not a top-level decl) | Not yet | `` generator methods / expressions (`function*` not a top-level declaration) `` |
 | Anonymous generator | Not yet | generic `Unsupported <node>` |
 | Generator with no `Generator<T>` / `IterableIterator<T>` return annotation | Not yet | `generator without a `Generator<T>` / `IterableIterator<T>` return annotation` |
 | That annotation missing its item type argument | Not yet | `generator without an item type` |
@@ -321,7 +321,7 @@ A user `static new` that would collide with the synthesized `new()` is fail-loud
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `abstract class` | Forbidden | `` `abstract` classes `` |
+| `abstract class` | Not yet | `` `abstract` classes (in-dialect, not yet lowered to a trait + impls) `` |
 | Anonymous class | Not yet | `anonymous class` |
 | `implements` a *behavioral* interface → `impl I<Name> for C` (series 071); a *pure-data* interface → field-shape assertion (plain struct, no trait) | Modeled | — |
 | `class extends` a non-identifier / non-declared base | Not yet | `class extends a non-identifier base` / `class extends '<name>' which is not a declared class` |
@@ -495,7 +495,7 @@ Supported: `if`, `while`, C-style `for`, `for-of`, `switch`, `break`, `continue`
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `for await (…)` async iteration | Forbidden | `` `for await` async iteration `` |
+| `for await (…)` async iteration | Not yet | `` `for await` async iteration (needs the async-iteration/`Stream` lowering) `` |
 | Labeled `break` | Not yet | `labeled break` |
 | Labeled `continue` | Not yet | `labeled continue` |
 | `for-of` with more than one binding declaration | Not yet | `for-of with a non-single binding` |
@@ -617,7 +617,7 @@ The task-escape pass (`refineTaskEscape`) only emits shapes it can prove
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `await using` (async resource disposal) | Forbidden | `` `await using` (async resource disposal) `` |
+| `await using` (async resource disposal) | Not yet | `` `await using` (async resource disposal — opt-in experimental, see #84) `` |
 | `Promise.all` / `Promise.allSettled` argument that is neither an array literal nor `arr.map(f)` | Not yet | `Promise.all/allSettled argument must be an array literal or arr.map(f)` |
 | Heterogeneous `Promise.race` (arms don't unify to one type) | Not yet | `heterogeneous Promise.race (select! arms must unify to one type)` |
 | `.then` with a reject handler (two-arg `.then(onOk, onErr)`) | Not yet | `` `.then` with a reject handler (two-arg) — catch territory `` |
@@ -1201,21 +1201,26 @@ identifiers (`r#match`), but three keywords cannot be.
 
 ---
 
-## Forbidden flags & meta (validator)
+## Validator flag rejections
 
-Rejected wherever they appear, regardless of feature:
+Rejected wherever they appear, regardless of feature. Since #80's re-examination the
+async/generator/`abstract` rows are **deferrals** ("Not yet"), not permanent walls;
+`any`/`unknown`/decorators/`declare` remain **permanent** ("Forbidden"). (Proxy/Reflect
+are permanent policy exclusions but not yet a dedicated validator flag; assignment to a
+`readonly` field is a permanent `lower.ts` check, not a validator flag — see the census
+note at the top.)
 
 | Trigger | Kind | Message |
 |---------|------|---------|
 | `any` type | Forbidden | `` `any` type `` |
 | `unknown` type | Forbidden | `` `unknown` type `` |
 | Decorators (`@decorator`) | Forbidden | `decorators (`@decorator`)` |
-| `abstract` class | Forbidden | `` `abstract` classes `` |
 | `declare` (ambient) declarations | Forbidden | `` `declare` (ambient) declarations `` |
-| `async function*` | Forbidden | `async generator functions (`async function*`)` |
-| Generator method / expression | Forbidden | `generator methods / expressions (`function*`)` |
-| `for await` | Forbidden | `` `for await` async iteration `` |
-| `await using` | Forbidden | `` `await using` (async resource disposal) `` |
+| `abstract` class | Not yet | `` `abstract` classes (in-dialect, not yet lowered to a trait + impls) `` |
+| `async function*` | Not yet | `` `async function*` (async generator — needs `Stream`, out of std) `` |
+| Generator method / expression | Not yet | `` generator methods / expressions (`function*` not a top-level declaration) `` |
+| `for await` | Not yet | `` `for await` async iteration (needs the async-iteration/`Stream` lowering) `` |
+| `await using` | Not yet | `` `await using` (async resource disposal — opt-in experimental, see #84) `` |
 
 ---
 
