@@ -894,12 +894,58 @@ env / process / stdin / async fs / HTTP — see
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| An import from any specifier other than `@t2r/std` (bare/relative modules — 050 unshipped) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module (bare/relative module imports are not yet supported)` |
+| An import from any specifier other than `@t2r/std` **in the single-file path** (a `./`-relative import reached without the crate resolver) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module (bare/relative module imports are not yet supported)` — note: `./`-relative imports **are** shipped via the multi-file **crate** resolver (`lowerCrate`, series 050); this single-file `validate` message only fires when a relative import is compiled outside a crate entry (see [Modules](#modules-importexport-series-050)) |
 | An `@t2r/std` import of a name it does not export | Not yet | `'<name>' is not exported by "@t2r/std" (Tier A exports: parseJson, stringifyJson)` |
 | A non-named import form from `@t2r/std` (default/namespace) | Not yet | `unsupported import form from "@t2r/std" (only named imports are recognized)` |
 | `parseJson` with no explicit type argument | Not yet | `` `parseJson<T>` needs an explicit modeled type argument (`parseJson<Point>(s)`)… `` |
 | `parseJson<T>` where `T` is not a modeled struct/enum/primitive/array/record | Not yet | `` `parseJson<T>` needs a modeled struct/enum type argument… `` / `'<T>' is not a modeled struct/enum…` |
 | `.<prop>` on a `parseJson` result other than `.ok`/`.value`/`.error` | Not yet | `` `.<prop>` on a parseJson result — only `.ok`, `.value`, `.error` are available `` |
+
+## Modules (`import`/`export`, series 050)
+
+A multi-file program is a **single Rust crate**: the CLI/harness takes an **entry**
+file and follows its `./`-relative `import`s transitively (a resolver + cycle-
+terminating visited set), lowering the whole graph as **one compilation unit** →
+**one binary, one stdout** to diff. Each TS file → a real Rust source file
+(`./math.ts` → `src/math.rs`, `./util/math.ts` → `src/util/math.rs`); the crate root
+(`main.rs`) carries the entry items + `fn main` + the `pub(crate) mod …;` edges. A
+single file with **no** `import`/`export` still emits via the inline fast path
+(byte-unchanged). **The gate is pre-`validate`:** `lowerCrate` strips the module
+plumbing while merging, and `namespace` blocks are extracted before the dialect gate
+— so `Export*`/`TSModuleDeclaration` are **not** in `MODELED`; the fail-loud module
+shapes reject in `lowerCrate`/`extractNamespaces` with dedicated messages.
+
+| Shape | Rust |
+|---|---|
+| `export function f` / `class C` / `interface S` / `enum E` | inferred `pub`/`pub(crate)` item (visibility inference, Axis 1) |
+| `import { f } from "./x"` / `import { f as g }` | `use crate::x::f;` / `use crate::x::f as g;` |
+| a signature-reachable non-exported type | widened to `pub(crate)` (Rust's `private_interfaces` rule) |
+| a **pure barrel** `index.ts` (only `./`-relative re-exports) | a generated `pub(crate) use` **facade** module (Axis 3); `export { x as y } from` → `… as y;` |
+| `export default <fn/class>` (named) | the item + `pub(crate) use self::<name> as __default_export;` |
+| `export default function () {…}` (anonymous fn/class) | a named item `__default_export` |
+| `import def from "./d"` (default import) | `use crate::d::__default_export as def;` |
+| `import * as ns from "./n"` (namespace import) | `use crate::n as ns;`; `ns.f()` → `ns::f()` |
+| `namespace Foo { export … }` | an inline `mod Foo { pub … }`; `Foo.bar()` → `Foo::bar()`; a reopened namespace coalesces |
+| (generated) prelude | an inline `mod prelude { pub(crate) use … }` gathering library exports; module files `use crate::prelude::*;` |
+
+An **import cycle** (`A ↔ B`) is **accepted** (sibling `mod`s are mutually visible;
+only the entry runs top-level statements, so there is no init-order hazard).
+
+| Trigger (fail-loud) | Kind | Message |
+|---|---|---|
+| an anonymous **value** `export default 42/{}` | Not yet | `anonymous value \`export default\` (only a named fn/class default has a Rust symbol)` |
+| a re-export (`export * from` / `export { x } from`) in a **mixed** (non-pure-barrel) file | Forbidden | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
+| dynamic `import("./x")` (`ImportExpression`) | Not yet | `dynamic \`import()\` (only static \`import\`/\`export\` are modeled)` |
+| a top-level statement in an **imported** (non-entry) module | Not yet | `top-level statement in an imported module (declarations only)` |
+| a non-declaration `namespace` member (statement / bare `const` / re-export) | Not yet | `namespace member must be a declaration …` |
+| a bare/package import (`import x from "lodash"`) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module …` |
+
+**Crate-merge oracle-inference gap (residual):** `lowerCrate` lowers a *synthetic
+merged* program (spliced from N files, no coherent source), so the 099 type-oracle is
+absent there — a **cross-module** untyped `new`/builtin-call binding needs an explicit
+annotation (`const p: Point = new Point(1,2)`), the pre-099 baseline. Same-file
+inference in a single-file program is unaffected. Per-module oracle threading is a
+follow-on.
 
 ## JSON (bare `JSON.*` — forbidden, redirected to `@t2r/std`)
 
@@ -1163,15 +1209,20 @@ The currently-modeled node types are:
 `TSUnionType` · `TSUndefinedKeyword` · `TSNullKeyword` · `TSAnyKeyword` ·
 `TSUnknownKeyword` · `ImportDeclaration` · `ImportSpecifier`.
 
-`ImportDeclaration`/`ImportSpecifier` are modeled **only** for the `@t2r/std`
+In `MODELED`, `ImportDeclaration`/`ImportSpecifier` are gated for the `@t2r/std`
 std-shim (series 084) — a guard rejects any other specifier and any unknown
-`@t2r/std` name. General module imports (050) remain unshipped.
+`@t2r/std` name. **General `./`-relative module imports (series 050) are shipped**,
+but through the **crate** path: `lowerCrate` strips `Import*`/`Export*` while merging
+and `extractNamespaces` pulls `namespace` blocks out — both **before** `validate` —
+so `Export*` and `TSModuleDeclaration` never reach the gate and are deliberately
+**not** in `MODELED` (see [Modules](#modules-importexport-series-050)).
 
 Notable node types **not** modeled (rejected at the gate): `EmptyStatement`,
 `DebuggerStatement`, `DoWhileStatement`, `WithStatement`, `SequenceExpression`,
 `UpdateExpression`, `TaggedTemplateExpression`, `TemplateLiteral`,
-`TSAsExpression`, `RestElement`, `MetaProperty`, `ImportExpression`, `export`
-syntax, and every `import` *except* the modeled `@t2r/std` std-shim (series 084).
+`TSAsExpression`, `RestElement`, `MetaProperty`, and `ImportExpression` (dynamic
+`import()`). `export` syntax / `namespace` / non-`@t2r/std` `import`s are handled
+**pre-`validate`** in the crate + namespace paths (series 050), not at this gate.
 
 ---
 

@@ -70,15 +70,22 @@ single-file fast path) and compares stdout against Bun running the same TS progr
 - **MOD25** (fail-loud) a **mixed** barrel (a file with both a re-export
   `export { x } from "./y";` **and** its own runtime logic/decl) → rejected with the
   `re-export outside a pure barrel` message (ambiguous — not a pure facade).
-- **MOD26** (differential) a `namespace Foo { export function bar(): number { … } }`
-  → `mod foo { pub fn bar … }`; `Foo.bar()` → `foo::bar()`; compiles and behaves
-  (Axis 4).
-- **MOD27** (differential) a **reopened** namespace (`namespace Foo { … }` declared
-  twice) is **coalesced** into one `mod foo`; both members resolve; compiles and
-  behaves.
-- **MOD28** (shape) prelude-module generation: a crate with common exports emits a
-  `mod prelude { pub use … }` and generated module files `use crate::prelude::*;`;
-  compiles (differential-neutral name routing).
+- **MOD20** (differential) a **namespace import** `import * as m from "./math"` →
+  a Rust **module alias** `use crate::math as m;`, with member access `m.add()`
+  routed to the path `m::add()` — TS `import *` is *qualified* access, not an
+  unqualified glob, so there is no capture (re-decided 2026-07-17). Behaves.
+- **MOD26** (differential) a `namespace Geometry { export function square(n): number
+  { … } }` → an inline `mod Geometry { pub fn square … }`; `Geometry.square()` →
+  `Geometry::square()`; compiles and behaves (Axis 4).
+- **MOD26b** (differential) a namespace member calling a **sibling** member
+  (`quad` calls `dbl`) resolves as an intra-`mod` bare call; behaves.
+- **MOD27** (differential) a **reopened** namespace (`namespace M { … }` declared
+  twice) is **coalesced** into one inline `mod M`; both members resolve; compiles
+  and behaves.
+- **MOD28** (shape) prelude-module generation: a crate's library exports are
+  gathered into a generated inline `mod prelude { pub(crate) use … }` and each
+  library module file globs it (`use crate::prelude::*;`); compiles + behaves
+  (differential-neutral name routing; a cross-module name collision is dropped).
 
 ## Fail-loud residuals (`packages/compiler/tests/module-failloud.test.ts`)
 
@@ -87,14 +94,14 @@ single-file fast path) and compares stdout against Bun running the same TS progr
 - **MOD18** (fail-loud) `export * from "./barrel";` in a **mixed** (non-pure-barrel)
   file → rejected with the `re-export outside a pure barrel` message. (A pure-barrel
   `export *` with an enumerable source set is a facade glob, not a residual.)
-- **MOD19** (fail-loud) `import def from "./d";` (default import,
-  `ImportDefaultSpecifier`) → rejected.
-- **MOD20** (fail-loud) `import * as ns from "./n";` (**user-facing** namespace
-  import) → rejected (glob binding risks silent name capture).
 - **MOD21** (fail-loud) dynamic `import("./x")` (`ImportExpression`) → rejected.
 
-> **Removed residual:** the old MOD22 (`export { x } from "./y";` rejected as a
-> barrel) and the old renamed-export residual are **lifted** — a pure-barrel re-export
-> is now the MOD23/MOD24 facade path; only a **mixed**-file re-export stays fail-loud
-> (MOD25). Import cycles remain **accepted** (MOD7), not a residual.
+> **Lifted residuals (now supported):** MOD19 (`import def from "./d";` default
+> import) and MOD20 (`import * as ns` namespace import) were **re-decided
+> 2026-07-17 → supported** — MOD19 rides the reserved `__default_export` symbol
+> (see `module-default.test.ts`); MOD20 is the module-alias path route above.
+> The old MOD22 (`export { x } from "./y";` rejected as a barrel) and the old
+> renamed-export residual are also **lifted** — a pure-barrel re-export is now the
+> MOD23/MOD24 facade path; only a **mixed**-file re-export stays fail-loud (MOD25).
+> Import cycles remain **accepted** (MOD7), not a residual.
 </invoke>

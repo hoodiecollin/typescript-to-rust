@@ -1,5 +1,15 @@
 # 050 — Module system (`import` / `export`) — design
 
+> **✅ SHIPPED (2026-07-17) — all four slices (050a–d) are green and merged.**
+> Multi-file crate emission, `pub(crate)` visibility inference, pure-barrel `pub use`
+> facades, default import/export (`__default_export`), namespace imports (module
+> alias), `namespace`→inline `mod`, and prelude generation all land. Fail-loud
+> residuals: anonymous **value** `export default`, **mixed** re-export files, dynamic
+> `import()`, bare/package imports, top-level statements in imported modules,
+> non-declaration namespace members, and the crate-merge oracle-inference gap
+> (annotate cross-module untyped `new`/builtin bindings). See specs.md for the MOD
+> catalog and the "Fail-loud residuals" section below.
+
 > **✅ RESOLVED (2026-07-16) — see the Decisions section below.** Collin's redecision
 > on all five axes (from `options.md`) has landed; this doc is now the **resolved
 > design**, and it **supersedes the issue-#6 2026-07-07 baseline** (mechanical inline
@@ -243,13 +253,32 @@ default-deny) via new `checkForbiddenFlags`-style guards:
 
 | Shape | Node | Kind | Message |
 |---|---|---|---|
-| default export | `ExportDefaultDeclaration` | Forbidden | `` `export default` (no named Rust analog) `` |
+| anonymous **value** default export | `ExportDefaultDeclaration` of a non-fn/class | Not yet | `anonymous value \`export default\` (only a named fn/class default has a Rust symbol)` |
 | re-export in a **mixed** (non-pure-barrel) file | `ExportAllDeclaration`; `ExportNamedDeclaration` with a non-null `.source` **outside a pure barrel** | Forbidden | `re-export outside a pure barrel (a mixed logic + re-export file is ambiguous)` |
-| default import | `ImportDefaultSpecifier` | Not yet | `default import (named imports only)` |
-| **user-facing** namespace import | `ImportNamespaceSpecifier` | Not yet | `namespace import (`import * as ns`) — glob binding risks silent name capture` |
-| dynamic import | `ImportExpression` | Not yet | `dynamic `import()`` |
-| bare/package import | `ImportDeclaration` whose `.source` has no leading `.` | Not yet | `bare/package import (only `./`-relative imports; no node_modules)` |
+| dynamic import | `ImportExpression` | Not yet | `dynamic \`import()\`` |
+| bare/package import | `ImportDeclaration` whose `.source` has no leading `.` | Not yet | `bare/package import (only \`./\`-relative imports; no node_modules)` |
 | top-level statement in an imported module | any non-declaration at a non-entry file's top level | Not yet | `top-level statement in an imported module (declarations only)` |
+| non-declaration namespace member | a statement / bare `const` / re-export inside `namespace Foo { … }` | Not yet | `namespace member must be a declaration …` |
+
+> **SHIPPED note — default import/export and namespace import are supported**
+> (re-decided 2026-07-17; the old "default import"/"namespace import → Not yet" rows
+> are removed). A `fn`/`class` `export default` rides the reserved
+> `__default_export` symbol; `import def from "./d"` binds it. `import * as ns from
+> "./n"` → `use crate::n as ns;` with `ns.x` routed to `ns::x`. Only an anonymous
+> **value** default stays fail-loud (row above).
+
+> **IMPLEMENTATION note — the actual gate diverges from "add to `MODELED`".** Modules
+> are gated **before** `validate`, not through it: (1) `lowerCrate` strips every
+> `./`-relative `Import*`/`Export*` node while building the merged program, so the
+> merged program `validate` sees carries no module plumbing (the fail-loud module
+> shapes are rejected in `lowerCrate` with the dedicated messages above, not by the
+> default-deny); (2) `namespace` blocks are pulled out by `extractNamespaces` in
+> `lower()` **before** `validate`, so the gate never sees `TSModuleDeclaration` or
+> its inner `export`s. The only module node actually in `MODELED` is the pre-existing
+> `ImportDeclaration`/`ImportSpecifier` pair (from the 084 `@t2r/std` shim);
+> `ImportExpression` keeps its dedicated reject in `validate`. So `Export*` and
+> `TSModuleDeclaration` are **not** added to `MODELED` — the design's original
+> "`MODELED` gains …" plan is superseded by this pre-validate handling.
 
 > **Note — renamed export is no longer a residual.** Axis 3 accepts `export { x as y }`
 > (same-file → `pub use self::x as y;`; in a pure barrel → `pub use crate::z::x as y;`),

@@ -455,8 +455,11 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
       error enums; classes/interfaces/records/control-flow deferrals) rather
       than starting new fixture areas. The error trio landed 2026-07-06 —
       `try`/`catch`/`finally` (021), custom error types → `Box<dyn Error>` (022),
-      throw-in-method/ctor (023). `09_modules` (`export`) is now the only
-      `test.todo` fixture (backlogged).
+      throw-in-method/ctor (023). `09_modules` (`import`/`export`) **shipped
+      2026-07-17** as series 050 (a–d): multi-file crate emission, `pub(crate)`
+      visibility inference, pure-barrel `pub use` facades, default import/export
+      via `__default_export`, namespace imports (module alias), `namespace`→inline
+      `mod`, and prelude generation. See `docs/work/_archive/050-module-system/`.
 
 The `tests/fixtures/**` tree enumerates these as `test.todo` targets; each flips
 to a real compile/behave test as the feature lands.
