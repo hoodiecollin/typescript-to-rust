@@ -31,6 +31,30 @@ The distinction lives in [`packages/compiler/src/errors.ts`](../packages/compile
 The **error message string is the stable anchor** — line numbers drift, messages
 don't. Each row below quotes the message the compiler prints.
 
+> **Census + reconciliation note (2026-07-18, housekeeping #81).** A ground-truth
+> sweep of the actual throw sites found: **16 `DialectError` sites** (~12 distinct
+> "Forbidden" walls) and **354 `UnsupportedError` sites** (`lower.ts` 319, `validate.ts`
+> 9, `regex-translate.ts` 8, `task-escape.ts` 5, `crate.ts` 5, `numeric.ts` 4,
+> `bitwise.ts` 2, `rc.ts` 1, `emitter.ts` 1). Two alignment items are **pending
+> decision under [#80](https://github.com/hoodiecollin/typescript-to-rust/issues/80)**
+> (reconsider the "permanent" walls as dialect exclusions — memory-model /
+> `needs-user-input`, so not reclassified here unilaterally):
+>
+> 1. **Kind mismatch on the ownership residuals.** `alias-escape.ts:607` and
+>    `rc.ts:422/668/808` throw `DialectError` (permanent) yet their own messages call
+>    themselves "fail-loud residuals" (series 086/062/077) intended to graduate. `#80`
+>    must decide whether these stay permanent or become `UnsupportedError`. The
+>    `rc.ts:422` re-entrant-`Rc<RefCell>` row below is tabled "Not yet" but the code
+>    throws `DialectError` — same open question.
+> 2. **Glob re-export** (`export * from` in a mixed file) is tabled **Forbidden** but
+>    the code throws `UnsupportedError` (deferrable). Decide the intended kind.
+>
+> **Undocumented rejection sites to add** once the above is settled: `bitwise.ts:95`
+> (fractional literal as a bitwise operand), `bitwise.ts:109` (negative shift count),
+> `lower.ts:9812` (assignment to a `readonly` field), the two `rc.ts` mutate-during-
+> iteration sites, `alias-escape.ts:607`, and the `crate.ts` module-resolver I/O
+> errors.
+
 ## The two gates (where rejection happens)
 
 1. **Validator** (`validate.ts`) — a whole-tree walk run first. It enforces the
