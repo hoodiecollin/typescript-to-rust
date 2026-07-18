@@ -3,10 +3,11 @@
  * validator). Drives the public `emit(...)` entry so the whole pipeline runs.
  *
  * Two rules under test:
- *   - Forbidden *flags* on modeled nodes (generator, `for await`, `using`,
- *     decorators, `abstract`, `declare`) → `DialectError`. These currently slip
- *     through and are silently mistranslated, so EF1–EF9 are RED until the real
- *     `validate` lands.
+ *   - Flagged rejections on modeled nodes. Since #80's wall re-examination these
+ *     split by kind: decorators + `declare` are **permanent** (`DialectError`);
+ *     async generators, `for await`, `await using`, and `abstract` classes are
+ *     in-dialect-but-unbuilt **deferrals** (`UnsupportedError`). Sync `using` is
+ *     supported (025 → `Drop`).
  *   - Default-deny on an unmodeled node *type* (enum, namespace, parameter
  *     property) → `UnsupportedError` ("not implemented yet").
  *
@@ -22,65 +23,70 @@ function compile(src: string): string {
   return emit(parseSync("t.ts", src).program as unknown as Program);
 }
 
-describe("024: forbidden flags → DialectError", () => {
+describe("024: flagged rejections — permanent (DialectError) vs deferral (UnsupportedError)", () => {
+  // #80 re-examined the flag-based walls: decorators + `declare` stay permanent
+  // (DialectError); async generators, `for await`, `await using`, and `abstract`
+  // classes are in-dialect-but-unbuilt and reclassified to deferrals
+  // (UnsupportedError). See docs/dialect.md and #80.
+  //
   // EF1: sync generators graduated to supported in series 025d — a straight-line
   // finite-yield `function*` → `impl Iterator` (see generators.test.ts). This
-  // shape (a non-yield body, no `Generator<T>` annotation) is still fail-loud,
-  // but now as an `UnsupportedError` (unimplemented shape), not a `DialectError`
-  // (forbidden). Async generators (EF2) remain forbidden.
+  // shape (a non-yield body, no `Generator<T>` annotation) is fail-loud as an
+  // `UnsupportedError` (unimplemented shape).
   test("EF1 sync generator with an unsupported shape is still rejected", () => {
     expect(() => compile(`function* g(): void { console.log("x"); }`)).toThrow(
       UnsupportedError,
     );
   });
 
-  test("EF2 async generator is rejected", () => {
+  test("EF2 async generator → deferral (needs Stream, out of std)", () => {
     expect(() =>
       compile(`async function* g(): void { console.log("x"); }`),
-    ).toThrow(DialectError);
+    ).toThrow(UnsupportedError);
   });
 
-  test("EF3 `for await` is rejected", () => {
+  test("EF3 `for await` → deferral (needs async-iteration lowering)", () => {
     expect(() =>
       compile(
         `async function f(xs: Array<number>): Promise<void> { for await (const x of xs) { console.log(x); } }`,
       ),
-    ).toThrow(DialectError);
+    ).toThrow(UnsupportedError);
   });
 
   // EF4: sync `using` graduated to supported in series 025 (→ `Drop`); see
-  // esoteric.test.ts. Only `await using` (async disposal) remains forbidden.
+  // esoteric.test.ts. `await using` (async disposal) is a deferral (opt-in
+  // experimental, #84), not accepted by default.
   test("EF4 sync `using` is now accepted (025 → Drop)", () => {
     expect(() =>
       compile(`function f(): void { using r = acquire(); }`),
     ).not.toThrow(DialectError);
   });
 
-  test("EF5 `await using` declaration is rejected", () => {
+  test("EF5 `await using` → deferral (opt-in experimental, #84)", () => {
     expect(() =>
       compile(
         `async function f(): Promise<void> { await using r = acquire(); }`,
       ),
-    ).toThrow(DialectError);
+    ).toThrow(UnsupportedError);
   });
 
-  test("EF6 class decorator is rejected", () => {
+  test("EF6 class decorator is rejected (permanent)", () => {
     expect(() => compile(`@sealed class C {}`)).toThrow(DialectError);
   });
 
-  test("EF7 method decorator is rejected", () => {
+  test("EF7 method decorator is rejected (permanent)", () => {
     expect(() => compile(`class C { @log m(): void {} }`)).toThrow(
       DialectError,
     );
   });
 
-  test("EF8 abstract class is rejected", () => {
+  test("EF8 abstract class → deferral (trait + impls once built)", () => {
     expect(() => compile(`abstract class C { m(): void {} }`)).toThrow(
-      DialectError,
+      UnsupportedError,
     );
   });
 
-  test("EF9 ambient `declare` is rejected", () => {
+  test("EF9 ambient `declare` is rejected (permanent)", () => {
     expect(() => compile(`declare const x: number;`)).toThrow(DialectError);
   });
 });

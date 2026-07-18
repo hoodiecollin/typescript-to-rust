@@ -1,6 +1,6 @@
 /**
  * Specs for series 077 — robust mutate-during-iteration over an aliased container
- * (issue #41, split from #38). Graduates the sole hard `DialectError` 062 left
+ * (issue #41, split from #38). Graduates the sole hard fail-loud 062 residual left
  * behind: iterating a field held in an `Rc<RefCell<T>>` alias closure while the
  * body mutates the *same* cell would `RefCell`-panic under the clean lowering
  * (a `borrow()` held across the body's `borrow_mut()`). This series rewrites it to
@@ -9,7 +9,8 @@
  *
  * Correctness bar: NEVER-PANIC + JS-semantics-faithful. Each behavioral spec
  * differential-matches (compile → `cargo run` → compare vs Bun-run TS). Fail-loud
- * residuals stay `DialectError`/cargo-loud, never a silent miscompile. IDs map to
+ * residuals stay fail-loud (`UnsupportedError`)/cargo-loud, never a silent
+ * miscompile. IDs map to
  * docs/work/077-mutate-during-iteration/specs.md.
  */
 
@@ -157,7 +158,7 @@ describe("077 mutate-during-iteration over an aliased container", () => {
   test("MDI10 fail-loud: an opaque add during Map iteration through the alias", () => {
     // The body mutates the iterated cell through an opaque `&mut self` method
     // (`b.grow()` inserts) — the emitter can't see/rewrite the insert to enqueue
-    // it, so a mid-iteration add can't be faithfully visited → DialectError.
+    // it, so a mid-iteration add can't be faithfully visited → UnsupportedError.
     const src = `class Grow {
   items: Map<string, number>;
   constructor() { this.items = new Map<string, number>(); }
@@ -173,7 +174,7 @@ console.log(a.items.size);`;
 
   test("MDI11 fail-loud: a non-Clone element container cannot be re-borrow-iterated", () => {
     // A field-pointer element (`fnPtr`) is non-`Clone` in our layer, so the
-    // per-step clone-out that releases the borrow is impossible → DialectError.
+    // per-step clone-out that releases the borrow is impossible → UnsupportedError.
     const src = `class Handlers {
   fns: Array<(x: number) => number>;
   constructor() { this.fns = []; }

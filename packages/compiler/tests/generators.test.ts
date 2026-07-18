@@ -15,7 +15,7 @@
 
 import { expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
-import { DialectError, UnsupportedError } from "../src/emitter";
+import { UnsupportedError } from "../src/emitter";
 
 const finite = `function* g(): Generator<number> {
   yield 1;
@@ -82,9 +82,11 @@ test("a generator without a `Generator<T>` return annotation fails loud", () => 
 });
 
 test("an async generator is rejected (needs Stream, out of std)", () => {
+  // #80: reclassified forbidden → deferral. In-dialect but unbuilt (reuses the
+  // 052 state machine + a `poll_next`/`Stream` template), so `UnsupportedError`.
   expect(() =>
     compile(`async function* g(): AsyncGenerator<number> {
   yield 1;
 }`),
-  ).toThrow(DialectError);
+  ).toThrow(UnsupportedError);
 });
