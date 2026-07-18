@@ -4,11 +4,14 @@
  *
  * The distinction is deliberate and user-facing (see validate.ts / lower.ts):
  *   - `DialectError` — "fix your input". The construct is *forbidden* by the
- *     accepted dialect subset (`any`/`unknown`, generators, `using`, decorators,
- *     …). It will not be translated as written.
+ *     accepted dialect subset and will never be translated as written: `any`/
+ *     `unknown`, decorators, `declare` (ambient), Proxy/Reflect, an unrecognized
+ *     `"use …"` directive, assignment to a `readonly` field.
  *   - `UnsupportedError` — "not implemented yet". The construct is *intended* but
- *     the compiler has not built it (a node type not yet modeled, or a modeled
- *     node in a shape lowering doesn't handle).
+ *     the compiler has not built it: a node type not yet modeled, a modeled node
+ *     in a shape lowering doesn't handle, or a feature whose lowering is designed
+ *     but unbuilt (async generators, `for await`, `abstract` classes, and the
+ *     ownership/borrow "fail-loud residuals"). These graduate in a later series.
  */
 
 /** Forbidden by the dialect — the input must change. */

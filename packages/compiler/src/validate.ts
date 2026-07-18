@@ -197,37 +197,55 @@ function isNode(x: unknown): x is AnyNode {
  * otherwise be silently dropped by lowering (the fail-loud hole this gate
  * closes). `@throws {DialectError}`.
  */
-function checkForbiddenFlags(n: AnyNode): void {
+function checkFlagRejections(n: AnyNode): void {
   if (
     (n.type === "FunctionDeclaration" || n.type === "FunctionExpression") &&
     n.generator === true
   ) {
-    // Async generators need `Stream` (out of std) → forbidden. A generator
-    // *method*/expression isn't modeled. A top-level sync `function*` declaration
-    // is supported for the finite-yield subset (series 025d) — its shape is
-    // enforced in lowering (`UnsupportedError` for the un-handled shapes), so it
-    // passes this flag gate.
+    // A top-level sync `function*` declaration is supported for the finite-yield
+    // subset (series 025d) — its shape is enforced in lowering. Async generators
+    // and generator *methods*/expressions are in-dialect but **unbuilt** (#80
+    // reclassified them from forbidden → deferral): async generators reuse the
+    // 052 state machine + a `poll_next`/`Stream` template; methods/expressions
+    // aren't modeled yet. Both are `UnsupportedError` (graduatable), not forbidden.
     if (n.async === true) {
-      throw new DialectError("async generator functions (`async function*`)");
+      throw new UnsupportedError({
+        type: "`async function*` (async generator — needs `Stream`, out of std)",
+      });
     }
     if (n.type === "FunctionExpression") {
-      throw new DialectError("generator methods / expressions (`function*`)");
+      throw new UnsupportedError({
+        type: "generator methods / expressions (`function*` not a top-level declaration)",
+      });
     }
   }
   if (n.type === "ForOfStatement" && n.await === true) {
-    throw new DialectError("`for await` async iteration");
+    // In-dialect, unbuilt (#80): needs the async-iteration / `Stream` lowering.
+    throw new UnsupportedError({
+      type: "`for await` async iteration (needs the async-iteration/`Stream` lowering)",
+    });
   }
-  // `await using` needs async disposal, which stable Rust's `Drop` can't express;
-  // it stays forbidden. Sync `using` → `Drop` is supported (series 025).
+  // `await using` (async disposal) has no clean Rust analog — stable Rust has no
+  // `AsyncDrop`. Deferral (#80); opt-in experimental support via an exit-injection
+  // desugar is tracked in #84. Sync `using` → `Drop` is supported (series 025).
   if (n.type === "VariableDeclaration" && n.kind === "await using") {
-    throw new DialectError("`await using` (async resource disposal)");
+    throw new UnsupportedError({
+      type: "`await using` (async resource disposal — opt-in experimental, see #84)",
+    });
   }
+  // Decorators — permanent exclusion (#80): metaprogramming, no sound target.
   if (Array.isArray(n.decorators) && n.decorators.length > 0) {
     throw new DialectError("decorators (`@decorator`)");
   }
+  // `abstract` classes — in-dialect, unbuilt (#80): map to a trait + concrete
+  // impls once built. Deferral, not forbidden.
   if (n.type === "ClassDeclaration" && n.abstract === true) {
-    throw new DialectError("`abstract` classes");
+    throw new UnsupportedError({
+      type: "`abstract` classes (in-dialect, not yet lowered to a trait + impls)",
+    });
   }
+  // `declare` (ambient) — permanent exclusion (#80): an ambient assertion with no
+  // referent in a self-contained (no-JS-runtime) translation; same family as `any`.
   if (n.declare === true) {
     throw new DialectError("`declare` (ambient) declarations");
   }
@@ -257,8 +275,9 @@ export function validate(program: Program): void {
     // 1. Forbidden types (`any`/`unknown`) — reject wherever they appear.
     const reason = FORBIDDEN_TYPES[n.type];
     if (reason) throw new DialectError(reason);
-    // 2. Forbidden flags on modeled nodes (generators, `using`, decorators, …).
-    checkForbiddenFlags(n);
+    // 2. Flagged rejections on modeled nodes — permanent (decorators, `declare`)
+    //    or deferral (async generators, `for await`, `await using`, `abstract`).
+    checkFlagRejections(n);
     // 2b. Dynamic `import()` (series 050) — an `ImportExpression` has no static
     //     Rust analog (runtime module loading); reject with a dedicated message
     //     rather than the generic default-deny below.
