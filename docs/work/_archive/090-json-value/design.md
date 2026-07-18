@@ -3,7 +3,7 @@
 Epic **#59** (the shared root behind several deferred residuals). Increment 1 only:
 the **JSON boundary** — untyped parse → a dynamic value, an explicit
 navigation/coercion surface, stringify back, and the static⇄dynamic crossings.
-Builds directly on series **084** (the `@t2r/std` shim lane + `ParseResult<T>`).
+Builds directly on series **084** (the `@ttr/std` shim lane + `ParseResult<T>`).
 
 ## What this is
 
@@ -13,10 +13,10 @@ Several deferred residuals share one missing capability: a value whose
 shape/depth isn't statically known. This series adds that capability as an
 **opt-in, named, dynamically-checked type** — it does **not** reopen `any`. The
 `any` wall stays exactly where it is; a program reaches the dynamic world only by
-explicitly importing `JsonValue` from `@t2r/std` and crossing a labelled boundary.
+explicitly importing `JsonValue` from `@ttr/std` and crossing a labelled boundary.
 
 ```ts
-import { parseJsonValue, fromJsonValue, JsonValue } from "@t2r/std";
+import { parseJsonValue, fromJsonValue, JsonValue } from "@ttr/std";
 
 const r = parseJsonValue(input);            // ParseResult<JsonValue>
 if (r.ok) {
@@ -44,7 +44,7 @@ if (r.ok) {
   `#[serde(transparent)]` makes it deserialize/serialize exactly as the inner
   `Value`, so it drops straight into the 084 `ParseResult<T>` and `stringify`
   machinery with no special-casing.
-- **Opt-in surface: an `@t2r/std` type + functions.** The type `JsonValue` and the
+- **Opt-in surface: an `@ttr/std` type + functions.** The type `JsonValue` and the
   functions `parseJsonValue` / `fromJsonValue` / `toJsonValue` are recognized by
   the reserved specifier (never a name heuristic). Recognition is extended to a
   **type-position** intrinsic for the first time (084 recognized only call

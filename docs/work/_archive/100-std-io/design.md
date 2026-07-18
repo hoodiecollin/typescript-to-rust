@@ -1,4 +1,4 @@
-# 100 — I/O via `@t2r/std` (sync + async: fs, env, process, stdin, HTTP) — design
+# 100 — I/O via `@ttr/std` (sync + async: fs, env, process, stdin, HTTP) — design
 
 ## Decisions (DECIDED 2026-07-16)
 
@@ -27,12 +27,12 @@ invariant that 050 relies on. Import-time I/O (a non-entry module running I/O at
 time / top level) stays **fail-loud** — I/O earns no exception to that invariant. A
 module that only *defines* fns calling shim intrinsics is fine.
 
-Epic **#52** (the `@t2r/std` std-shim lane). Builds directly on series **084**
+Epic **#52** (the `@ttr/std` std-shim lane). Builds directly on series **084**
 (shim recognition + routing infrastructure), **089** (the stateful-handle +
 member-routing precedent), the async campaign **051** (the tokio runtime + the
 awaited-fallible `.await?` model), and the error model **049** (`throw` →
 `Result<T, String>` / `AppError` + `?`). This series adds the **I/O surface** to
-`@t2r/std`.
+`@ttr/std`.
 
 **Scope (Collin's decision, settled):** sync I/O **and** async I/O.
 - **Sync** → `std::fs` / `std::io` / `std::env` / `std::process`.
@@ -53,7 +53,7 @@ all: **the observable effect of I/O lives outside the program.** Bare
 type, no ownership story, and — for network — no differential-stable behavior at
 all. The std-shim lane dissolves this exactly as 084 (JSON) and 089 (RNG) did:
 it **moves the policy to an explicit, blessed call-site API** recognized only by
-the reserved specifier `"@t2r/std"`, never a name heuristic. A user's own
+the reserved specifier `"@ttr/std"`, never a name heuristic. A user's own
 `readFile` imported from anywhere else is not hijacked.
 
 The shim is **real, Bun-resolvable TS** (`packages/std/index.ts`) so the
@@ -62,7 +62,7 @@ behavior matching the emitted Rust. For file I/O that faithfulness is real and
 achievable (both sides hit the same real filesystem); for network it is the
 central tension this doc confronts head-on ([§6](#6-differential-faithfulness-the-crux)).
 
-`@t2r/std` remains the **only** modeled import. This series extends its export
+`@ttr/std` remains the **only** modeled import. This series extends its export
 table; it does **not** open general module resolution (050 stays unshipped).
 
 ---
@@ -73,9 +73,9 @@ Mirror the 084/089 machinery exactly:
 
 1. **Recognition** — `STD_SHIM_EXPORTS` gains the new I/O names; the validator's
    `checkStdShimImport` accepts them and rejects unknown names / foreign
-   specifiers unchanged (`import from '<x>' — only "@t2r/std" is a recognized
+   specifiers unchanged (`import from '<x>' — only "@ttr/std" is a recognized
    module`).
-2. **Routing** — `collectStdShimBindings` already binds any `@t2r/std` local
+2. **Routing** — `collectStdShimBindings` already binds any `@ttr/std` local
    alias → intrinsic name; the new names participate automatically.
    `lowerStdShimCall` gains a `case` per intrinsic, emitting new HIR nodes that
    the emitter lowers to the Rust targets in [§3](#3-the-export-surface) /
@@ -104,7 +104,7 @@ out** convention (the translator's `number`/`string`), matching 089.
 
 ### 3a. Filesystem — `std::fs` (all fallible)
 
-| `@t2r/std` export | Signature | Rust target | Notes |
+| `@ttr/std` export | Signature | Rust target | Notes |
 |---|---|---|---|
 | `readFile` | `(path: string): string` | `std::fs::read_to_string(path)?` | UTF-8 text. Fallible: missing/permission → `Err`/throw. |
 | `writeFile` | `(path: string, data: string): void` | `std::fs::write(path, data)?` | Truncates + writes. |
@@ -122,20 +122,20 @@ enumeration order. Documented as an accepted, faithful-by-construction ordering.
 
 ### 3b. Process env / args — `std::env`
 
-| `@t2r/std` export | Signature | Rust target | Notes |
+| `@ttr/std` export | Signature | Rust target | Notes |
 |---|---|---|---|
 | `env` | `(name: string): string \| null` | `std::env::var(name).ok()` → `Option<String>` | `null` when unset. Lowers to the shipped Option model (066) — a `string \| null` binding, `?? default` / narrowing all apply. **Infallible** (absence is `None`, not an error). |
 | `args` | `(): string[]` | `std::env::args().skip(1).collect::<Vec<String>>()` | Program args **after** the binary name (matches `process.argv.slice(2)` — see [§7](#7-harness-changes-stdinargsenv-plumbing) for the arg-numbering parity note). |
 
 ### 3c. Process control — `std::process`
 
-| `@t2r/std` export | Signature | Rust target | Notes |
+| `@ttr/std` export | Signature | Rust target | Notes |
 |---|---|---|---|
 | `exit` | `(code: number): never` | `std::process::exit(code as i32)` | Returns `never`; flushes are the caller's job (mirrors `process.exit`). |
 
 ### 3d. Standard streams — `std::io`
 
-| `@t2r/std` export | Signature | Rust target | Notes |
+| `@ttr/std` export | Signature | Rust target | Notes |
 |---|---|---|---|
 | `readStdin` | `(): string` | `{ let mut s = String::new(); std::io::Read::read_to_string(&mut std::io::stdin(), &mut s)?; s }` (tslib `tslib::io::read_stdin()?`) | Reads **all** of stdin to EOF. Fallible. |
 | `readLine` | `(): string \| null` | `tslib::io::read_line()?` → `Option<String>` | One line, **trailing newline stripped**; `null` at EOF. Fallible on a read error (distinct from EOF-`None`). |
@@ -168,17 +168,17 @@ Async I/O requires the tokio runtime the 051 campaign already wires (the emitted
 
 ### 4a. Async filesystem — `tokio::fs`
 
-The async twins of the sync fs surface, on a nested `@t2r/std/async` **no** — we
+The async twins of the sync fs surface, on a nested `@ttr/std/async` **no** — we
 keep one specifier. Async fs lives under an exported `fs` async namespace object
 to avoid name collisions with the sync exports:
 
 ```ts
-import { fsAsync } from "@t2r/std";
+import { fsAsync } from "@ttr/std";
 const text = await fsAsync.readFile(path);
 await fsAsync.writeFile(path, text);
 ```
 
-| `@t2r/std` export (method) | Signature | Rust target |
+| `@ttr/std` export (method) | Signature | Rust target |
 |---|---|---|
 | `fsAsync.readFile` | `(path: string): Promise<string>` | `tokio::fs::read_to_string(path).await?` |
 | `fsAsync.writeFile` | `(path: string, data: string): Promise<void>` | `tokio::fs::write(path, data).await?` |
@@ -198,7 +198,7 @@ A minimal, typed HTTP surface — **GET/POST of text bodies only** this incremen
 (no header maps, no streaming, no multipart):
 
 ```ts
-import { http } from "@t2r/std";
+import { http } from "@ttr/std";
 const res = await http.get(url);          // Promise<HttpResponse>
 const res2 = await http.post(url, body);  // Promise<HttpResponse>
 console.log(res.status, res.body);
@@ -213,7 +213,7 @@ precedent — the dialect has no generic/payload enum to model a rich response):
 | `.body` | `string` | `body()` accessor (`self`-consuming, used once) |
 | `.ok` | `boolean` | `pub ok: bool` (`200..=299`) |
 
-| `@t2r/std` export (method) | Signature | Rust target (with recommended crate `reqwest`) |
+| `@ttr/std` export (method) | Signature | Rust target (with recommended crate `reqwest`) |
 |---|---|---|
 | `http.get` | `(url: string): Promise<HttpResponse>` | `tslib::http::get(url).await?` → wraps `reqwest::get(url).await?` |
 | `http.post` | `(url: string, body: string): Promise<HttpResponse>` | `tslib::http::post(url, body).await?` |
@@ -423,10 +423,10 @@ the never-miscompile contract holds:
 
 | Trigger | Kind | Message |
 |---|---|---|
-| Bare `fs.*` / `node:fs` import or member (`readFileSync`, `writeFileSync`, …) | Not yet | `` `fs.<name>` is not accepted — import `readFile`/`writeFile`/… from "@t2r/std" `` |
-| Bare `fetch(...)` (Bun/Node global) | Not yet | `` `fetch` is not accepted — import `http` from "@t2r/std" and call `http.get(url)` `` |
-| Bare `process.argv` / `process.env` / `process.exit` | Not yet | `` `process.<name>` is not accepted — import `args`/`env`/`exit` from "@t2r/std" `` |
-| Bare `process.stdin` / `console.log`-as-stream | Not yet | `` reading stdin is not accepted — import `readStdin`/`readLine` from "@t2r/std" `` |
+| Bare `fs.*` / `node:fs` import or member (`readFileSync`, `writeFileSync`, …) | Not yet | `` `fs.<name>` is not accepted — import `readFile`/`writeFile`/… from "@ttr/std" `` |
+| Bare `fetch(...)` (Bun/Node global) | Not yet | `` `fetch` is not accepted — import `http` from "@ttr/std" and call `http.get(url)` `` |
+| Bare `process.argv` / `process.env` / `process.exit` | Not yet | `` `process.<name>` is not accepted — import `args`/`env`/`exit` from "@ttr/std" `` |
+| Bare `process.stdin` / `console.log`-as-stream | Not yet | `` reading stdin is not accepted — import `readStdin`/`readLine` from "@ttr/std" `` |
 
 **Out-of-surface I/O (no shim entry yet — deferred, distinct from a redirect):**
 
@@ -471,7 +471,7 @@ needs the tokio `fs` feature added to the oracle toml's existing `tokio` feature
 - **One specifier, namespaced async.** Sync fs exports are flat
   (`readFile`, …); async fs and http are **namespace objects** (`fsAsync.*`,
   `http.*`) to avoid sync/async name collisions without a second specifier. Keeps
-  recognition uniform (still one `"@t2r/std"` gate) at the cost of a `.` member
+  recognition uniform (still one `"@ttr/std"` gate) at the cost of a `.` member
   step the router must handle for namespace bindings (a small extension of the
   089 handle-binding pattern).
 - **`String`-only error spine.** tslib normalizes every I/O error to `String` at

@@ -4,7 +4,7 @@ Spec prefix **DT**. Differential (TS-via-Bun vs Rust-run stdout) + shape
 (emitted-Rust substring) + fail-loud (throws with the redirect message). Every
 deterministic program is a **pure function of its inputs** — no ambient clock — so
 `rust.stdout === runTs(src)` byte-for-byte. Programs that need a "now" import
-`{ clock } from "@t2r/std"` and pass an **explicit** epoch-ms, so both runtimes
+`{ clock } from "@ttr/std"` and pass an **explicit** epoch-ms, so both runtimes
 observe the same instant. Test file:
 `packages/compiler/tests/date.test.ts`.
 
@@ -82,7 +82,7 @@ down.
 ## Shim clock (differential-stable "now")
 
 - **DT19** — `clock(epochMs).now()`:
-  `import { clock } from "@t2r/std"; console.log(clock(1700000000000).now());` →
+  `import { clock } from "@ttr/std"; console.log(clock(1700000000000).now());` →
   `1700000000000` (differential — the seed is explicit, so both runtimes agree;
   emits `tslib::date::Clock::new`).
 - **DT20** — `clock(...).date()` bridges to a `Date`:
@@ -92,14 +92,14 @@ down.
   `const c = clock(1000); c.tick(500); console.log(c.now());` → `1500`
   (differential; the honest analog of elapsed-time, emitted `let mut`).
 - **DT22** — aliased import still routes (recognition by specifier, not name):
-  `import { clock as mkClock } from "@t2r/std"; console.log(mkClock(0).now());` →
+  `import { clock as mkClock } from "@ttr/std"; console.log(mkClock(0).now());` →
   `0` (differential; emits `tslib::date::Clock::new`).
 
 ## Fail-loud (forbid ambient reads + unsupported surface)
 
 - **DT23** — bare `Date.now()` → throws `UnsupportedError` mentioning `clock` and
-  `@t2r/std` (the `Math.random` → `rng` redirect, applied to time).
-- **DT24** — no-arg `new Date()` → throws mentioning `clock` and `@t2r/std`.
+  `@ttr/std` (the `Math.random` → `rng` redirect, applied to time).
+- **DT24** — no-arg `new Date()` → throws mentioning `clock` and `@ttr/std`.
 - **DT25** — loose-format parse `new Date("Nov 14 2023")` → throws (only strict
   RFC3339 / `YYYY-MM-DD` accepted; `Date.parse` loose forms are not modeled).
 - **DT26** — a setter `const d = new Date(0); d.setFullYear(2000);` → throws

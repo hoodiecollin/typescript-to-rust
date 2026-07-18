@@ -9,7 +9,7 @@
  * `mod`s in one crate are mutually visible, so a genuine cycle is *accepted*, the
  * set only bounds traversal), and returns the ordered `SourceModule[]` handed to
  * `lowerCrate`. A **bare/package** specifier (`"lodash"`, `"node:fs"`) is refused
- * fail-loud (no `node_modules`, no ambient modules); `@t2r/std` is the std shim, not
+ * fail-loud (no `node_modules`, no ambient modules); `@ttr/std` is the std shim, not
  * a module edge, so it is skipped here (recognized later in lowering).
  */
 
@@ -149,8 +149,8 @@ export function resolveCrate(entry: string, readFile: ReadFile): SourceModule[] 
     const fromDir = posix.dirname(key);
     for (const edge of moduleEdges(program)) {
       const spec = edge.source;
-      // The `@t2r/std` std shim is not a module edge — recognized in lowering.
-      if (spec === "@t2r/std") continue;
+      // The `@ttr/std` std shim is not a module edge — recognized in lowering.
+      if (spec === "@ttr/std") continue;
       if (!spec.startsWith(".")) {
         throw new UnsupportedError({
           type: `bare/package import '${spec}' (only \`./\`-relative imports; no node_modules)`,

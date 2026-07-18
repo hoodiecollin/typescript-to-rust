@@ -1,8 +1,8 @@
-# 084 — `@t2r/std` std-shim, Tier A — specs
+# 084 — `@ttr/std` std-shim, Tier A — specs
 
 Spec prefix **STD**. Differential (TS-via-Bun vs Rust-run stdout) + shape
 (emitted-Rust substring) + fail-loud (throws with the redirect message). All
-programs `import { … } from "@t2r/std"`; the harness resolves the workspace
+programs `import { … } from "@ttr/std"`; the harness resolves the workspace
 package under Bun. Test file: `packages/compiler/tests/std-shim.test.ts`.
 
 ## `stringifyJson` (reuses the 045 writer, behind the shim)
@@ -32,18 +32,18 @@ package under Bun. Test file: `packages/compiler/tests/std-shim.test.ts`.
 ## Fail-loud (forbid bare JSON + redirect)
 
 - **STD11** — bare `JSON.stringify(x)` → throws `UnsupportedError` mentioning
-  `stringifyJson` and `@t2r/std`.
+  `stringifyJson` and `@ttr/std`.
 - **STD12** — bare `JSON.parse(s)` (untyped) → throws mentioning `parseJson` and
-  `@t2r/std`.
+  `@ttr/std`.
 - **STD13** — `const p: Point = JSON.parse(s)` (the old 045 annotation-driven
   form) → throws mentioning `parseJson` (the 045 path is gone).
 - **STD14** — `parseJson(s)` with **no** type argument → throws mentioning a
   modeled type argument.
-- **STD15** — an `@t2r/std` import of an unknown name
-  (`import { nope } from "@t2r/std"`) → throws mentioning it is not exported by
-  `@t2r/std`.
+- **STD15** — an `@ttr/std` import of an unknown name
+  (`import { nope } from "@ttr/std"`) → throws mentioning it is not exported by
+  `@ttr/std`.
 - **STD16** — an import from any other bare specifier
-  (`import { x } from "lodash"`) → throws mentioning only `@t2r/std` is
+  (`import { x } from "lodash"`) → throws mentioning only `@ttr/std` is
   recognized.
 
 ## Migrated 045 specs

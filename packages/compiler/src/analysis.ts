@@ -482,8 +482,8 @@ export interface ModuleAnalysis {
    */
   dynBindings: Map<string, string>;
   /**
-   * `@t2r/std` std-shim (series 084): local-alias → intrinsic-name map, from
-   * `import { parseJson as pj, stringifyJson } from "@t2r/std"`. A call whose
+   * `@ttr/std` std-shim (series 084): local-alias → intrinsic-name map, from
+   * `import { parseJson as pj, stringifyJson } from "@ttr/std"`. A call whose
    * identifier callee is a key here routes to the intrinsic lowering (never the
    * generic user-fn path). Recognition is by the reserved specifier, not a name.
    */
@@ -530,8 +530,8 @@ export interface ModuleAnalysis {
    */
   httpResponseBindings: Set<string>;
   /**
-   * `@t2r/std` async-I/O namespace bindings (series 100): local alias →
-   * `"fsAsync"`/`"http"`, from `import { fsAsync, http } from "@t2r/std"`. A
+   * `@ttr/std` async-I/O namespace bindings (series 100): local alias →
+   * `"fsAsync"`/`"http"`, from `import { fsAsync, http } from "@ttr/std"`. A
    * member call `ns.m(...)` on such a local routes to the async I/O target
    * (`.await?`); a non-awaited one is fail-loud (the 051 un-polled-future rule).
    */
@@ -1727,7 +1727,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     arenaScopes.add(SCRIPT_SCOPE);
   }
 
-  // `@t2r/std` bindings (series 084) + the series-100 I/O derivations. Computed
+  // `@ttr/std` bindings (series 084) + the series-100 I/O derivations. Computed
   // once here so `analyzeFallible` can seed the fallible I/O leaves + detect
   // awaited async-I/O usage, and the result is reused in the returned analysis.
   const stdShim = collectStdShimBindings(program);
@@ -1772,7 +1772,7 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     fns,
     mut,
     structs,
-    // `@t2r/std` std-shim bindings (series 084) — recognized by the reserved
+    // `@ttr/std` std-shim bindings (series 084) — recognized by the reserved
     // import specifier. `parseResultBindings` fills during lowering.
     stdShim,
     parseResultBindings: new Map(),

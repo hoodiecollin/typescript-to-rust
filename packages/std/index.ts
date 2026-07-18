@@ -1,8 +1,8 @@
 /**
- * `@t2r/std` — the blessed TS-side standard-shim surface (series 084, epic #52).
+ * `@ttr/std` — the blessed TS-side standard-shim surface (series 084, epic #52).
  *
  * These functions are **intrinsics**: the compiler recognizes them *by the
- * reserved import specifier* `"@t2r/std"` and lowers each to a known Rust
+ * reserved import specifier* `"@ttr/std"` and lowers each to a known Rust
  * target. The TS bodies here exist so the differential oracle (which runs the
  * input TS under Bun) executes real, faithful behavior that matches the Rust the
  * compiler emits. A user's own `parseJson`/`stringifyJson` imported from

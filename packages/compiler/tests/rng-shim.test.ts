@@ -1,5 +1,5 @@
 /**
- * Specs for series 089 — the `@t2r/std` `rng(seed)` shim (#54, epic #52). A
+ * Specs for series 089 — the `@ttr/std` `rng(seed)` shim (#54, epic #52). A
  * seeded, differential-stable PRNG (SplitMix64) that replaces `Math.random`: the
  * seed is explicit, and the ONE algorithm is implemented identically in `tslib`
  * (Rust `u64` wrapping) and the TS shim (`BigInt` masked to 64 bits), so the two
@@ -12,7 +12,7 @@
 import { expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
 
-const RNG = `import { rng } from "@t2r/std";\n`;
+const RNG = `import { rng } from "@ttr/std";\n`;
 
 defineDifferential("rng-shim", [
   {
@@ -40,7 +40,7 @@ defineDifferential("rng-shim", [
   },
   {
     name: "RNG5 an aliased import still routes (recognition by specifier)",
-    src: `import { rng as makeRng } from "@t2r/std";\nconsole.log(makeRng(3).next());`,
+    src: `import { rng as makeRng } from "@ttr/std";\nconsole.log(makeRng(3).next());`,
     extra: ({ rust }) => expect(rust).toContain("tslib::rng::Rng::new"),
   },
   {
@@ -99,15 +99,15 @@ console.log(a.shuffle([1, 2, 3, 4, 5]).join(",") === b.shuffle([1, 2, 3, 4, 5]).
 ]);
 
 // Fail-loud: rejected at TS→Rust lowering (never reaches cargo) — plain tests.
-test("RNG15 bare Math.random() → redirect to rng from @t2r/std", () => {
+test("RNG15 bare Math.random() → redirect to rng from @ttr/std", () => {
   expect(() => compile(`console.log(Math.random());`)).toThrow(
-    /rng.*@t2r\/std|@t2r\/std.*rng/,
+    /rng.*@ttr\/std|@ttr\/std.*rng/,
   );
 });
 
 test("RNG16 bare Math.random as a value (uncalled) → redirect", () => {
   expect(() => compile(`const f = Math.random;\nconsole.log(1);`)).toThrow(
-    /rng.*@t2r\/std|@t2r\/std.*rng/,
+    /rng.*@ttr\/std|@ttr\/std.*rng/,
   );
 });
 
@@ -117,8 +117,8 @@ test("RNG17 unknown method on an rng handle → only next/int/pick/shuffle", () 
   );
 });
 
-test("RNG18 rng is routed only from @t2r/std (084 guards)", () => {
+test("RNG18 rng is routed only from @ttr/std (084 guards)", () => {
   expect(() =>
     compile(`import { rng } from "elsewhere";\nconsole.log(rng(1).next());`),
-  ).toThrow(/@t2r\/std/);
+  ).toThrow(/@ttr\/std/);
 });

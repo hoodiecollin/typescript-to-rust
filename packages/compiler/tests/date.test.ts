@@ -7,7 +7,7 @@
  * over `chrono::DateTime<Utc>` and is a pure function of its inputs, so
  * `rust.stdout === runTs(src)` byte-for-byte. The wall-clock reader gets the
  * `Math.random → rng(seed)` treatment: bare reads are fail-loud, redirected to an
- * explicit seeded `clock(epochMs)` from `@t2r/std` (the `Clock` handle), so both
+ * explicit seeded `clock(epochMs)` from `@ttr/std` (the `Clock` handle), so both
  * runtimes observe the *same* instant.
  *
  * All instants are UTC internally; the short local accessors are UTC-normalized
@@ -130,21 +130,21 @@ console.log(a.getTime() < b.getTime());`,
   // ── Shim clock (differential-stable "now") ────────────────────────────────
   {
     name: "DT19 clock(epochMs).now()",
-    src: `import { clock } from "@t2r/std";
+    src: `import { clock } from "@ttr/std";
 console.log(clock(1700000000000).now());`,
     expected: "1700000000000",
     extra: ({ rust }) => expect(rust).toContain("tslib::date::Clock::new"),
   },
   {
     name: "DT20 clock(...).date() bridges to a Date",
-    src: `import { clock } from "@t2r/std";
+    src: `import { clock } from "@ttr/std";
 const c = clock(1700000000000);
 console.log(c.date().toISOString());`,
     expected: "2023-11-14T22:13:20.000Z",
   },
   {
     name: "DT21 tick advances deterministically",
-    src: `import { clock } from "@t2r/std";
+    src: `import { clock } from "@ttr/std";
 const c = clock(1000);
 c.tick(500);
 console.log(c.now());`,
@@ -153,7 +153,7 @@ console.log(c.now());`,
   },
   {
     name: "DT22 aliased import still routes (by specifier)",
-    src: `import { clock as mkClock } from "@t2r/std";
+    src: `import { clock as mkClock } from "@ttr/std";
 console.log(mkClock(0).now());`,
     expected: "0",
     extra: ({ rust }) => expect(rust).toContain("tslib::date::Clock::new"),

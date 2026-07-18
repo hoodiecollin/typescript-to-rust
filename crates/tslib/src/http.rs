@@ -1,4 +1,4 @@
-//! HTTP client helpers (series 100, the `@t2r/std` shim, epic #52). A minimal,
+//! HTTP client helpers (series 100, the `@ttr/std` shim, epic #52). A minimal,
 //! typed surface — GET/POST of **text bodies only** (no header maps, no
 //! streaming, no multipart) — over `reqwest` (async, rustls TLS so there is no
 //! system-OpenSSL dependency). Composes with the 051 tokio runtime; both calls
@@ -9,7 +9,7 @@
 /// 084 `ParseResult` precedent: the dialect has no generic/payload enum to model
 /// a rich response). `status`/`ok` are public fields; `body` is a `self`-
 /// consuming accessor (read once). Mirrors the TS `HttpResponse` class in
-/// `@t2r/std` so the differential oracle observes identical `.status`/`.ok`/
+/// `@ttr/std` so the differential oracle observes identical `.status`/`.ok`/
 /// `.body`.
 pub struct HttpResponse {
     /// The HTTP status code (e.g. `200`) as the translator's `number`.

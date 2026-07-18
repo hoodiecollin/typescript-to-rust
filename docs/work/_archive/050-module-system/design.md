@@ -20,8 +20,8 @@
 > `pub use` barrel facades, `namespace`→nested `mod`, and prelude-module generation.
 >
 > Ground-truth drift carried forward (verified 2026-07-16): since 084, the
-> `@t2r/std` std-shim put `ImportDeclaration`/`ImportSpecifier` **into** `MODELED`
-> in `validate.ts`, gated by `checkStdShimImport` (only `import … from "@t2r/std"`
+> `@ttr/std` std-shim put `ImportDeclaration`/`ImportSpecifier` **into** `MODELED`
+> in `validate.ts`, gated by `checkStdShimImport` (only `import … from "@ttr/std"`
 > is recognized). So `import` recognition already exists; the module system extends
 > that path. **`export` is still fully fail-loud** — no `Export*` node is in
 > `MODELED`. `index.ts` runs `lower(program, source)` → one `HirModule` →
@@ -275,7 +275,7 @@ default-deny) via new `checkForbiddenFlags`-style guards:
 > default-deny); (2) `namespace` blocks are pulled out by `extractNamespaces` in
 > `lower()` **before** `validate`, so the gate never sees `TSModuleDeclaration` or
 > its inner `export`s. The only module node actually in `MODELED` is the pre-existing
-> `ImportDeclaration`/`ImportSpecifier` pair (from the 084 `@t2r/std` shim);
+> `ImportDeclaration`/`ImportSpecifier` pair (from the 084 `@ttr/std` shim);
 > `ImportExpression` keeps its dedicated reject in `validate`. So `Export*` and
 > `TSModuleDeclaration` are **not** added to `MODELED` — the design's original
 > "`MODELED` gains …" plan is superseded by this pre-validate handling.
@@ -349,7 +349,7 @@ future series**, **fail-loud-honest until built** — noted here, not designed n
    (`expect().toBe` → `assert_eq!`, etc.) — its own series under this theme.
 2. **Feature-flag conditional inclusion.** Items/modules gated by
    `#[cfg(feature = "…")]`, with the matching `[features]` table synthesized into
-   `Cargo.toml`, driven by some sanctioned TS convention (a `@t2r` directive, a
+   `Cargo.toml`, driven by some sanctioned TS convention (a `@ttr` directive, a
    build-time-constant branch — the mechanism is its own series' design question).
    Reserve the emitter seam for it.
 3. **The general `#[cfg(...)]` family** — `cfg_attr`, platform/target cfgs,

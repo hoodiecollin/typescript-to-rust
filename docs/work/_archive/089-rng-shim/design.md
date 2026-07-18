@@ -1,6 +1,6 @@
-# 089 — `@t2r/std` `rng(seed)` shim — Math.random replacement with explicit determinism — design
+# 089 — `@ttr/std` `rng(seed)` shim — Math.random replacement with explicit determinism — design
 
-Issue **#54**, epic **#52** (the `@t2r/std` std-shim lane). Builds directly on
+Issue **#54**, epic **#52** (the `@ttr/std` std-shim lane). Builds directly on
 series **084** (the shim recognition + routing infrastructure). Depends on nothing
 else new: the RNG is **hand-rolled inside `tslib` with zero crate deps**.
 
@@ -19,7 +19,7 @@ are **bit-for-bit identical** from the same seed. The shim is the dialect's
 isolation boundary for this JS-divergent behavior (see the std-shim lane note).
 
 ```ts
-import { rng } from "@t2r/std";
+import { rng } from "@ttr/std";
 const r = rng(42);
 console.log(r.next());          // deterministic float in [0, 1)
 console.log(r.int(0, 6));       // deterministic integer in [0, 6)
@@ -50,7 +50,7 @@ console.log(r.shuffle([1,2,3])); // deterministic permutation
   - `shuffle<T>(arr: T[]): T[]` — a **new** array, Fisher–Yates, `arr.length - 1`
     draws. Does **not** mutate its argument.
 - **Bare `Math.random` is fail-loud** with an error that **redirects** to `rng`
-  from `@t2r/std` — matching the bare-`JSON.parse`/`JSON.stringify` precedent.
+  from `@ttr/std` — matching the bare-`JSON.parse`/`JSON.stringify` precedent.
 - **Seed domain: non-negative safe integers** (`[0, 2^53)`). In this range
   `seed as u64` (Rust) and `BigInt(Math.trunc(seed)) & MASK` (TS) yield an
   identical initial state. Negative / non-integer / out-of-range seeds are outside
@@ -96,7 +96,7 @@ shuffle(arr)   = a = copy(arr); for i in (len-1 .. 1): j = floor(next()*(i+1)); 
 
 ```rust
 //! Seeded, differential-stable PRNG (SplitMix64) — the Rust target of the
-//! `@t2r/std` `rng(seed)` shim (series 089, #54). Hand-rolled, zero crate deps;
+//! `@ttr/std` `rng(seed)` shim (series 089, #54). Hand-rolled, zero crate deps;
 //! the identical algorithm is mirrored in the TS shim so the two streams match
 //! bit-for-bit. Numeric args arrive as `f64` (the translator's `number`).
 
@@ -193,7 +193,7 @@ Mirrors 084 exactly. In `packages/compiler/src/std-shim.ts`:
 - `StdShimName` gains `"rng"`.
 - `STD_SHIM_EXPORTS` gains `"rng"`.
 
-`collectStdShimBindings` already binds any `@t2r/std` local alias → intrinsic
+`collectStdShimBindings` already binds any `@ttr/std` local alias → intrinsic
 name; `rng` participates automatically. The validator's `checkStdShimImport`
 accepts it (it's now in `STD_SHIM_EXPORTS`) and rejects unknown names / other
 specifiers unchanged.
@@ -228,11 +228,11 @@ specifiers unchanged.
 ## Fail-loud (forbid + redirect)
 
 - Bare **`Math.random`** (member expression `Math.random`, called or not) →
-  `UnsupportedError` naming `rng` and `@t2r/std`. Lives alongside the existing
+  `UnsupportedError` naming `rng` and `@ttr/std`. Lives alongside the existing
   `Math.*` handling; `Math.random` is carved out of the accepted `Math` surface
   the same way bare `JSON.parse` was carved out.
 - Unknown method on an rng handle → fail-loud (above).
-- Unknown `@t2r/std` import name / foreign specifier → unchanged 084 guards.
+- Unknown `@ttr/std` import name / foreign specifier → unchanged 084 guards.
 
 ## Scope boundary (explicitly out)
 

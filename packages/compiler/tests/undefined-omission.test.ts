@@ -16,7 +16,7 @@
 import { expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
 
-const S = `import { stringifyJson } from "@t2r/std";\n`;
+const S = `import { stringifyJson } from "@ttr/std";\n`;
 
 defineDifferential("undefined-omission", [
   {
@@ -76,7 +76,7 @@ console.log(stringifyJson(o));`,
   },
   {
     name: "UOM8 toJsonValue<Rec> then stringify also omits (090 boundary)",
-    src: `import { stringifyJson, toJsonValue } from "@t2r/std";
+    src: `import { stringifyJson, toJsonValue } from "@ttr/std";
 interface Rec { a: number; b?: number }
 const v = toJsonValue<Rec>({ a: 1 });
 console.log(stringifyJson(v));`,
@@ -84,7 +84,7 @@ console.log(stringifyJson(v));`,
   },
   {
     name: "UOM9 parse-then-stringify round-trips an absent optional",
-    src: `import { parseJson, stringifyJson } from "@t2r/std";
+    src: `import { parseJson, stringifyJson } from "@ttr/std";
 interface Rec { a: number; b?: number }
 const r = parseJson<Rec>('{"a":1}');
 if (r.ok) { console.log(stringifyJson(r.value)); }`,

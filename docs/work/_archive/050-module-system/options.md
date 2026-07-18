@@ -26,9 +26,9 @@ stdout must match Bun running the same TS).
 These constrain every option below; they are facts about the current tree, not choices.
 
 - **`import` is already partly modeled.** `validate.ts`'s `MODELED` set contains
-  `ImportDeclaration` + `ImportSpecifier` (added series 084 for the `@t2r/std`
+  `ImportDeclaration` + `ImportSpecifier` (added series 084 for the `@ttr/std`
   std-shim). A `checkStdShimImport` guard rejects any specifier other than
-  `"@t2r/std"` and any non-named import form. So the parse gate, the AST shapes, and
+  `"@ttr/std"` and any non-named import form. So the parse gate, the AST shapes, and
   an import-recognition lowering path (`lower.ts` line ~326: `ImportDeclaration` →
   recognition-only, lowers to nothing) **already exist**. The module system *extends*
   this lane to `./`-relative specifiers; it does not add `import` from scratch.
@@ -258,7 +258,7 @@ pin down once their designs land:
   ordering dependency. **Flag: 099's inference output must be available to the module
   resolver's global symbol table.**
 - **100 (std I/O shim) × an imported module.** If a **non-entry** module imports
-  `@t2r/std` (or the future I/O shim), its per-`mod` prelude must carry the shim's
+  `@ttr/std` (or the future I/O shim), its per-`mod` prelude must carry the shim's
   `use` lines / crate deps, and — critically — I/O side effects at a non-entry module's
   *top level* stay **fail-loud** (the baseline already forbids top-level statements in
   imported modules; import-time I/O has no sound Rust analog). A module that only

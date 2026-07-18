@@ -1,4 +1,4 @@
-# 084 — `@t2r/std` std-shim, Tier A (`parseJson` / `stringifyJson`) — design
+# 084 — `@ttr/std` std-shim, Tier A (`parseJson` / `stringifyJson`) — design
 
 Epic **#52** (the std-shim lane), sub-issues **#53** (`parseJson`), **#58**
 (`stringifyJson`), resolving **#57** (the JSON.stringify `None`→`null` divergence
@@ -7,10 +7,10 @@ machinery (045), and the library-method backbone (083).
 
 ## What this is
 
-`@t2r/std` is a **third routing lane** alongside the Rust-side `tslib` (runtime
+`@ttr/std` is a **third routing lane** alongside the Rust-side `tslib` (runtime
 quirks) and compiler inference (type/ownership). It is a **blessed TS-side
 surface** the developer imports *instead of* footgun APIs. The compiler
-recognizes it **by the reserved import specifier `"@t2r/std"`** and lowers each
+recognizes it **by the reserved import specifier `"@ttr/std"`** and lowers each
 imported name to a known Rust target. It is the dialect's **isolation boundary
 for JS-divergent behavior**: the type/policy problem moves to an explicit
 call-site API, dissolving the `any` (`JSON.parse`) and fidelity (`JSON.stringify`)
@@ -22,9 +22,9 @@ Rust the compiler emits.
 
 ## Decided parameters (settled — do not re-litigate)
 
-- **Reserved import specifier: `@t2r/std`.** Recognition keys off the *specifier*,
+- **Reserved import specifier: `@ttr/std`.** Recognition keys off the *specifier*,
   never a name heuristic. A user's own `parseJson`/`stringifyJson` imported from
-  anywhere else is **not** hijacked. An `import { … } from "@t2r/std"` binds the
+  anywhere else is **not** hijacked. An `import { … } from "@ttr/std"` binds the
   intrinsic names into the module's std-shim table; the *local* alias
   (`import { parseJson as pj }`) is what the call sites use.
 - **`parseJson<T>(s: string)` → a Result-like tagged return** (Collin's call): on
@@ -41,7 +41,7 @@ Rust the compiler emits.
   documented, *no* provenance/omission work now. The already-faithful cases stay
   (integrals no `.0`, shortest-round-trip fractions, `Infinity`/`NaN` → `null`).
 - **Bare `JSON.parse` AND bare `JSON.stringify` are fail-loud** with an error that
-  **redirects** to `parseJson`/`stringifyJson` from `@t2r/std`. The 045
+  **redirects** to `parseJson`/`stringifyJson` from `@ttr/std`. The 045
   annotation-driven `JSON.parse` and the untyped `Value` fallback are **removed**
   from the accepted surface — the only JSON entry points are the two shim
   intrinsics.
@@ -105,16 +105,16 @@ ergonomics.
 
 oxc **keeps** `ImportDeclaration`/`ImportSpecifier` nodes in `Program.body`
 (verified). Today they are simply absent from the validator `MODELED` set, so any
-import fails loud at the parse gate. This series models **only** the `@t2r/std`
+import fails loud at the parse gate. This series models **only** the `@ttr/std`
 import:
 
 1. **Validator (`validate.ts`)** — add `ImportDeclaration` + `ImportSpecifier` to
    `MODELED`, but *guarded*: an `ImportDeclaration` whose `source.value !==
-   "@t2r/std"` is fail-loud (`import from '<x>' — only "@t2r/std" is a recognized
-   module (bare module imports are not yet supported)`), and an `@t2r/std` import
-   of an unknown name is fail-loud (`'<name>' is not exported by "@t2r/std"`).
+   "@ttr/std"` is fail-loud (`import from '<x>' — only "@ttr/std" is a recognized
+   module (bare module imports are not yet supported)`), and an `@ttr/std` import
+   of an unknown name is fail-loud (`'<name>' is not exported by "@ttr/std"`).
    This keeps 050 (general modules) unshipped while admitting exactly the shim.
-2. **Analysis (`analyzeModule`)** — collect the std-shim table: for each `@t2r/std`
+2. **Analysis (`analyzeModule`)** — collect the std-shim table: for each `@ttr/std`
    `ImportSpecifier`, map `local.name → imported.name` into
    `analysis.stdShim: Map<string, "parseJson" | "stringifyJson">`. The import
    statement itself lowers to nothing (no Rust output).
@@ -137,20 +137,20 @@ import:
 ## Fail-loud (forbid + redirect)
 
 - Bare `JSON.stringify(...)` → `` `JSON.stringify` is not accepted — import
-  `stringifyJson` from "@t2r/std" ``.
+  `stringifyJson` from "@ttr/std" ``.
 - Bare `JSON.parse(...)` → `` `JSON.parse` is not accepted — import `parseJson`
-  from "@t2r/std" ``.
+  from "@ttr/std" ``.
 - `parseJson` with no type argument and no modeled binding type, or a
   `parseJson<T>` where `T` is not a modeled struct/enum/primitive/array/record →
   `` `parseJson<T>` needs a modeled struct/enum type argument (`parseJson<Point>(s)`) ``.
-- Any `@t2r/std` import of an unknown name, or an import from any other bare
+- Any `@ttr/std` import of an unknown name, or an import from any other bare
   specifier → the recognition messages above.
 
 ## Package + resolution
 
-`packages/std/` is a real Bun-resolvable workspace package (`"name": "@t2r/std"`,
+`packages/std/` is a real Bun-resolvable workspace package (`"name": "@ttr/std"`,
 root `package.json` already globs `packages/*`). After `bun install` it symlinks
-into `node_modules/@t2r/std`, so `import { … } from "@t2r/std"` resolves both when
+into `node_modules/@ttr/std`, so `import { … } from "@ttr/std"` resolves both when
 the differential harness runs the input TS under Bun **and** for typecheck. The
 harness runs the TS via `Bun.spawnSync(["bun", "run", "-"], { stdin })` from the
 repo root, so node_modules resolution from the repo root is what matters — the
@@ -162,7 +162,7 @@ package is simpler and is what Bun's runtime actually consults.)
 `packages/compiler/tests/json.test.ts` currently asserts bare `JSON.stringify` /
 `JSON.parse` support (JSN1–JSN8). These migrate:
 - The `stringify` behavior specs (JSN1–JSN5) re-point to `stringifyJson` imported
-  from `@t2r/std` (same expected output — the writer is unchanged).
+  from `@ttr/std` (same expected output — the writer is unchanged).
 - The `parse` specs (JSN6–JSN8) re-point to `parseJson<T>` + the `ParseResult`
   consumption surface.
 - New specs assert bare `JSON.stringify` / `JSON.parse` now fail loud with the

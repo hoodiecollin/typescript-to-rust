@@ -3,7 +3,7 @@
 Spec prefix **JSV**. Differential (TS-via-Bun vs Rust-run stdout) + shape
 (emitted-Rust substring) + fail-loud (throws with the redirect / accessor
 message). Programs `import { parseJsonValue, fromJsonValue, toJsonValue,
-JsonValue } from "@t2r/std"`. Test file:
+JsonValue } from "@ttr/std"`. Test file:
 `packages/compiler/tests/json-value.test.ts`.
 
 The `serde(transparent)` newtype means the Bun-run wrapper and the Rust

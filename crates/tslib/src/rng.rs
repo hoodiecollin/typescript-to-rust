@@ -1,5 +1,5 @@
 //! Seeded, differential-stable PRNG (SplitMix64) — the Rust target of the
-//! `@t2r/std` `rng(seed)` shim (series 089, #54). Hand-rolled, zero crate deps;
+//! `@ttr/std` `rng(seed)` shim (series 089, #54). Hand-rolled, zero crate deps;
 //! the identical algorithm is mirrored in the TS shim so the two streams match
 //! bit-for-bit. Numeric args arrive as `f64` (the translator's `number`).
 

@@ -3,7 +3,7 @@
 Differential = emitted Rust runs (via the `rust-oracle` crate) AND its stdout ===
 the TS-via-Bun run === `expected`. Shape = emitted-Rust substring. All specs
 import `stringifyJson` (and, where relevant, `parseJson`/`toJsonValue`) from
-`@t2r/std`, which makes the module `usesJson` (so structs derive serde).
+`@ttr/std`, which makes the module `usesJson` (so structs derive serde).
 
 Reference: the TS `stringifyJson` is `JSON.stringify`, whose native
 `undefined`-omission the Rust side must now match.

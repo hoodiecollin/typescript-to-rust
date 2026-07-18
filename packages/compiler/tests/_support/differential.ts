@@ -59,7 +59,7 @@ let tsSrcCounter = 0;
  * Run a TS program under Bun and return its trimmed stdout (the oracle). When an
  * `io` is supplied (series 100) its `env`/`args` are threaded to both runs; a
  * spec that reads **stdin** is run from a temp source **file** (written under the
- * repo root so `@t2r/std` resolves) so the piped stdin carries the *program's*
+ * repo root so `@ttr/std` resolves) so the piped stdin carries the *program's*
  * input rather than the script source (`bun run -` would collide).
  */
 export async function runTs(src: string, io?: IoInput): Promise<string> {
@@ -68,7 +68,7 @@ export async function runTs(src: string, io?: IoInput): Promise<string> {
   let cmd: string[];
   let stdin: Uint8Array | "ignore";
   if (io?.stdin !== undefined) {
-    srcFile = join(process.cwd(), `.t2r-io-src-${tsSrcCounter++}.ts`);
+    srcFile = join(process.cwd(), `.ttr-io-src-${tsSrcCounter++}.ts`);
     writeFileSync(srcFile, src);
     cmd = ["bun", "run", srcFile, ...(io.args ?? [])];
     stdin = enc.encode(io.stdin);
@@ -99,7 +99,7 @@ export async function runTs(src: string, io?: IoInput): Promise<string> {
 /**
  * Run a **multi-file crate** (series 050) under Bun and return the entry's trimmed
  * stdout (the oracle for the emitted Rust crate). The `files` map is written into a
- * temp directory **under the repo root** (so `@t2r/std` still resolves and the
+ * temp directory **under the repo root** (so `@ttr/std` still resolves and the
  * `./`-relative imports resolve against each other), then `bun run <dir>/<entry>`
  * executes it. `io` is threaded identically to the Rust run.
  */
@@ -109,7 +109,7 @@ export async function runTsCrate(
   io?: IoInput,
 ): Promise<string> {
   const enc = new TextEncoder();
-  const dir = mkdtempSync(join(process.cwd(), ".t2r-crate-"));
+  const dir = mkdtempSync(join(process.cwd(), ".ttr-crate-"));
   try {
     for (const [path, content] of Object.entries(files)) {
       const dest = join(dir, path);
@@ -231,7 +231,7 @@ export function defineDifferential(suite: string, specs: DiffSpec[]): void {
       if (!s.io && !s.tmp && !s.net) return undefined;
       const env: Record<string, string> = { ...(s.io?.env ?? {}) };
       if (s.tmp) {
-        const dir = mkdtempSync(join(tmpdir(), "t2r-io-"));
+        const dir = mkdtempSync(join(tmpdir(), "ttr-io-"));
         tmpDirs.push(dir);
         env.T2R_TMP = dir;
       }

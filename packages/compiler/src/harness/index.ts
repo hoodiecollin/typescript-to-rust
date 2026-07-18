@@ -199,7 +199,7 @@ export const harness = new RustProject();
  * pre-warmed for. Lives INSIDE `target/` so `cargo clean` (or a fresh checkout)
  * drops it and forces a re-warm; `/target` is gitignored so it never lands in vcs.
  */
-const PREWARM_SENTINEL = join(ORACLE_DIR, "target", ".t2r-prewarm");
+const PREWARM_SENTINEL = join(ORACLE_DIR, "target", ".ttr-prewarm");
 
 /** Fingerprint the inputs that determine the oracle's dependency graph. */
 function depFingerprint(): string {
@@ -244,22 +244,22 @@ export function ensureDepsWarm(): Promise<void> {
         return; // deps already warm for this exact graph — nothing to do
       }
       console.error(
-        "[t2r] rust-oracle dependency graph changed (or target cold) — " +
+        "[ttr] rust-oracle dependency graph changed (or target cold) — " +
           "pre-warming rlibs once to avoid the cargo thundering-herd flake…",
       );
       const ok = await harness.prewarm();
       if (ok) {
         mkdirSync(dirname(PREWARM_SENTINEL), { recursive: true });
         writeFileSync(PREWARM_SENTINEL, want);
-        console.error("[t2r] rust-oracle dependencies pre-warmed.");
+        console.error("[ttr] rust-oracle dependencies pre-warmed.");
       } else {
         console.error(
-          "[t2r] pre-warm build did not succeed; specs will surface the real " +
+          "[ttr] pre-warm build did not succeed; specs will surface the real " +
             "cargo diagnostics.",
         );
       }
     } catch (err) {
-      console.error(`[t2r] pre-warm skipped after error: ${String(err)}`);
+      console.error(`[ttr] pre-warm skipped after error: ${String(err)}`);
     }
   })();
   return depsWarmed;

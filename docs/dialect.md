@@ -100,7 +100,7 @@ flip it.
   `impl tslib::ops::JsEq` — see the *Generics* section.
 
 - **`JsonValue` navigation: absent → `Null`, mismatch → fail-loud (series 090).**
-  The opt-in dynamic `JsonValue` (reached only via `@t2r/std`'s `parseJsonValue` /
+  The opt-in dynamic `JsonValue` (reached only via `@ttr/std`'s `parseJsonValue` /
   `fromJsonValue` / `toJsonValue`, and **not** a reopening of `any`) navigates by
   explicit accessors. An **absent object key** (`v.get("nope")`) or an
   **out-of-bounds index** (`v.at(99)`) yields a `Null` `JsonValue` — so `.isNull()`
@@ -858,22 +858,22 @@ Only single-level optional chaining (`a?.b`) is built.
 
 ---
 
-## The `@t2r/std` std-shim (series 084)
+## The `@ttr/std` std-shim (series 084)
 
-`@t2r/std` is a **third routing lane** (alongside Rust-side `tslib` and compiler
+`@ttr/std` is a **third routing lane** (alongside Rust-side `tslib` and compiler
 inference): a blessed TS-side surface the developer imports *instead of* footgun
-APIs. The compiler recognizes it **by the reserved import specifier `"@t2r/std"`**
+APIs. The compiler recognizes it **by the reserved import specifier `"@ttr/std"`**
 — never a name heuristic. It is the dialect's isolation boundary for JS-divergent
 behavior: the type/policy problem moves to an explicit call-site API. The shim is
 **real, Bun-resolvable TS** (`packages/std`, a workspace package) so the
 differential oracle runs faithful behavior matching the emitted Rust.
 
-`@t2r/std` is the **only** modeled import. Exports: JSON (`parseJson`,
+`@ttr/std` is the **only** modeled import. Exports: JSON (`parseJson`,
 `stringifyJson`, and the 090 `JsonValue` boundary), the 089 seeded `rng`, the
 102 seeded `clock` (the differential-stable "now" — see
 [Date & time](#date--time-series-102)), and the series-100 **I/O** surface (fs /
 env / process / stdin / async fs / HTTP — see
-[I/O via `@t2r/std`](#io-via-t2rstd-series-100) below).
+[I/O via `@ttr/std`](#io-via-t2rstd-series-100) below).
 
 - **`stringifyJson(v): string`** → the `tslib::json::stringify` writer (JS number
   fidelity: integrals no `.0`, shortest-round-trip fractions, `Infinity`/`NaN` →
@@ -894,9 +894,9 @@ env / process / stdin / async fs / HTTP — see
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| An import from any specifier other than `@t2r/std` **in the single-file path** (a `./`-relative import reached without the crate resolver) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module (bare/relative module imports are not yet supported)` — note: `./`-relative imports **are** shipped via the multi-file **crate** resolver (`lowerCrate`, series 050); this single-file `validate` message only fires when a relative import is compiled outside a crate entry (see [Modules](#modules-importexport-series-050)) |
-| An `@t2r/std` import of a name it does not export | Not yet | `'<name>' is not exported by "@t2r/std" (Tier A exports: parseJson, stringifyJson)` |
-| A non-named import form from `@t2r/std` (default/namespace) | Not yet | `unsupported import form from "@t2r/std" (only named imports are recognized)` |
+| An import from any specifier other than `@ttr/std` **in the single-file path** (a `./`-relative import reached without the crate resolver) | Not yet | `import from '<x>' — only "@ttr/std" is a recognized module (bare/relative module imports are not yet supported)` — note: `./`-relative imports **are** shipped via the multi-file **crate** resolver (`lowerCrate`, series 050); this single-file `validate` message only fires when a relative import is compiled outside a crate entry (see [Modules](#modules-importexport-series-050)) |
+| An `@ttr/std` import of a name it does not export | Not yet | `'<name>' is not exported by "@ttr/std" (Tier A exports: parseJson, stringifyJson)` |
+| A non-named import form from `@ttr/std` (default/namespace) | Not yet | `unsupported import form from "@ttr/std" (only named imports are recognized)` |
 | `parseJson` with no explicit type argument | Not yet | `` `parseJson<T>` needs an explicit modeled type argument (`parseJson<Point>(s)`)… `` |
 | `parseJson<T>` where `T` is not a modeled struct/enum/primitive/array/record | Not yet | `` `parseJson<T>` needs a modeled struct/enum type argument… `` / `'<T>' is not a modeled struct/enum…` |
 | `.<prop>` on a `parseJson` result other than `.ok`/`.value`/`.error` | Not yet | `` `.<prop>` on a parseJson result — only `.ok`, `.value`, `.error` are available `` |
@@ -938,7 +938,7 @@ only the entry runs top-level statements, so there is no init-order hazard).
 | dynamic `import("./x")` (`ImportExpression`) | Not yet | `dynamic \`import()\` (only static \`import\`/\`export\` are modeled)` |
 | a top-level statement in an **imported** (non-entry) module | Not yet | `top-level statement in an imported module (declarations only)` |
 | a non-declaration `namespace` member (statement / bare `const` / re-export) | Not yet | `namespace member must be a declaration …` |
-| a bare/package import (`import x from "lodash"`) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module …` |
+| a bare/package import (`import x from "lodash"`) | Not yet | `import from '<x>' — only "@ttr/std" is a recognized module …` |
 
 **Crate-merge oracle-inference gap (residual):** `lowerCrate` lowers a *synthetic
 merged* program (spliced from N files, no coherent source), so the 099 type-oracle is
@@ -947,22 +947,22 @@ annotation (`const p: Point = new Point(1,2)`), the pre-099 baseline. Same-file
 inference in a single-file program is unaffected. Per-module oracle threading is a
 follow-on.
 
-## JSON (bare `JSON.*` — forbidden, redirected to `@t2r/std`)
+## JSON (bare `JSON.*` — forbidden, redirected to `@ttr/std`)
 
 Bare `JSON.parse` **and** `JSON.stringify` are fail-loud and **redirect** to the
 shim (series 084). The type/fidelity policy moved to the blessed call-site API
 (above): `parseJson<T>` gives the emitter a concrete `from_str::<T>` target (no
 `any`), and `stringifyJson` carries the number fidelity. The old 045
 annotation-driven `JSON.parse` and untyped `serde_json::Value` fallback are
-**removed** — the only JSON entry points are the two `@t2r/std` intrinsics.
+**removed** — the only JSON entry points are the two `@ttr/std` intrinsics.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| `JSON.stringify(...)` (bare) | Not yet | `` `JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)` `` |
-| `JSON.parse(...)` (bare, any position, annotated or not) | Not yet | `` `JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)` `` |
+| `JSON.stringify(...)` (bare) | Not yet | `` `JSON.stringify` is not accepted — import `stringifyJson` from "@ttr/std" and call `stringifyJson(v)` `` |
+| `JSON.parse(...)` (bare, any position, annotated or not) | Not yet | `` `JSON.parse` is not accepted — import `parseJson` from "@ttr/std" and call `parseJson<T>(s)` `` |
 | Any other `JSON.*` (`JSON.rawJSON`, …) | Not yet | `JSON.<name>` |
 
-## I/O via `@t2r/std` (series 100)
+## I/O via `@ttr/std` (series 100)
 
 The I/O surface rides the same shim lane — sync fs / env / process / stdin, async
 fs, and HTTP, each recognized only by the reserved specifier and lowered to a
@@ -996,15 +996,15 @@ chained `.join(",")` / `?? d` resolves.
 
 | Trigger | Kind | Message |
 |---------|------|---------|
-| Bare `fetch(...)` (Bun/Node global) | Not yet | `` `fetch` is not accepted — import `http` from "@t2r/std"… `` |
+| Bare `fetch(...)` (Bun/Node global) | Not yet | `` `fetch` is not accepted — import `http` from "@ttr/std"… `` |
 | Bare `process.argv`/`env`/`exit`/`stdin`/`stdout`/`stderr` | Not yet | `` `process.<name>` is not accepted — import `args`/`env`/`exit`/`readStdin`… `` |
-| Bare `node:fs` / other-specifier import (`readFileSync`, …) | Not yet | `import from '<x>' — only "@t2r/std" is a recognized module…` |
+| Bare `node:fs` / other-specifier import (`readFileSync`, …) | Not yet | `import from '<x>' — only "@ttr/std" is a recognized module…` |
 | An `fsAsync.*` / `http.*` call **not** directly awaited (un-polled future) | Not yet | `call to an async method not directly awaited (an un-polled future never runs)` |
 | An unknown `http` method (not `get`/`post`) | Not yet | `` `.<m>` on `http` — only get/post of text bodies are available `` |
 | An unknown `Writer` method (not `write`/`writeLine`/`flush`) | Not yet | `` `.<m>` on a Writer — only `write`, `writeLine`, `flush` are available `` |
 | `.<prop>` on an http response other than `.status`/`.ok`/`.body` | Not yet | `` `.<prop>` on an http response — only `.status`, `.ok`, `.body` are available `` |
 | `await` inside a `try`/`catch` (async error recovery) | Not yet | `await inside a try/catch is not yet supported (async error recovery is a later slice)…` |
-| Streaming / file-watch / raw sockets / binary file I/O / HTTP headers | Not yet | (out-of-surface — no shim entry; unknown `@t2r/std` name → `'<name>' is not exported…`) |
+| Streaming / file-watch / raw sockets / binary file I/O / HTTP headers | Not yet | (out-of-surface — no shim entry; unknown `@ttr/std` name → `'<name>' is not exported…`) |
 
 ---
 
@@ -1068,7 +1068,7 @@ machinery; a bare `date < date` (implicit `valueOf`) is not accepted.
 
 The **wall-clock reader** (`Date.now()`, no-arg `new Date()`) reads the host
 clock, so like `Math.random` it cannot be differential — it is fail-loud,
-redirected to a seeded `clock(epochMs)` from `@t2r/std` (a `tslib::date::Clock`
+redirected to a seeded `clock(epochMs)` from `@ttr/std` (a `tslib::date::Clock`
 handle with `now()` / `date()` / `tick(ms)`, the direct twin of `rng(seed)`). The
 seed is an explicit call-site argument, so both runtimes observe the same instant.
 
@@ -1209,9 +1209,9 @@ The currently-modeled node types are:
 `TSUnionType` · `TSUndefinedKeyword` · `TSNullKeyword` · `TSAnyKeyword` ·
 `TSUnknownKeyword` · `ImportDeclaration` · `ImportSpecifier`.
 
-In `MODELED`, `ImportDeclaration`/`ImportSpecifier` are gated for the `@t2r/std`
+In `MODELED`, `ImportDeclaration`/`ImportSpecifier` are gated for the `@ttr/std`
 std-shim (series 084) — a guard rejects any other specifier and any unknown
-`@t2r/std` name. **General `./`-relative module imports (series 050) are shipped**,
+`@ttr/std` name. **General `./`-relative module imports (series 050) are shipped**,
 but through the **crate** path: `lowerCrate` strips `Import*`/`Export*` while merging
 and `extractNamespaces` pulls `namespace` blocks out — both **before** `validate` —
 so `Export*` and `TSModuleDeclaration` never reach the gate and are deliberately
@@ -1221,7 +1221,7 @@ Notable node types **not** modeled (rejected at the gate): `EmptyStatement`,
 `DebuggerStatement`, `DoWhileStatement`, `WithStatement`, `SequenceExpression`,
 `UpdateExpression`, `TaggedTemplateExpression`, `TemplateLiteral`,
 `TSAsExpression`, `RestElement`, `MetaProperty`, and `ImportExpression` (dynamic
-`import()`). `export` syntax / `namespace` / non-`@t2r/std` `import`s are handled
+`import()`). `export` syntax / `namespace` / non-`@ttr/std` `import`s are handled
 **pre-`validate`** in the crate + namespace paths (series 050), not at this gate.
 
 ---

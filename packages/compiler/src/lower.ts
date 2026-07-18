@@ -346,7 +346,7 @@ export function lower(
 
   for (const stmt of normalized.body) {
     if (stmt.type === "ImportDeclaration") {
-      // The `@t2r/std` import (series 084) is recognition-only — its bindings
+      // The `@ttr/std` import (series 084) is recognition-only — its bindings
       // were collected into `analysis.stdShim`; it lowers to no Rust. The
       // validator already rejected every other import specifier.
       continue;
@@ -880,7 +880,7 @@ function inferCrateVisibility(items: HirItem[], exported: Set<string>): void {
  * by declaration name; synthesized items (the `AppError` enum, lifted callbacks,
  * anonymous unions) have no owner and stay at the crate root. Only the entry file
  * may carry top-level statements (→ `fn main`); a statement in an imported module
- * is fail-loud (import-time side effects have no sound Rust analog). The `@t2r/std`
+ * is fail-loud (import-time side effects have no sound Rust analog). The `@ttr/std`
  * shim import is kept in the merged program (it is recognized by lowering, not a
  * module edge).
  */
@@ -934,8 +934,8 @@ export function lowerCrate(modules: SourceModule[]): HirModule {
           source: { value: string };
           specifiers: { type: string; imported?: { name: string }; local: { name: string } }[];
         };
-        // The `@t2r/std` shim is not a module edge — keep it for lowering to see.
-        if (imp.source.value === "@t2r/std") {
+        // The `@ttr/std` shim is not a module edge — keep it for lowering to see.
+        if (imp.source.value === "@ttr/std") {
           mergedBody.push(stmt);
           continue;
         }
@@ -7737,7 +7737,7 @@ function receiverTypeOf(
       }
     }
   }
-  // `@t2r/std` I/O intrinsics returning `Vec<String>` (series 100): a chained
+  // `@ttr/std` I/O intrinsics returning `Vec<String>` (series 100): a chained
   // `.join(",")` on `args()` / `readDir(p)` routes through the `vec` gate (the
   // oracle can't type the shim return, so it is resolved structurally here).
   if (
@@ -8484,7 +8484,7 @@ function lowerVarDecl(
       // A string `.at(i)` (098) → `Option<String>`, typed by construction; Rust
       // infers it, so no annotation is required (like an `<array>.find(…)`).
       !isStringAtCall(d.init, analysis) &&
-      // An `@t2r/std` I/O intrinsic binding (series 100) — `const s = readFile(p)`,
+      // An `@ttr/std` I/O intrinsic binding (series 100) — `const s = readFile(p)`,
       // `const w = stdout()`, `const res = await http.get(u)` — is typed by
       // construction (the `tslib` return); Rust infers it, so no annotation.
       !isStdIoInit(d.init, analysis) &&
@@ -8832,7 +8832,7 @@ function lowerTyped(
 ): HirExpr {
   // The old 045 annotation-driven `const x: T = JSON.parse(s)` is gone (series
   // 084): bare `JSON.parse` is fail-loud and redirects to `parseJson<T>` from
-  // `@t2r/std`. We deliberately no longer special-case it here — the binding-init
+  // `@ttr/std`. We deliberately no longer special-case it here — the binding-init
   // gate (`redirectBareJson`) throws the redirect before this runs.
   // Ternary in a typed context (series 094): lower each arm *against the same
   // target `T`* so both coerce uniformly — `T = number` widens both arms to `f64`;
@@ -10607,7 +10607,7 @@ function lowerCall(
   // dialect infers a generic fn's type params from its arguments (rustc does the
   // same), so an explicit source-level `<…>` on a *user* call is fail-loud. Checked
   // before any routing so the guard is uniform across free-fn / method calls. The
-  // blessed `@t2r/std` shim generics are exempt: `parseJson<T>(s)` (series 084) is
+  // blessed `@ttr/std` shim generics are exempt: `parseJson<T>(s)` (series 084) is
   // *designed* around an explicit type argument (it has no argument to infer `T`
   // from), so a shim callee skips the guard and routes to `lowerStdShimCall`.
   if ((call as { typeArguments?: unknown }).typeArguments) {
@@ -10647,7 +10647,7 @@ function lowerCall(
     };
   }
 
-  // `@t2r/std` std-shim intrinsics (series 084) — recognized by the reserved
+  // `@ttr/std` std-shim intrinsics (series 084) — recognized by the reserved
   // import specifier (the local alias is a key in `analysis.stdShim`). Routed
   // *before* the generic user-fn path so a shim call never falls through to a
   // plain `call`. A user's own `parseJson`/`stringifyJson` from elsewhere is not
@@ -10923,11 +10923,11 @@ function lowerCall(
     ) {
       if (methodName === "now") {
         throw new UnsupportedError({
-          type: '`Date.now()` reads the host wall-clock (non-differential) — import `clock` from "@t2r/std" and call `clock(epochMs).now()` (an explicit seed makes the instant differential-stable)',
+          type: '`Date.now()` reads the host wall-clock (non-differential) — import `clock` from "@ttr/std" and call `clock(epochMs).now()` (an explicit seed makes the instant differential-stable)',
         });
       }
       throw new UnsupportedError({
-        type: `\`Date.${methodName}\` is not modeled — construct with \`new Date(ms | isoString | fields)\`, and use \`clock\` from "@t2r/std" for a seeded now`,
+        type: `\`Date.${methodName}\` is not modeled — construct with \`new Date(ms | isoString | fields)\`, and use \`clock\` from "@ttr/std" for a seeded now`,
       });
     }
     // A static method call `Type.m(args)` off a class name (series 060) → the
@@ -11120,7 +11120,7 @@ function lowerCall(
       });
     }
     // Bare `JSON.stringify(v)` / `JSON.parse(s)` are fail-loud and **redirect** to
-    // the `@t2r/std` shim (series 084). The type/fidelity policy moved to the
+    // the `@ttr/std` shim (series 084). The type/fidelity policy moved to the
     // blessed call-site API: `parseJson<T>` gives the emitter a concrete
     // `from_str::<T>` target (no `any`); `stringifyJson` carries the JS number
     // fidelity. Recognition of the shim is by the reserved import specifier.
@@ -11130,12 +11130,12 @@ function lowerCall(
     ) {
       if (methodName === "stringify") {
         throw new UnsupportedError({
-          type: '`JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)`',
+          type: '`JSON.stringify` is not accepted — import `stringifyJson` from "@ttr/std" and call `stringifyJson(v)`',
         });
       }
       if (methodName === "parse") {
         throw new UnsupportedError({
-          type: '`JSON.parse` is not accepted — import `parseJson` from "@t2r/std" and call `parseJson<T>(s)`',
+          type: '`JSON.parse` is not accepted — import `parseJson` from "@ttr/std" and call `parseJson<T>(s)`',
         });
       }
       throw new UnsupportedError({ type: `JSON.${methodName}` });
@@ -13214,10 +13214,10 @@ function lowerNumberStatic(
   if (global === "Math") {
     // `Math.random()` is fail-loud (series 089) — a hidden global PRNG cannot be
     // differential-stable against JS. Redirect to the explicit-seed `rng(seed)`
-    // shim from "@t2r/std" (mirrors the bare-`JSON.parse` redirect precedent).
+    // shim from "@ttr/std" (mirrors the bare-`JSON.parse` redirect precedent).
     if (methodName === "random") {
       throw new UnsupportedError({
-        type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+        type: '`Math.random` is not accepted — import `rng` from "@ttr/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
       });
     }
     // `Math.floor/ceil/round/abs/trunc/sign/sqrt` — unary native `f64` methods.
@@ -13290,7 +13290,7 @@ function lowerNumberStatic(
  * + variadic sources) included — is fail-loud, a tracked residual.
  */
 /**
- * Lower a recognized `@t2r/std` std-shim call (series 084).
+ * Lower a recognized `@ttr/std` std-shim call (series 084).
  *
  * - `stringifyJson(v)` → the shipped 045 `tslib::json::stringify` writer (JS
  *   number fidelity, insertion-ordered keys). Reuses the `jsonStringify` HIR.
@@ -13301,7 +13301,7 @@ function lowerNumberStatic(
  *   `parseResultBindings` by `lowerVarDecl` so `.ok`/`.value`/`.error` resolve.
  */
 /**
- * The flat sync `@t2r/std` I/O intrinsics (series 100) → their `tslib::io` /
+ * The flat sync `@ttr/std` I/O intrinsics (series 100) → their `tslib::io` /
  * `std` targets. `fallible` ones thread `?` (the containing fn is `Result` via
  * the seeded fallibility fixpoint); `refArgs` passes string args by `&` (→ `&str`
  * via deref coercion). Zero-arg intrinsics (`args`/`readStdin`/`readLine`/
@@ -13329,7 +13329,7 @@ const STD_IO_TARGETS: Record<
 };
 
 /**
- * Lower a flat sync `@t2r/std` I/O intrinsic call (series 100). Returns `null`
+ * Lower a flat sync `@ttr/std` I/O intrinsic call (series 100). Returns `null`
  * for a non-I/O shim name (the JSON/rng intrinsics handled by the caller). The
  * `fsAsync`/`http` namespace objects and the `Writer`/`HttpResponse` types are
  * not directly callable — a direct call is fail-loud.
@@ -13348,7 +13348,7 @@ function lowerStdIoCall(
       shim === "HttpResponse"
     ) {
       throw new UnsupportedError({
-        type: `\`${shim}\` from "@t2r/std" is not directly callable (use its members${
+        type: `\`${shim}\` from "@ttr/std" is not directly callable (use its members${
           shim === "fsAsync" || shim === "http" ? `, e.g. \`${shim}.…\`` : ""
         })`,
       });
@@ -13432,7 +13432,7 @@ function lowerStdShimCall(
   const arg = call.arguments[0];
   if (!arg) {
     throw new UnsupportedError({
-      type: `\`${shim}\` from "@t2r/std" takes exactly one argument`,
+      type: `\`${shim}\` from "@ttr/std" takes exactly one argument`,
     });
   }
   if (shim === "stringifyJson") {
@@ -13550,7 +13550,7 @@ function assertModeledParseTarget(ty: RustType, analysis: ModuleAnalysis): void 
 
 /**
  * Fail loud on a bare `JSON.parse(...)` / `JSON.stringify(...)`, redirecting to
- * the `@t2r/std` shim (series 084). Bare-JSON calls in expression position are
+ * the `@ttr/std` shim (series 084). Bare-JSON calls in expression position are
  * already caught by `lowerCall`; this covers the *binding-init* gate, which runs
  * before the init is lowered (so a `const v = JSON.parse(s)` gets the redirect
  * message, not "binding without a type annotation").
@@ -13570,19 +13570,19 @@ function redirectBareJson(e: Expression): void {
   const method = (m.property as Identifier).name;
   if (method === "parse") {
     throw new UnsupportedError({
-      type: '`JSON.parse` is not accepted — import from "@t2r/std": `parseJson<T>(s)` for a modeled shape, or `parseJsonValue(s)` for a dynamic `JsonValue` (series 090)',
+      type: '`JSON.parse` is not accepted — import from "@ttr/std": `parseJson<T>(s)` for a modeled shape, or `parseJsonValue(s)` for a dynamic `JsonValue` (series 090)',
     });
   }
   if (method === "stringify") {
     throw new UnsupportedError({
-      type: '`JSON.stringify` is not accepted — import `stringifyJson` from "@t2r/std" and call `stringifyJson(v)`',
+      type: '`JSON.stringify` is not accepted — import `stringifyJson` from "@ttr/std" and call `stringifyJson(v)`',
     });
   }
 }
 
 /**
  * Fail loud on a bare `Math.random` (called `Math.random()` or uncalled as a
- * value), redirecting to the `@t2r/std` `rng(seed)` shim (series 089). Covers the
+ * value), redirecting to the `@ttr/std` `rng(seed)` shim (series 089). Covers the
  * binding-init gate, which runs before the init is lowered — so a
  * `const f = Math.random` / `const x = Math.random()` gets the redirect message,
  * not "binding without a type annotation". The expression-position forms are also
@@ -13607,12 +13607,12 @@ function redirectBareMathRandom(e: Expression): void {
     (m.property as Identifier).name === "random"
   ) {
     throw new UnsupportedError({
-      type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+      type: '`Math.random` is not accepted — import `rng` from "@ttr/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
     });
   }
 }
 
-/** Is `e` a call to the `@t2r/std` `parseJson<T>` intrinsic (series 084)? Keyed
+/** Is `e` a call to the `@ttr/std` `parseJson<T>` intrinsic (series 084)? Keyed
  * off the local alias recorded from the reserved-specifier import. */
 function isParseJsonShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
   if (e.type !== "CallExpression") return false;
@@ -13623,7 +13623,7 @@ function isParseJsonShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
   );
 }
 
-/** Is `e` a call to the `@t2r/std` `rng(seed)` intrinsic (series 089)? Keyed off
+/** Is `e` a call to the `@ttr/std` `rng(seed)` intrinsic (series 089)? Keyed off
  * the local alias recorded from the reserved-specifier import. */
 function isRngShimCall(e: Expression, analysis: ModuleAnalysis): boolean {
   if (e.type !== "CallExpression") return false;
@@ -13655,7 +13655,7 @@ const JSON_VALUE_METHODS = new Map<string, string>([
   ["length", "length"],
 ]);
 
-/** Is `e` a call to one of the `@t2r/std` JSON-boundary intrinsics
+/** Is `e` a call to one of the `@ttr/std` JSON-boundary intrinsics
  * (`parseJsonValue`/`fromJsonValue`/`toJsonValue`, series 090)? Each is typed by
  * construction (a `ParseResult<…>` or a `JsonValue`), so it is exempt from the
  * binding-annotation gate. Keyed off the reserved-specifier import alias. */
@@ -13728,7 +13728,7 @@ function isRngMethodInit(e: Expression, analysis: ModuleAnalysis): boolean {
 }
 
 /**
- * The `RustType` an `@t2r/std` I/O intrinsic binding holds (series 100), peeling
+ * The `RustType` an `@ttr/std` I/O intrinsic binding holds (series 100), peeling
  * the `try`/`await` wrappers off the lowered init: `readDir`/`args` →
  * `Vec<String>`, `env`/`readLine` → `Option<String>`, `readFile`/`readStdin` →
  * `String`. Returns `null` for a non-I/O (or void) init. Fed to `bindingTypes`
@@ -13756,7 +13756,7 @@ function ioBindingRustType(init: HirExpr): RustType | null {
   }
 }
 
-/** Is `e` a direct call to an `@t2r/std` I/O intrinsic that already returns an
+/** Is `e` a direct call to an `@ttr/std` I/O intrinsic that already returns an
  * `Option` (`env`/`readLine`, series 100)? Used to skip the Option re-wrap on a
  * reassignment (the value is Option by construction). */
 function isOptionReturningIoCall(e: Expression, analysis: ModuleAnalysis): boolean {
@@ -13791,7 +13791,7 @@ function isWriterReceiver(obj: Expression, analysis: ModuleAnalysis): boolean {
 }
 
 /**
- * Is `e` an `@t2r/std` I/O intrinsic init (series 100) — a flat sync I/O call
+ * Is `e` an `@ttr/std` I/O intrinsic init (series 100) — a flat sync I/O call
  * (`readFile(p)`, `env(n)`, `stdout()`, …) or an `await fsAsync.<m>(...)` /
  * `await http.<m>(...)`? Such a binding is typed by construction (the `tslib`
  * return type; Rust infers it — a `Writer`/`HttpResponse`/`String`/`Vec`/
@@ -14450,7 +14450,7 @@ function lowerDateNew(expr: NewExpression, analysis: ModuleAnalysis): HirExpr {
   const args = expr.arguments;
   if (args.length === 0) {
     throw new UnsupportedError({
-      type: 'no-arg `new Date()` reads the host wall-clock (non-differential) — import `clock` from "@t2r/std" and call `clock(epochMs)` for an explicit, differential-stable instant',
+      type: 'no-arg `new Date()` reads the host wall-clock (non-differential) — import `clock` from "@ttr/std" and call `clock(epochMs)` for an explicit, differential-stable instant',
     });
   }
   if (args.length === 1) {
@@ -14626,7 +14626,7 @@ function lowerMember(
       }
     }
     // Bare `Math.random` as a *value* (uncalled, e.g. assigned or passed) is
-    // fail-loud (series 089) — redirect to `rng(seed)` from "@t2r/std". The
+    // fail-loud (series 089) — redirect to `rng(seed)` from "@ttr/std". The
     // *called* form `Math.random()` is caught earlier in `lowerNumberStatic`.
     if (
       member.object.type === "Identifier" &&
@@ -14634,10 +14634,10 @@ function lowerMember(
       prop === "random"
     ) {
       throw new UnsupportedError({
-        type: '`Math.random` is not accepted — import `rng` from "@t2r/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
+        type: '`Math.random` is not accepted — import `rng` from "@ttr/std" and call `rng(seed)` (an explicit seed makes the stream differential-stable)',
       });
     }
-    // `@t2r/std` `http.get`/`post` result (series 100): `.status`/`.ok` read the
+    // `@ttr/std` `http.get`/`post` result (series 100): `.status`/`.ok` read the
     // public `HttpResponse` fields; `.body` is the `self`-consuming `body()`
     // accessor. Routed by the binding being a recorded `httpResponseBindings`
     // name (`const res = await http.get(u)`). An unknown member is fail-loud.
@@ -14664,7 +14664,7 @@ function lowerMember(
         type: `\`.${prop}\` on an http response — only \`.status\`, \`.ok\`, \`.body\` are available`,
       });
     }
-    // `@t2r/std` `parseJson<T>` result (series 084): `.ok` is the `ParseResult`
+    // `@ttr/std` `parseJson<T>` result (series 084): `.ok` is the `ParseResult`
     // discriminant field; `.value`/`.error` are the borrowing accessors
     // `.value()`/`.error()` (usable under a proven-`ok`/`!ok` branch). Routed by
     // the binding being a recorded `parseResultBindings` name.

@@ -1,8 +1,8 @@
-# 089 — `@t2r/std` `rng(seed)` shim — specs
+# 089 — `@ttr/std` `rng(seed)` shim — specs
 
 Spec prefix **RNG**. Differential (TS-via-Bun vs Rust-run stdout) + shape
 (emitted-Rust substring) + fail-loud (throws with the redirect message). All
-programs `import { rng } from "@t2r/std"`; the harness resolves the workspace
+programs `import { rng } from "@ttr/std"`; the harness resolves the workspace
 package under Bun so the SplitMix64 reference stream matches the emitted
 `tslib::rng` stream bit-for-bit. Test file:
 `packages/compiler/tests/rng-shim.test.ts`.
@@ -63,13 +63,13 @@ the algorithm itself is nailed down (a change to the constants would break it).
 ## Fail-loud (forbid bare `Math.random` + redirect)
 
 - **RNG15** — bare `Math.random()` → throws `UnsupportedError` mentioning `rng`
-  and `@t2r/std`.
+  and `@ttr/std`.
 - **RNG16** — bare `Math.random` as a value (uncalled, e.g. assigned) → throws
-  mentioning `rng` and `@t2r/std`.
+  mentioning `rng` and `@ttr/std`.
 - **RNG17** — an unknown method on an rng handle
   (`const r = rng(1); r.bytes(4);`) → throws mentioning only
   `next`/`int`/`pick`/`shuffle` are available.
 - **RNG18** — `rng` remains subject to the 084 guards: `import { rng } from
-  "elsewhere"` is not recognized (throws — only `@t2r/std` is recognized), and an
-  unknown `@t2r/std` name still throws (covered by STD15/STD16; re-assert `rng`
-  specifically is only routed from `@t2r/std`).
+  "elsewhere"` is not recognized (throws — only `@ttr/std` is recognized), and an
+  unknown `@ttr/std` name still throws (covered by STD15/STD16; re-assert `rng`
+  specifically is only routed from `@ttr/std`).

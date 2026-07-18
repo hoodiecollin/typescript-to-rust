@@ -1,4 +1,4 @@
-# 100 — I/O via `@t2r/std` — specs
+# 100 — I/O via `@ttr/std` — specs
 
 Spec prefix **IO**. Two spec kinds:
 - **Differential** (TS-via-Bun vs Rust-run stdout, identical bytes) — the
@@ -8,7 +8,7 @@ Spec prefix **IO**. Two spec kinds:
   via a harness-supplied `127.0.0.1:<PORT>` base URL.
 - **Fail-loud** — throws the redirect/deferral message (design §9).
 
-All programs `import { … } from "@t2r/std"`; the harness resolves the workspace
+All programs `import { … } from "@ttr/std"`; the harness resolves the workspace
 package under Bun so the TS reference bodies execute the same effect the emitted
 `std::fs`/`tslib::io`/`tokio::fs`/`tslib::http` targets produce. Test file:
 `packages/compiler/tests/std-io.test.ts`.
@@ -124,22 +124,22 @@ platform-variant).
 ## Recognition — aliasing routes by specifier, not name
 
 - **IO22** — aliased import still routes: `import { readFile as rf } from
-  "@t2r/std"; writeFile(p,"z"); console.log(rf(p));` → `z` (differential;
+  "@ttr/std"; writeFile(p,"z"); console.log(rf(p));` → `z` (differential;
   recognition is by specifier — the 084/089 rule).
 - **IO23** — a user's own `readFile` from elsewhere is **not** hijacked: a local
-  `function readFile(){…}` (no `@t2r/std` import) lowers as an ordinary user fn,
+  `function readFile(){…}` (no `@ttr/std` import) lowers as an ordinary user fn,
   not the intrinsic (shape / behavioral — confirms no name heuristic).
 
 ## Fail-loud — bare footgun redirects (design §9)
 
 - **IO-FL1** — bare `readFileSync(...)` / `fs.readFile` → fail-loud redirecting
-  to `readFile` from `@t2r/std`.
+  to `readFile` from `@ttr/std`.
 - **IO-FL2** — bare `fetch(url)` → fail-loud redirecting to `http.get` from
-  `@t2r/std`.
+  `@ttr/std`.
 - **IO-FL3** — bare `process.argv` → fail-loud redirecting to `args`.
 - **IO-FL4** — bare `process.env.X` → fail-loud redirecting to `env`.
 - **IO-FL5** — bare `process.exit(0)` → fail-loud redirecting to `exit` from
-  `@t2r/std`.
+  `@ttr/std`.
 - **IO-FL6** — bare `process.stdin` read → fail-loud redirecting to
   `readStdin`/`readLine`.
 
@@ -160,5 +160,5 @@ platform-variant).
 - **IO-FL13** — unknown method on a `Writer` handle (`stdout().frob()`) →
   fail-loud `.frob on a Writer — only write/writeLine/flush are available` (the
   089 handle-method pattern).
-- **IO-FL14** — unknown `@t2r/std` import name (`import { readSocket }`) →
-  fail-loud `'readSocket' is not exported by "@t2r/std"` (unchanged 084 guard).
+- **IO-FL14** — unknown `@ttr/std` import name (`import { readSocket }`) →
+  fail-loud `'readSocket' is not exported by "@ttr/std"` (unchanged 084 guard).

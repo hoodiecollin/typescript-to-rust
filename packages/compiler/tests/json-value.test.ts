@@ -1,7 +1,7 @@
 /**
  * Specs for series 090 — the dynamic/recursive value model (`JsonValue`),
  * increment 1: the JSON boundary (issue #59). An opt-in, named, dynamically
- * checked type reached only by importing `JsonValue` from `@t2r/std` — it does
+ * checked type reached only by importing `JsonValue` from `@ttr/std` — it does
  * NOT reopen `any`. Builds on series 084 (`ParseResult<T>` + the shim lane):
  * `parseJsonValue` lowers to `ParseResult::<tslib::json::JsonValue>::parse`, and
  * a `serde(transparent)` newtype means the Bun-run wrapper and the Rust value
@@ -17,8 +17,8 @@ import { compile, defineDifferential } from "./_support/differential";
 import { DialectError } from "../src/errors";
 import { UnsupportedError } from "../src/lower";
 
-const IMPORT = `import { parseJsonValue, fromJsonValue, toJsonValue, stringifyJson, JsonValue } from "@t2r/std";\n`;
-const P = `import { parseJsonValue } from "@t2r/std";\n`;
+const IMPORT = `import { parseJsonValue, fromJsonValue, toJsonValue, stringifyJson, JsonValue } from "@ttr/std";\n`;
+const P = `import { parseJsonValue } from "@ttr/std";\n`;
 
 defineDifferential("json-value", [
   // ── Dynamic parse + coercion ──────────────────────────────────────────────
@@ -162,7 +162,7 @@ if (r.ok) { console.log(r.value.floor()); }`;
   });
 
   test("JSV18 JsonValue used as a map/set key → fail-loud (not hashable)", () => {
-    const src = `import { JsonValue } from "@t2r/std";
+    const src = `import { JsonValue } from "@ttr/std";
 const s = new Set<JsonValue>();
 console.log(s.size);`;
     expect(() => compile(src)).toThrow();

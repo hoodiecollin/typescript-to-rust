@@ -1,7 +1,7 @@
 /**
- * The `@t2r/std` std-shim recognition surface (series 084, epic #52).
+ * The `@ttr/std` std-shim recognition surface (series 084, epic #52).
  *
- * `@t2r/std` is a third routing lane: blessed TS functions the developer imports
+ * `@ttr/std` is a third routing lane: blessed TS functions the developer imports
  * *instead of* footgun APIs, recognized by the compiler **by the reserved import
  * specifier** — never a name heuristic. This module owns the specifier + the set
  * of intrinsic names, and the AST scan that collects a module's local→intrinsic
@@ -12,10 +12,10 @@
 import type { ImportDeclaration, ImportSpecifier, Program } from "./ast";
 
 /** The reserved import specifier. Recognition keys off exactly this string. */
-export const STD_SHIM_SPECIFIER = "@t2r/std";
+export const STD_SHIM_SPECIFIER = "@ttr/std";
 
 /**
- * The intrinsic names `@t2r/std` exports (the Tier-A surface). `JsonValue`
+ * The intrinsic names `@ttr/std` exports (the Tier-A surface). `JsonValue`
  * (series 090) is a **type** intrinsic, not a callable one — it is recognized so
  * `import { JsonValue }` validates and a `JsonValue` type reference resolves, but
  * it is never lowered as a value call.
@@ -89,7 +89,7 @@ export const STD_SHIM_EXPORTS: ReadonlySet<string> = new Set<StdShimName>([
 ]);
 
 /**
- * The `@t2r/std` I/O intrinsics whose lowering is **fallible** — a call reaches
+ * The `@ttr/std` I/O intrinsics whose lowering is **fallible** — a call reaches
  * the 049 fallibility fixpoint as a fallible leaf (its containing fn becomes
  * `Result`-returning; the call site threads `?`, or `.await?` for the async
  * ones). The infallible carve-outs (`exists`/`env`/`args`/`exit`/`stdout`/
@@ -108,10 +108,10 @@ export const FALLIBLE_SYNC_IO: ReadonlySet<StdShimName> = new Set([
 ]);
 
 /**
- * Scan a program's top-level `import { … } from "@t2r/std"` statements and build
+ * Scan a program's top-level `import { … } from "@ttr/std"` statements and build
  * the local-alias → intrinsic-name map (`import { parseJson as pj }` →
  * `pj → "parseJson"`). Imports from any other specifier are ignored here (the
- * validator rejects them separately); an unknown `@t2r/std` name is likewise the
+ * validator rejects them separately); an unknown `@ttr/std` name is likewise the
  * validator's job. This scan only *collects* the recognized bindings.
  */
 export function collectStdShimBindings(

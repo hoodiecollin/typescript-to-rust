@@ -152,7 +152,7 @@ export type RustType =
    * `tslib::json::JsonValue` — the opt-in dynamic JSON value (series 090, epic
    * #59). A singleton (no inner type); the `serde(transparent)` newtype over
    * `serde_json::Value` carries an accessor surface
-   * (`get`/`at`/`asNumber`/…/`length`). Reached only via the `@t2r/std`
+   * (`get`/`at`/`asNumber`/…/`length`). Reached only via the `@ttr/std`
    * `parseJsonValue`/`fromJsonValue`/`toJsonValue` boundary — it does not reopen
    * `any`. Not `Copy`, not a modeled map/set key (not hashable).
    */
@@ -375,20 +375,20 @@ export type HirExpr =
    */
   | { kind: "optMember"; receiver: HirExpr; field: string }
   /**
-   * `stringifyJson(v)` (the `@t2r/std` shim, series 084) → `tslib::json::stringify(&v)`
+   * `stringifyJson(v)` (the `@ttr/std` shim, series 084) → `tslib::json::stringify(&v)`
    * → `String`. Reuses the shipped 045 writer (JS number fidelity). The bare
    * `JSON.stringify` recognition was retired — this HIR now comes only from the shim.
    */
   | { kind: "jsonStringify"; value: HirExpr }
   /**
-   * `parseJson<T>(s)` (the `@t2r/std` shim, series 084) →
+   * `parseJson<T>(s)` (the `@ttr/std` shim, series 084) →
    * `tslib::json::ParseResult::<T>::parse(&s)` → a `ParseResult<T>` carrying
    * `.ok`/`.value()`/`.error()`. `target` is the required modeled `T`. Replaces
    * the retired 045 `jsonParse` (bare `JSON.parse` is now fail-loud + redirected).
    */
   | { kind: "parseJson"; source: HirExpr; target: RustType }
   /**
-   * `rng(seed)` (the `@t2r/std` shim, series 089) → `tslib::rng::Rng::new(<seed>)`
+   * `rng(seed)` (the `@ttr/std` shim, series 089) → `tslib::rng::Rng::new(<seed>)`
    * → a stateful `Rng` handle. The binding is emitted `let mut` (methods take
    * `&mut self`); `.next()`/`.int()`/`.pick()`/`.shuffle()` route through the
    * generic `method` HIR. Hand-rolled SplitMix64, mirrored in the TS shim so the
@@ -396,7 +396,7 @@ export type HirExpr =
    */
   | { kind: "rngNew"; seed: HirExpr }
   /**
-   * `fromJsonValue<T>(v)` (the `@t2r/std` shim, series 090) →
+   * `fromJsonValue<T>(v)` (the `@ttr/std` shim, series 090) →
    * `tslib::json::ParseResult::<T>::from_value(<v>.0)` → a `ParseResult<T>` (the
    * 084 surface), the dynamic→static crossing. `value` is the `JsonValue` expr
    * (`.0` unwraps the transparent newtype into a `serde_json::Value`); `target` is
@@ -404,7 +404,7 @@ export type HirExpr =
    */
   | { kind: "fromJsonValue"; value: HirExpr; target: RustType }
   /**
-   * `toJsonValue<T>(x)` (the `@t2r/std` shim, series 090) →
+   * `toJsonValue<T>(x)` (the `@ttr/std` shim, series 090) →
    * `tslib::json::JsonValue(serde_json::to_value(&<x>).expect("toJsonValue"))` →
    * the static→dynamic crossing. `value` is the modeled source expr (lowered with
    * its `<T>` type so an object literal becomes a struct literal).

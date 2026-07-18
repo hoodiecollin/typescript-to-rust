@@ -1,5 +1,5 @@
-//! I/O helpers (series 100, the `@t2r/std` shim, epic #52). The emitter routes
-//! every `@t2r/std` I/O intrinsic through this module (fn-first, per the
+//! I/O helpers (series 100, the `@ttr/std` shim, epic #52). The emitter routes
+//! every `@ttr/std` I/O intrinsic through this module (fn-first, per the
 //! codegen-helper-boundary note) so behavior is written once in an audited crate
 //! rather than open-coded in codegen. **Every fallible helper normalizes its
 //! error to `String` at the leaf** (`map_err(|e| e.to_string())`): the emitter

@@ -11,7 +11,7 @@ rationale.
   for the one-call `to_rfc3339_opts(Millis, true)` exact `toISOString()` byte-parity.
 - **Non-determinism (★B): DECIDED = (a) shim-injected clock**, mirroring `rng(seed)`.
   Bare `Date.now()` and no-arg `new Date()` are **fail-loud**, redirected to a seeded
-  `@t2r/std` **`clock(epochMs)` → `Clock`** handle with `now()/date()/tick(ms)` (the
+  `@ttr/std` **`clock(epochMs)` → `Clock`** handle with `now()/date()/tick(ms)` (the
   direct structural twin of `rng(seed)`). The seed is an explicit call-site argument
   (a hidden harness seed is the ambient-global antipattern we're removing — rejected).
 - **Timezone fidelity (★D): DECIDED = (a) UTC-normalize the short local accessors** —
@@ -48,7 +48,7 @@ JS `Date` is two things wired together:
    clock. This is **non-deterministic**, exactly the `Math.random` problem, and
    cannot be compared by the differential oracle (the Bun run and the Rust run
    observe different instants). It gets the **`Math.random` → `rng(seed)`
-   treatment**: fail-loud, redirect to an explicit `@t2r/std` clock intrinsic.
+   treatment**: fail-loud, redirect to an explicit `@ttr/std` clock intrinsic.
 
 The dialect's answer, as everywhere: **move the policy to an explicit call-site
 API**, keep the pure algebra native, and fail loud on the ambient/global read.
@@ -90,7 +90,7 @@ differential-stable; an explicit seed makes the stream differential-stable."
 
 ### Options
 
-- **(a) Shim-injected clock — fail-loud the ambient read, redirect to `@t2r/std`.**
+- **(a) Shim-injected clock — fail-loud the ambient read, redirect to `@ttr/std`.**
   Mirrors `rng(seed)` exactly: bare `Date.now()` / no-arg `new Date()` are
   fail-loud with an `UnsupportedError` naming the shim; the developer imports an
   explicit clock whose "current time" is an explicit argument, so both runtimes
@@ -105,7 +105,7 @@ differential-stable; an explicit seed makes the stream differential-stable."
 
 ### Recommendation — **(a)**, mirroring `rng`.
 
-Add one export to `@t2r/std`, shaped like `rng(seed)`: a **seeded clock handle**.
+Add one export to `@ttr/std`, shaped like `rng(seed)`: a **seeded clock handle**.
 
 ```ts
 // packages/std/index.ts  (reference body — run under Bun, never compiled)
@@ -120,7 +120,7 @@ export function clock(epochMs: number): Clock { return new Clock(epochMs); }
 ```
 
 ```ts
-import { clock } from "@t2r/std";
+import { clock } from "@ttr/std";
 const c = clock(1_700_000_000_000); // an explicit, differential-stable "now"
 console.log(c.now());               // 1700000000000  (identical both sides)
 console.log(c.date().toISOString());// 2023-11-14T22:13:20.000Z
@@ -258,7 +258,7 @@ the divergence in `dialect.md`, and pin `TZ=UTC` so the oracle can never observe
 mismatch. This keeps everyday code (`d.getHours()`) working, stays
 differential-stable, and confines the whole timezone question to a single
 documented line. Local-TZ *fidelity* (real per-zone offsets) is a future
-graduation if ever wanted — it would need an explicit `@t2r/std` zone argument, the
+graduation if ever wanted — it would need an explicit `@ttr/std` zone argument, the
 same explicit-input pattern.
 
 - **★ Sub-decision D (Collin):** (a) UTC-normalize the short accessors + document the
@@ -354,7 +354,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 ## Fail-loud residual (kept out; forbid + redirect where a shim exists)
 
-- **`Date.now()`** (bare) → redirect to `clock` from `@t2r/std` (mirrors
+- **`Date.now()`** (bare) → redirect to `clock` from `@ttr/std` (mirrors
   `Math.random` → `rng`).
 - **`new Date()`** (no args) → same redirect to `clock`.
 - **`Date.parse(...)` / loose string parsing** (non-strict-ISO forms) → fail-loud;

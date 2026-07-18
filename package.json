@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.8.3",
-    "@t2r/std": "workspace:*",
+    "@ttr/std": "workspace:*",
     "typescript": "^5.5.2"
   }
 }

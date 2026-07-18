@@ -34,10 +34,10 @@ console.log(merged["x"], merged["y"], merged["z"]);`,
     expected: "1 20 3",
   },
   {
-    name: "SHIP-JSON stringifyJson(v) — object + number fidelity (via @t2r/std)",
+    name: "SHIP-JSON stringifyJson(v) — object + number fidelity (via @ttr/std)",
     // Migrated to the std-shim (series 084): bare `JSON.stringify` is now fail-loud
     // and redirects; the fidelity writer lives behind `stringifyJson`.
-    src: `import { stringifyJson } from "@t2r/std";
+    src: `import { stringifyJson } from "@ttr/std";
 interface P { n: number; s: string; }
 const p: P = { n: 1, s: "hi" };
 console.log(stringifyJson(p));
@@ -47,7 +47,7 @@ console.log(stringifyJson([1, 2, 3]));`,
   },
   {
     name: "SHIP-JSON-INF stringifyJson — Infinity/NaN → null (already faithful)",
-    src: `import { stringifyJson } from "@t2r/std";
+    src: `import { stringifyJson } from "@ttr/std";
 interface P { a: number; b: number; }
 const p: P = { a: 1 / 0, b: 0 / 0 };
 console.log(stringifyJson(p));`,
@@ -75,7 +75,7 @@ describe("083 catalog rows — undefined-omission (resolved in series 091)", () 
     // fixed. An `undefined`-only field emits `#[serde(skip_serializing_if]` so serde
     // OMITS the key, matching JS. (A `null`-bearing field still keeps `null`; see
     // `undefined-omission.test.ts` for the full matrix.)
-    const src = `import { stringifyJson } from "@t2r/std";
+    const src = `import { stringifyJson } from "@ttr/std";
 interface P { a: number; b: number | undefined; }
 const p: P = { a: 1, b: undefined };
 console.log(stringifyJson(p));`;

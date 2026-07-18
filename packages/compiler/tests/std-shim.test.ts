@@ -1,7 +1,7 @@
 /**
- * Specs for series 084 — the `@t2r/std` std-shim, Tier A (`parseJson` /
+ * Specs for series 084 — the `@ttr/std` std-shim, Tier A (`parseJson` /
  * `stringifyJson`). A third routing lane: blessed TS functions recognized by the
- * reserved import specifier `"@t2r/std"` and lowered to known Rust. `stringifyJson`
+ * reserved import specifier `"@ttr/std"` and lowered to known Rust. `stringifyJson`
  * reuses the 045 `tslib::json::stringify` writer; `parseJson<T>` lowers to
  * `tslib::json::ParseResult::<T>::parse`. Bare `JSON.parse`/`JSON.stringify` are
  * fail-loud with a redirect. Differential (TS-via-Bun vs Rust) + shape + throws.
@@ -11,8 +11,8 @@
 import { describe, expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
 
-const STR = `import { stringifyJson } from "@t2r/std";\n`;
-const PARSE = `import { parseJson } from "@t2r/std";\n`;
+const STR = `import { stringifyJson } from "@ttr/std";\n`;
+const PARSE = `import { parseJson } from "@ttr/std";\n`;
 
 defineDifferential("std-shim", [
   {
@@ -46,7 +46,7 @@ console.log(stringifyJson(p));`,
   },
   {
     name: "STD6 an aliased import still routes (recognition by specifier)",
-    src: `import { stringifyJson as sj } from "@t2r/std";
+    src: `import { stringifyJson as sj } from "@ttr/std";
 console.log(sj(5));`,
     expected: "5",
     extra: ({ rust }) => expect(rust).toContain("tslib::json::stringify"),
@@ -74,7 +74,7 @@ if (!r.ok) { console.log("bad"); }`,
   },
   {
     name: "STD10 round-trips through stringifyJson",
-    src: `import { parseJson, stringifyJson } from "@t2r/std";
+    src: `import { parseJson, stringifyJson } from "@ttr/std";
 interface Point { x: number; y: number; }
 const p: Point = { x: 7, y: 9 };
 const r = parseJson<Point>(stringifyJson(p));
@@ -86,13 +86,13 @@ if (r.ok) { console.log(r.value.x, r.value.y); }`,
 describe("084 fail-loud: forbid bare JSON + redirect", () => {
   test("STD11 bare JSON.stringify → redirect to stringifyJson", () => {
     expect(() => compile(`console.log(JSON.stringify(5));`)).toThrow(
-      /stringifyJson.*@t2r\/std|@t2r\/std.*stringifyJson/,
+      /stringifyJson.*@ttr\/std|@ttr\/std.*stringifyJson/,
     );
   });
 
   test("STD12 bare JSON.parse (untyped) → redirect to parseJson", () => {
     expect(() => compile(`const v = JSON.parse("[1,2,3]");`)).toThrow(
-      /parseJson.*@t2r\/std|@t2r\/std.*parseJson/,
+      /parseJson.*@ttr\/std|@ttr\/std.*parseJson/,
     );
   });
 
@@ -111,15 +111,15 @@ const p: Point = JSON.parse('{"x":3,"y":4}');`,
     ).toThrow(/parseJson/);
   });
 
-  test("STD15 unknown @t2r/std import name → not exported", () => {
+  test("STD15 unknown @ttr/std import name → not exported", () => {
     expect(() =>
-      compile(`import { nope } from "@t2r/std";\nconsole.log(1);`),
-    ).toThrow(/@t2r\/std/);
+      compile(`import { nope } from "@ttr/std";\nconsole.log(1);`),
+    ).toThrow(/@ttr\/std/);
   });
 
-  test("STD16 import from another bare specifier → only @t2r/std recognized", () => {
+  test("STD16 import from another bare specifier → only @ttr/std recognized", () => {
     expect(() =>
       compile(`import { x } from "lodash";\nconsole.log(1);`),
-    ).toThrow(/@t2r\/std/);
+    ).toThrow(/@ttr\/std/);
   });
 });

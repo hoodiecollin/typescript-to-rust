@@ -408,7 +408,7 @@ export interface Program extends Span {
 }
 
 /**
- * `import { a, b as c } from "src"`. Series 084 recognized only `@t2r/std`; the
+ * `import { a, b as c } from "src"`. Series 084 recognized only `@ttr/std`; the
  * module system (series 050) adds `./`-relative imports across files. `specifiers`
  * may carry a default (`import d from …`) or namespace (`import * as ns …`) form.
  * Both are **supported** (series 050d): a namespace import maps to a Rust module

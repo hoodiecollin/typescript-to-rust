@@ -6,14 +6,14 @@
 use serde::Serialize;
 use serde_json::Value;
 
-/// `parseJson<T>(s)` result (series 084, the `@t2r/std` shim). A purpose-built
+/// `parseJson<T>(s)` result (series 084, the `@ttr/std` shim). A purpose-built
 /// std-shim result type: the dialect has no generic/payload-carrying enum to
 /// model a raw `{ ok, value } | { ok, error }` union, so the compiler lowers
 /// `parseJson<T>(s)` to `ParseResult::<T>::parse(&s)` and reads the tagged
 /// surface (`.ok` field, `.value()` / `.error()` accessors). `serde`'s
 /// structural deserialize *is* the validation — an ill-shaped input yields an
 /// error result rather than a panic. Mirrors the TS `ParseResult<T>` union in
-/// `@t2r/std` so the differential oracle observes identical `.ok`/`.value`.
+/// `@ttr/std` so the differential oracle observes identical `.ok`/`.value`.
 pub struct ParseResult<T> {
     /// `true` when deserialization succeeded (the discriminant).
     pub ok: bool,
@@ -55,7 +55,7 @@ impl<T: serde::de::DeserializeOwned> ParseResult<T> {
 }
 
 /// A dynamic JSON value (series 090, epic #59) — the opt-in escape hatch from the
-/// statically-typed dialect into an untyped tree, reached only via `@t2r/std`'s
+/// statically-typed dialect into an untyped tree, reached only via `@ttr/std`'s
 /// `parseJsonValue` / `fromJsonValue` / `toJsonValue`. A `#[serde(transparent)]`
 /// newtype over `serde_json::Value`, so it (de)serializes exactly as the inner
 /// value — it drops straight into `ParseResult<T>` and `stringify` with no

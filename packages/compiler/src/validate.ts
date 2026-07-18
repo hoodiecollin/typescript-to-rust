@@ -81,8 +81,8 @@ const MODELED: ReadonlySet<string> = new Set<string>([
   // and trivial synonyms; a non-union non-trivial RHS (tuple, mapped, …) is
   // fail-loud in the `collectUnions` pre-pass, not here.
   "TSTypeAliasDeclaration",
-  // The `@t2r/std` std-shim import (series 084). ONLY an
-  // `import { … } from "@t2r/std"` is modeled — a `checkStdShimImport` guard
+  // The `@ttr/std` std-shim import (series 084). ONLY an
+  // `import { … } from "@ttr/std"` is modeled — a `checkStdShimImport` guard
   // below rejects any other specifier (general module imports are 050, unshipped)
   // and any unknown imported name. The import lowers to nothing (recognition only).
   "ImportDeclaration",
@@ -269,11 +269,11 @@ export function validate(program: Program): void {
     }
     // 3. Default-deny: an unmodeled node type is not implemented yet.
     if (!MODELED.has(n.type)) throw new UnsupportedError(n);
-    // 4. The only modeled import is `@t2r/std` (series 084). Any other specifier,
-    //    or an unknown `@t2r/std` name, is fail-loud — general module imports
+    // 4. The only modeled import is `@ttr/std` (series 084). Any other specifier,
+    //    or an unknown `@ttr/std` name, is fail-loud — general module imports
     //    (050) are unshipped.
     if (n.type === "ImportDeclaration") checkStdShimImport(n);
-    // 5. Bare I/O footguns (series 100) → redirect to the `@t2r/std` surface.
+    // 5. Bare I/O footguns (series 100) → redirect to the `@ttr/std` surface.
     //    Runs before lowering, so `process.exit(0)` (which would otherwise lower
     //    silently) and `process.argv`/`env`/`stdin` / `fetch(...)` all fail loud
     //    with an actionable message pointing at the blessed intrinsic.
@@ -330,7 +330,7 @@ function checkRegexFootgun(n: AnyNode): void {
 }
 
 /**
- * Redirect the bare I/O footgun globals to the `@t2r/std` surface (series 100,
+ * Redirect the bare I/O footgun globals to the `@ttr/std` surface (series 100,
  * epic #52) — the `forbid + redirect` discipline of 084/089. `fetch(...)` → the
  * `http` namespace; `process.argv`/`env`/`exit`/`stdin` → `args`/`env`/`exit`/
  * `readStdin`. (Bare `node:fs` imports are already rejected by
@@ -345,7 +345,7 @@ function checkIoFootgunRedirect(n: AnyNode): void {
       (callee as { name?: string }).name === "fetch"
     ) {
       throw new UnsupportedError({
-        type: '`fetch` is not accepted — import `http` from "@t2r/std" and call `http.get(url)` / `http.post(url, body)` in an async function',
+        type: '`fetch` is not accepted — import `http` from "@ttr/std" and call `http.get(url)` / `http.post(url, body)` in an async function',
       });
     }
   }
@@ -360,27 +360,27 @@ function checkIoFootgunRedirect(n: AnyNode): void {
           ? (m.property as { name?: string }).name
           : undefined;
       const REDIRECTS: Record<string, string> = {
-        argv: '`process.argv` is not accepted — import `args` from "@t2r/std"',
-        env: '`process.env` is not accepted — import `env` from "@t2r/std"',
-        exit: '`process.exit` is not accepted — import `exit` from "@t2r/std"',
+        argv: '`process.argv` is not accepted — import `args` from "@ttr/std"',
+        env: '`process.env` is not accepted — import `env` from "@ttr/std"',
+        exit: '`process.exit` is not accepted — import `exit` from "@ttr/std"',
         stdin:
-          'reading `process.stdin` is not accepted — import `readStdin`/`readLine` from "@t2r/std"',
+          'reading `process.stdin` is not accepted — import `readStdin`/`readLine` from "@ttr/std"',
         stdout:
-          'writing `process.stdout` is not accepted — import `stdout` from "@t2r/std"',
+          'writing `process.stdout` is not accepted — import `stdout` from "@ttr/std"',
         stderr:
-          'writing `process.stderr` is not accepted — import `stderr` from "@t2r/std"',
+          'writing `process.stderr` is not accepted — import `stderr` from "@ttr/std"',
       };
       throw new UnsupportedError({
         type:
           (prop && REDIRECTS[prop]) ??
-          '`process` is not accepted — import `args`/`env`/`exit`/`readStdin` from "@t2r/std"',
+          '`process` is not accepted — import `args`/`env`/`exit`/`readStdin` from "@ttr/std"',
       });
     }
   }
 }
 
 /**
- * Guard the sole modeled import: `import { … } from "@t2r/std"`. Rejects a
+ * Guard the sole modeled import: `import { … } from "@ttr/std"`. Rejects a
  * bare/other specifier and an unknown imported name. `@throws {UnsupportedError}`.
  */
 function checkStdShimImport(n: AnyNode): void {
