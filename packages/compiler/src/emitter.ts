@@ -1748,6 +1748,22 @@ function emitOperand(
   return needsParen ? `(${s})` : s;
 }
 
+/**
+ * Emit the receiver of a postfix operation (`.method()`, `.field`, `[i]`, `.len()`)
+ * (#66). Rust's postfix operators bind tighter than any binary/unary operator, so
+ * a non-atomic receiver must be parenthesized: `Math.sqrt(x*x + y*y)` must emit
+ * `(x * x + y * y).sqrt()`, not `x * x + y * y.sqrt()` (which parses as
+ * `x*x + (y*y).sqrt()` and silently changes the value). A `cast`/`cond`/`ushr`
+ * receiver already self-parenthesizes, and every atomic receiver passes through
+ * unchanged, so wrapping never adds spurious parens.
+ */
+function emitReceiver(recv: HirExpr): string {
+  const s = emitExpr(recv);
+  const wrap =
+    recv.kind === "binary" || recv.kind === "unary" || recv.kind === "assign";
+  return wrap ? `(${s})` : s;
+}
+
 function emitExpr(expr: HirExpr): string {
   switch (expr.kind) {
     case "number":
@@ -1959,19 +1975,19 @@ function emitExpr(expr: HirExpr): string {
         : "println!()";
     }
     case "method":
-      return `${emitExpr(expr.receiver)}.${rid(expr.name)}(${expr.args.map(emitExpr).join(", ")})`;
+      return `${emitReceiver(expr.receiver)}.${rid(expr.name)}(${expr.args.map(emitExpr).join(", ")})`;
     // A JS-operator trait-method call over a generic `T` (series 088):
     // `left.js_add(&right)`. The arg is by-reference (`&Self`), ownership-safe.
     case "jsOp":
-      return `${emitExpr(expr.receiver)}.${expr.method}(&${emitExpr(expr.arg)})`;
+      return `${emitReceiver(expr.receiver)}.${expr.method}(&${emitExpr(expr.arg)})`;
     case "len":
-      return `${emitExpr(expr.object)}.${expr.chars ? "chars().count()" : "len()"}`;
+      return `${emitReceiver(expr.object)}.${expr.chars ? "chars().count()" : "len()"}`;
     case "field":
-      return `${emitExpr(expr.object)}.${rid(expr.name)}`;
+      return `${emitReceiver(expr.object)}.${rid(expr.name)}`;
     case "index":
-      return `${emitExpr(expr.object)}[${emitIndex(expr.index)}]`;
+      return `${emitReceiver(expr.object)}[${emitIndex(expr.index)}]`;
     case "optMember":
-      return `${emitExpr(expr.receiver)}.map(|v| v.${rid(expr.field)})`;
+      return `${emitReceiver(expr.receiver)}.map(|v| v.${rid(expr.field)})`;
     case "jsonStringify":
       return `tslib::json::stringify(&${emitExpr(expr.value)})`;
     case "parseJson":

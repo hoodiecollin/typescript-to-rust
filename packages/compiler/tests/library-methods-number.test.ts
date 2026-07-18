@@ -37,6 +37,23 @@ console.log(Math.floor(x), Math.abs(x));`,
     expected: "3 3.7",
   },
   {
+    // #66 — a Math unary/min method over a *binary* argument must parenthesize
+    // the receiver, else Rust's postfix `.method()` binds tighter than the
+    // binary op and silently changes the value (`x*x + y*y.sqrt()`).
+    name: "NUMN1c Math unary/min over a binary arg parenthesizes the receiver (#66)",
+    src: `function hyp(x: number, y: number): number { return Math.sqrt(x * x + y * y); }
+const a: number = 7;
+const b: number = 3;
+console.log(hyp(3, 4));
+console.log(Math.floor(a - b + 0.5));
+console.log(Math.abs(b - a));
+console.log(Math.min(a + b, 2));`,
+    expected: "5\n4\n4\n2",
+    extra: ({ rust }) => {
+      expect(rust).toContain("(x * x + y * y).sqrt()");
+    },
+  },
+  {
     name: "NUMT1 toFixed(d) — rounding + formatting",
     src: `const n: number = 3.14159;
 console.log(n.toFixed(2));
