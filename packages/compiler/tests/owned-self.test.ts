@@ -6,14 +6,15 @@
  * clone. When the receiver is **reused** after the consuming call, it promotes to
  * `Rc<RefCell<T>>` (the 062/069 alias-escape machinery — the same union-find) and
  * the method falls back to `&self` + clone; a non-`Clone` moved-out field under
- * reuse is a documented `DialectError` boundary.
+ * reuse is a documented `UnsupportedError` boundary (a fail-loud residual — #80
+ * reclassified it from forbidden → deferral).
  *
  * Each behavioral spec differential-matches (compile → cargo run → TS-via-Bun). IDs
  * map to docs/work/068-owned-self/specs.md.
  */
 
 import { expect, test } from "bun:test";
-import { DialectError } from "../src/errors";
+import { UnsupportedError } from "../src/errors";
 import { compile, defineDifferential } from "./_support/differential";
 
 const CONFIG = `class Config {
@@ -143,7 +144,7 @@ console.log(c.get(), c.get());`,
   },
 ]);
 
-test("OS5 reused receiver + non-`Clone` moved-out field → DialectError", () => {
+test("OS5 reused receiver + non-`Clone` moved-out field → UnsupportedError", () => {
   const src = `${HANDLE}class Owner {
   h: Handle;
   constructor(h: Handle) { this.h = h; }
@@ -154,5 +155,5 @@ function dbl(x: number): number { return x * 2; }
 const o: Owner = new Owner(new Handle(dbl, "h1"));
 const h: Handle = o.take();
 console.log(h.tag, o.name());`;
-  expect(() => compile(src)).toThrow(DialectError);
+  expect(() => compile(src)).toThrow(UnsupportedError);
 });

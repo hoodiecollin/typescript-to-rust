@@ -148,7 +148,7 @@ console.log(c.entries.get("k") ?? -1);`,
 
 test("FC7 fail-loud: a lifted callback mutating a captured field-collection (→ #46)", () => {
   // A collection mutation of a captured owner inside a lifted callback is a
-  // mutable capture — a clean `DialectError` at `freeVarsOf`, not a miscompile.
+  // mutable capture — a clean `UnsupportedError` fail-loud, not a miscompile.
   // Closure-capture graduation itself is out of #45's scope (→ #46); the interim
   // rejection stands and now covers the field-collection shape.
   const src = `${CACHE}const c: Cache = new Cache();
