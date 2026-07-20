@@ -64,7 +64,139 @@ function refineBody(params: HirParam[], stmts: HirStmt[]): HirStmt[] {
   const usize = computeUsizeNames(all);
   detectConflicts(all, usize);
   applyTypes(params, all, usize);
+  tagIntegerModulo(all, usize);
   return promoteRanges(stmts, usize);
+}
+
+// ── Local integer-domain modulo (series 103a) ─────────────────────────────────
+
+/** Arithmetic that keeps an integer result when both operands are integers. */
+const INTEGER_ARITH = new Set(["+", "-", "*", "%"]);
+
+/**
+ * Tag every `f64` `%` whose operands are provably integer-valued with `intDomain`,
+ * so the emitter renders it as a hardware integer modulo (`((i as i64) % 3) as f64`)
+ * instead of a libm `fmod` call (design 103a). Purely *preferring*: it never
+ * retypes a binding and never fails loud — a non-integer `%` is left as an `f64`
+ * remainder. `usize`-touching modulos are left to the existing index pass.
+ */
+function tagIntegerModulo(stmts: HirStmt[], usize: Set<string>): void {
+  const ints = computeIntegerNames(stmts, usize);
+  for (const stmt of stmts) {
+    eachStmtExpr(stmt, (e) => {
+      if (
+        e.kind === "binary" &&
+        e.op === "%" &&
+        !e.bitwise &&
+        !touchesUsize(e.left, usize) &&
+        !touchesUsize(e.right, usize) &&
+        isIntegerValued(e.left, ints, usize) &&
+        isIntegerValued(e.right, ints, usize)
+      ) {
+        e.intDomain = true;
+      }
+    });
+  }
+}
+
+/**
+ * The set of `let`-bound names whose value is provably an integer: seeded by an
+ * integer-valued expression and only ever assigned integer-valued expressions.
+ * Computed as a *greatest* fixpoint (start with every candidate, drop any that is
+ * disqualified) so mutually-referential integer bindings (`a = b + 1; b = a - 1`)
+ * are still admitted. `usize` bindings are excluded — they are already integer and
+ * handled by the index pass. Unlike `isIntegerSafe`, boundary-crossing/printing do
+ * not disqualify: 103a re-expresses a value locally without retyping the binding.
+ */
+function computeIntegerNames(
+  stmts: HirStmt[],
+  usize: Set<string>,
+): Set<string> {
+  const names = new Set<string>();
+  for (const stmt of stmts) {
+    if (stmt.kind === "let" && !usize.has(stmt.name)) names.add(stmt.name);
+  }
+  for (;;) {
+    let changed = false;
+    for (const stmt of stmts) {
+      if (
+        stmt.kind === "let" &&
+        names.has(stmt.name) &&
+        !isIntegerValued(stmt.init, names, usize)
+      ) {
+        names.delete(stmt.name);
+        changed = true;
+      }
+      eachStmtExpr(stmt, (e) => {
+        if (
+          e.kind === "assign" &&
+          e.target.kind === "ident" &&
+          names.has(e.target.name) &&
+          !assignKeepsInteger(e.op, e.value, names, usize)
+        ) {
+          names.delete(e.target.name);
+          changed = true;
+        }
+      });
+    }
+    if (!changed) return names;
+  }
+}
+
+/**
+ * Does the assignment keep its target integer-valued? `=`/`+=`/`-=`/`*=`/`%=` do
+ * when the RHS is integer-valued (target is already integer); `/=` never does
+ * (division truncates / goes fractional), and any other operator is treated
+ * conservatively as non-integer.
+ */
+function assignKeepsInteger(
+  op: string,
+  value: HirExpr,
+  names: Set<string>,
+  usize: Set<string>,
+): boolean {
+  if (op === "=" || op === "+=" || op === "-=" || op === "*=" || op === "%=") {
+    return isIntegerValued(value, names, usize);
+  }
+  return false;
+}
+
+/** Is `e` provably integer-valued given the current integer/usize name sets? */
+function isIntegerValued(
+  e: HirExpr,
+  names: Set<string>,
+  usize: Set<string>,
+): boolean {
+  switch (e.kind) {
+    case "number":
+      return Number.isInteger(e.value);
+    case "ident":
+      return names.has(e.name) || usize.has(e.name);
+    case "len":
+      return true;
+    case "cast":
+      return (
+        e.ty.kind === "usize" || e.ty.kind === "i64" || e.ty.kind === "i128"
+      );
+    case "binary":
+      if (e.op === "/") return false; // float division — result is fractional
+      if (!INTEGER_ARITH.has(e.op)) return false;
+      return (
+        isIntegerValued(e.left, names, usize) &&
+        isIntegerValued(e.right, names, usize)
+      );
+    default:
+      return false;
+  }
+}
+
+/** Does any identifier within `e` belong to the `usize` set? */
+function touchesUsize(e: HirExpr, usize: Set<string>): boolean {
+  let found = false;
+  eachExpr(e, (n) => {
+    if (n.kind === "ident" && usize.has(n.name)) found = true;
+  });
+  return found;
 }
 
 /** All statements, descending into `if`/`while` bodies (references preserved). */

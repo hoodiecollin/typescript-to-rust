@@ -206,6 +206,16 @@ export type HirExpr =
        * and marks the node as `i128`-typed. Absent for ordinary arithmetic/logical.
        */
       bitwise?: boolean;
+      /**
+       * Local integer-domain modulo (series 103a). Set by `refineNumerics` on an
+       * `f64` `%` whose operands are provably integer-valued: the emitter renders it
+       * `((<left> as i64) % (<right> as i64)) as f64` so the hot op is a hardware
+       * integer modulo (const divisors become a multiply-shift) instead of a libm
+       * `fmod` call. The binding stays `f64` — purely a local re-expression, no
+       * signature ripple. Values beyond `i64` range take accepted `i64` semantics
+       * (design 103, ruling 1).
+       */
+      intDomain?: boolean;
     }
   /**
    * A string concatenation (series 080): a JS `+` with a provably-string operand,

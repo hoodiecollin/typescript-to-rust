@@ -1791,6 +1791,17 @@ function emitReceiver(recv: HirExpr): string {
   return wrap ? `(${s})` : s;
 }
 
+/**
+ * An operand of a series-103a integer-domain modulo, rendered as `i64`. An integer
+ * literal emits bare (`3`, not `3.0`); any other operand routes through a `cast`
+ * node so the emitter's own `as`-precedence parenthesization applies (`(i as i64)`,
+ * `((a + b) as i64)`).
+ */
+function emitI64Operand(e: HirExpr): string {
+  if (e.kind === "number" && Number.isInteger(e.value)) return `${e.value}`;
+  return emitExpr({ kind: "cast", expr: e, ty: { kind: "i64" } });
+}
+
 function emitExpr(expr: HirExpr): string {
   switch (expr.kind) {
     case "number":
@@ -1814,6 +1825,13 @@ function emitExpr(expr: HirExpr): string {
       // `gen.next()` → `resume(Default::default())`. No TS source to lower.
       return expr.text;
     case "binary": {
+      // Local integer-domain modulo (series 103a): `i % 3.0` → `((i as i64) % 3) as
+      // f64`. An `f64` `%` lowers to a libm `fmod` call; integer `%` (a const divisor
+      // becomes a multiply-shift) is far cheaper. An integer literal operand emits
+      // bare (`3`); any other operand casts through the `cast` node's parenthesization.
+      if (expr.op === "%" && expr.intDomain) {
+        return `(${emitI64Operand(expr.left)} % ${emitI64Operand(expr.right)}) as f64`;
+      }
       const prec = BINARY_PREC[expr.op] ?? 0;
       const op = BINARY_OPS[expr.op] ?? expr.op;
       const left = emitOperand(expr.left, prec, "l");
