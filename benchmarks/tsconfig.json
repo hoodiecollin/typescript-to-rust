@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["bun"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["harness/**/*.ts", "*.ts"],
+  // `corpus/*.ts` are dialect *inputs* (data), not harness source — some use the
+  // strict-dialect shapes (explicit `number` everywhere) but they run through the
+  // compiler, not tsc, so keep them out of the harness typecheck.
+  "exclude": ["node_modules", "corpus", ".build", ".rust"]
+}

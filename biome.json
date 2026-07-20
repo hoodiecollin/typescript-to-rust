@@ -9,6 +9,8 @@
       "**/rust-oracle/**",
       "**/node_modules/**",
       "packages/compiler/tests/fixtures/**",
+      "benchmarks/corpus/**",
+      "benchmarks/.build/**",
       "*.lock",
       "Cargo.lock"
     ]

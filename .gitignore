@@ -11,3 +11,6 @@ out/
 
 # macOS Finder metadata
 .DS_Store
+
+# benchmark build artifacts (generated crates, target, reports)
+benchmarks/.build/
