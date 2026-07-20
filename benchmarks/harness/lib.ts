@@ -231,16 +231,16 @@ export function writeCriterionWorkspace(names: string[]): void {
   );
   // Defeat const-folding: `run` is a nullary pure fn, so LTO would precompute it
   // and `black_box` on the *result* can't stop that. Black-boxing the fn *pointer*
-  // forces an opaque indirect call each iteration, so the body actually runs.
+  // forces an opaque indirect call each iteration, so the body actually runs. The
+  // pointer type is generic over the return `R` so a workload whose `run` the
+  // numeric pass specialized to `-> i64` (series 103) is handled like an `-> f64`
+  // one — the fn-item coerces to `fn() -> R` at the call and `R` is inferred.
   const calls = names
-    .map(
-      (n) =>
-        `    c.bench_function("${n}", |b| {\n        let f = black_box(wl_${n}::run as fn() -> f64);\n        b.iter(|| black_box(f()));\n    });`,
-    )
+    .map((n) => `    bench_run(c, "${n}", wl_${n}::run);`)
     .join("\n");
   writeIfChanged(
     join(runnerDir, "benches", "all.rs"),
-    `use criterion::{black_box, criterion_group, criterion_main, Criterion};\n\nfn benches(c: &mut Criterion) {\n${calls}\n}\n\ncriterion_group!(g, benches);\ncriterion_main!(g);\n`,
+    `use criterion::{black_box, criterion_group, criterion_main, Criterion};\n\nfn bench_run<R>(c: &mut Criterion, name: &str, run: fn() -> R) {\n    c.bench_function(name, |b| {\n        let f = black_box(run);\n        b.iter(|| black_box(f()));\n    });\n}\n\nfn benches(c: &mut Criterion) {\n${calls}\n}\n\ncriterion_group!(g, benches);\ncriterion_main!(g);\n`,
   );
 }
 
