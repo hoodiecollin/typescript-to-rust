@@ -13221,6 +13221,14 @@ function refArg(e: Expression, analysis: ModuleAnalysis): HirArg {
  * `raw` so the emitter renders the coercion verbatim around the inner expr.
  */
 function strPatternArg(e: Expression, analysis: ModuleAnalysis): HirExpr {
+  // Fast path (#88, "2b" literal interning): a bare string *literal* is already a
+  // `&'static str` — the exact pattern type every `strPatternArg` call site wants
+  // (`str::contains`/`split`/`index_of`/`replace`, all `&str`/`impl Pattern`). Emit
+  // it verbatim and skip the `AsRef::<str>::as_ref(&"…".to_string())` wrapper, which
+  // allocated a throwaway `String` per call just to borrow it back down to `&str`.
+  if (e.type === "Literal" && typeof (e as Literal).value === "string") {
+    return { kind: "raw", text: JSON.stringify((e as Literal).value) };
+  }
   return {
     kind: "call",
     callee: "AsRef::<str>::as_ref",

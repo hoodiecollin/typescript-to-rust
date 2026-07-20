@@ -113,6 +113,23 @@ console.log(s.length);`,
     expected: "5",
     extra: ({ rust }) => expect(rust).toContain("chars().count()"),
   },
+  {
+    name: "SM13 literal interning (#88 2b) — `&str` pattern literal renders bare",
+    // A string-literal pattern in `&str` position is already `&'static str`; the
+    // emit must be the bare literal, NOT `AsRef::<str>::as_ref(&"…".to_string())`
+    // (which allocated a throwaway `String` per call). Covers a native predicate
+    // (`contains`), a tslib call (`index_of`), and `split`.
+    src: `const s: string = "abracadabra";
+const parts: string[] = s.split("a");
+console.log(s.includes("cad"), s.indexOf("cad"), parts.length);`,
+    expected: "true 4 6",
+    extra: ({ rust }) => {
+      expect(rust).not.toContain('AsRef::<str>::as_ref(&"');
+      expect(rust).toContain('.contains("cad")');
+      expect(rust).toContain('tslib::string::index_of(&s, "cad"');
+      expect(rust).toContain('tslib::string::split(&s, "a"');
+    },
+  },
 ]);
 
 test("SM-FL1 fail-loud: charCodeAt (UTF-16 fork deferred)", () => {
