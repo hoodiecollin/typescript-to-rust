@@ -55,7 +55,8 @@ describe("control flow: if / else / while", () => {
     const rust = compile(
       `function f(): void { let i: number = 0; while (i < 10) { i = i + 1; } }`,
     );
-    expect(rust).toContain("while i < 10.0 {");
+    // `i` retypes to `i64` (series 103b-1) — a pure-integer counter.
+    expect(rust).toContain("while i < 10 {");
   });
 
   test("CF5 control-flow bodies are real, indented blocks", () => {
@@ -63,7 +64,7 @@ describe("control flow: if / else / while", () => {
       `function f(): void { let i: number = 0; while (i < 10) { i = i + 1; } }`,
     );
     // The body statement nests inside the loop braces, indented one level.
-    expect(rust).toMatch(/while i < 10\.0 \{\n {8}i = i \+ 1\.0;\n {4}\}/);
+    expect(rust).toMatch(/while i < 10 \{\n {8}i = i \+ 1;\n {4}\}/);
   });
 
   test("CF6 an if/else-if/else function emits all three return arms", () => {

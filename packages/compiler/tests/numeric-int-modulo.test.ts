@@ -1,9 +1,10 @@
 /**
- * Specs for series 103a — local integer-domain modulo. A `%` whose operands are
- * provably integer-valued is re-expressed `((x as i64) % k) as f64` so the hot op
- * is a hardware integer modulo (a const divisor becomes a multiply-shift) rather
- * than a libm `fmod` call. The binding stays `f64` — no signature ripple. IDs map
- * to docs/work/103-numeric-specialization/specs.md.
+ * Specs for series 103a/103b-1 — integer-domain modulo. After 103b-1 retypes a
+ * pure-integer counter/accumulator to `i64`, its modulo is a *native* `i % 3`
+ * (no cast). 103a's local `((x as i64) % k) as f64` remains only as the fallback
+ * for an integer-valued `%` whose binding could not retype (it mixes with `f64`).
+ * Either way the libm `fmod` is gone. IDs map to
+ * docs/work/103-numeric-specialization/specs.md.
  */
 
 import { expect, test } from "bun:test";
@@ -11,7 +12,7 @@ import { compile, defineDifferential } from "./_support/differential";
 
 defineDifferential("numeric-int-modulo", [
   {
-    name: "NIM1 integer counter % integer literal → integer domain",
+    name: "NIM1 integer counter loop → native i64 modulo (103b-1)",
     src: `let hits: number = 0;
 for (let i: number = 0; i < 10; i = i + 1) {
   if (i % 3 === 0) { hits = hits + 1; }
@@ -19,12 +20,14 @@ for (let i: number = 0; i < 10; i = i + 1) {
 console.log(hits);`,
     expected: "4",
     extra: ({ rust }) => {
-      expect(rust).toContain("(i as i64) % 3");
+      expect(rust).toContain("let mut i: i64 = 0");
+      expect(rust).toContain("i % 3 == 0");
+      expect(rust).not.toContain("as i64");
       expect(rust).not.toContain("i % 3.0");
     },
   },
   {
-    name: "NIM2 modulo result stays consumable as f64 (feeds a comparison)",
+    name: "NIM2 accumulator loop retypes fully → no casts (103b-1)",
     src: `let acc: number = 0;
 for (let i: number = 0; i < 6; i = i + 1) {
   if (i % 2 === 0) { acc = acc + i; }
@@ -32,9 +35,10 @@ for (let i: number = 0; i < 6; i = i + 1) {
 console.log(acc);`,
     expected: "6",
     extra: ({ rust }) => {
-      // `((i as i64) % 2) as f64 == 0.0` — integer modulo, f64 result for the compare.
-      expect(rust).toContain("(i as i64) % 2");
-      expect(rust).toContain(") as f64");
+      expect(rust).toContain("let mut acc: i64 = 0");
+      expect(rust).toContain("i % 2 == 0");
+      expect(rust).not.toContain("as f64");
+      expect(rust).not.toContain("as i64");
     },
   },
   {
@@ -48,14 +52,32 @@ console.log(x % 1.0);`,
     },
   },
   {
-    name: "NIM4 loopsum shape — integer modulo, identical checksum",
+    name: "NIM4 loopsum shape — native integer modulo, identical checksum",
     src: `let acc: number = 0;
 for (let i: number = 0; i < 100; i = i + 1) {
   if (i % 3 === 0) { acc = acc + i; } else { acc = acc - 1; }
 }
 console.log(acc);`,
     expected: "1617",
-    extra: ({ rust }) => expect(rust).toContain("(i as i64) % 3"),
+    extra: ({ rust }) => {
+      expect(rust).toContain("i % 3 == 0");
+      expect(rust).not.toContain("fmod");
+    },
+  },
+  {
+    name: "NIM6 non-retypeable integer % keeps the 103a intDomain fallback",
+    // `i` mixes into `(i % 3) * 0.5` (f64), so it cannot retype to i64 — but the
+    // modulo operands are still integer-valued, so 103a re-expresses it locally.
+    src: `let sum: number = 0;
+for (let i: number = 0; i < 10; i = i + 1) {
+  sum = sum + (i % 3) * 0.5;
+}
+console.log(sum);`,
+    expected: "4.5",
+    extra: ({ rust }) => {
+      expect(rust).toContain("(i as i64) % 3");
+      expect(rust).toContain(") as f64");
+    },
   },
 ]);
 

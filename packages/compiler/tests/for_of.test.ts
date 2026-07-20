@@ -51,6 +51,8 @@ describe("control flow: for…of", () => {
     const rust = compile(
       `function f(): void { for (let i: number = 0; i < 3; i = i + 1) {} }`,
     );
-    expect(rust).toContain("while i < 3.0 {");
+    // The counter retypes to `i64` (series 103b-1); still a `while` (range
+    // promotion is `usize`-only until 103b-2).
+    expect(rust).toContain("while i < 3 {");
   });
 });

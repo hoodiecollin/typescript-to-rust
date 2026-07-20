@@ -52,18 +52,20 @@ describe("control flow: break / continue", () => {
 
   test("BC5 `continue` in a C-style `for` inlines the update (series 018)", () => {
     // Formerly rejected; now the own `continue` runs the `update` before it, so
-    // the loop variable still advances (`{ i = i + 1.0; continue; }`).
+    // the loop variable still advances (`{ i = i + 1; continue; }`). The counter
+    // retypes to `i64` (series 103b-1), so the update is `i = i + 1` (no `.0`).
     const rust = compile(
       `function f(): void { for (let i: number = 0; i < 5; i = i + 1) { continue; } }`,
     );
     expect(rust).toContain("continue;");
-    expect(rust.split("i = i + 1.0;").length - 1).toBeGreaterThanOrEqual(2);
+    expect(rust.split("i = i + 1;").length - 1).toBeGreaterThanOrEqual(2);
   });
 
   test("BC6 (green control) a loop without break/continue still emits", () => {
     const rust = compile(
       `function f(): void { let i: number = 0; while (i < 10) { i = i + 1; } }`,
     );
-    expect(rust).toContain("while i < 10.0 {");
+    // `i` retypes to `i64` (series 103b-1).
+    expect(rust).toContain("while i < 10 {");
   });
 });

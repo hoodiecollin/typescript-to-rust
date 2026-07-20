@@ -27,40 +27,43 @@ const SUM = `function sum(): number {
 }`;
 
 describe("control flow: C-style for", () => {
+  // Series 103b-1 retypes pure-integer counters/accumulators to `i64`, so these
+  // desugar-mechanic specs now see `i64` counters (`while i < 5`, `i = i + 1`)
+  // rather than the former `f64` (`i < 5.0`, `i = i + 1.0`).
   test("FOR1 the loop variable is hoisted as `let mut i`", () => {
-    expect(compile(SUM)).toContain("let mut i: f64 = 0.0;");
+    expect(compile(SUM)).toContain("let mut i: i64 = 0;");
   });
 
   test("FOR2 the test becomes the `while` condition", () => {
-    expect(compile(SUM)).toContain("while i < 5.0 {");
+    expect(compile(SUM)).toContain("while i < 5 {");
   });
 
   test("FOR3 the update is the loop body's last statement", () => {
-    // `total = total + i;` then `i = i + 1.0;`, in that order, inside the loop.
-    expect(compile(SUM)).toMatch(/total = total \+ i;\n {12}i = i \+ 1\.0;/);
+    // `total = total + i;` then `i = i + 1;`, in that order, inside the loop.
+    expect(compile(SUM)).toMatch(/total = total \+ i;\n {12}i = i \+ 1;/);
   });
 
   test("FOR4 the loop variable's scope is contained by a block", () => {
     const rust = compile(SUM);
     // `total` sits at function-body indent (4); the hoisted `i` is one level
     // deeper (8), i.e. inside the wrapping block — not at function top level.
-    expect(rust).toMatch(/\n {4}let mut total: f64 = 0\.0;/);
-    expect(rust).toMatch(/\n {8}let mut i: f64 = 0\.0;/);
+    expect(rust).toMatch(/\n {4}let mut total: i64 = 0;/);
+    expect(rust).toMatch(/\n {8}let mut i: i64 = 0;/);
   });
 
   test("FOR5 an empty-body `for` still emits a well-formed loop", () => {
     const rust = compile(
       `function f(): void { for (let i: number = 0; i < 3; i = i + 1) {} }`,
     );
-    expect(rust).toContain("let mut i: f64 = 0.0;");
-    expect(rust).toContain("while i < 3.0 {");
-    expect(rust).toContain("i = i + 1.0;");
+    expect(rust).toContain("let mut i: i64 = 0;");
+    expect(rust).toContain("while i < 3 {");
+    expect(rust).toContain("i = i + 1;");
   });
 
   test("FOR6 (green control) an if/while program still emits", () => {
     const rust = compile(
       `function f(): void { let i: number = 0; while (i < 10) { i = i + 1; } }`,
     );
-    expect(rust).toContain("while i < 10.0 {");
+    expect(rust).toContain("while i < 10 {");
   });
 });
