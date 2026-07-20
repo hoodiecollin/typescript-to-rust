@@ -149,6 +149,29 @@ flip it.
   `null`; "null wins" never silently drops data. Pinned by
   `packages/compiler/tests/undefined-omission.test.ts`.
 
+- **A provably-integer `number` may specialize to `i64` — accepted `i64`
+  semantics past 2⁵³ (series 103).** `number` defaults to `f64` end to end, but the
+  numeric-inference pass retypes a **provably integer-valued** counter/accumulator
+  (and its typed `for i in 0i64..N` range, and an eligible return) from `f64` to
+  `i64` when that lets a hot loop use hardware integer arithmetic instead of a libm
+  `fmod`/`frem`. This is the **first sanctioned divergence from the pure-`f64`
+  number model**. Integers in **[−2⁵³, 2⁵³] are bit-identical** between `f64` and
+  `i64`, so ordinary code is unaffected. The accepted divergence is at the extremes:
+
+  | integer range | `f64` (JS) | `i64` (specialized) |
+  |---|---|---|
+  | within [−2⁵³, 2⁵³] | exact | exact — **bit-identical** |
+  | beyond 2⁵³ | loses precision (drifts) | **stays exact** — diverges from JS |
+  | beyond `i64::MAX` (±2⁶³) | → ±`Infinity` | **wraps** (release) — diverges from JS |
+
+  The soundness bar is **integrality**, not a numeric-range proof: the pass fires
+  only when a binding is provably integer-valued (integer-seeded, only integer
+  assignments, never an operand of `/`, never mixed with a fractional literal), and
+  it is *preferring* — anything not provably integral stays `f64` (never fail-loud).
+  There are **no runtime panics**: release builds wrap; we never emit checked
+  arithmetic here. Pinned by `packages/compiler/tests/numeric-int-modulo.test.ts`
+  and `numeric-int-range.test.ts`; see `docs/work/103-numeric-specialization/`.
+
 ---
 
 ## Types & the accepted type surface
@@ -1177,8 +1200,18 @@ arena's lifetime, an explicit-`'a` signature/field) is a Rust lifetime error
 
 ## Numeric inference
 
-`numeric.ts` refines `number` to `usize` (array indices) or `i64` (integer
-`switch` discriminants). It fails loud on genuine contradictions, never silently.
+`numeric.ts` refines `number` (default `f64`) to an integer type in two modes:
+
+- **Forcing (fail-loud) — `usize`:** an array-index position demands `usize`; a
+  genuine contradiction (below) is rejected, never silently coerced.
+- **Preferring (never fail-loud) — `i64`:** integer `switch` discriminants
+  (series 019), and provably-integer counters/accumulators (series 103) that also
+  drive typed `for i in 0i64..N` ranges (103b-2) and eligible `-> i64` returns.
+  Each has a valid `f64` fallback, so anything not provably integral stays `f64`.
+  The `i64` retype is the sanctioned divergence documented under *Semantic
+  divergences* (accepted `i64` semantics past 2⁵³; no runtime panic).
+
+The forcing `usize` path fails loud on genuine contradictions, never silently.
 
 | Trigger | Kind | Message |
 |---------|------|---------|

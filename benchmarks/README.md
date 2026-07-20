@@ -71,8 +71,17 @@ around bugs. When the dialect graduates a residual, a workload can be broadened.
 ## Reading the numbers
 
 TTR is not uniformly faster. It wins big where native code and tight memory layout
-matter (recursion, sorting, sieving) and can **lose** where the `f64`-everything
-model or a naive lowering costs more than a warmed JIT (e.g. `f64` modulo in a tight
-loop, `O(n²)` string concatenation, allocation-heavy closure chains). Those losses
-are the point: they show the comparison isn't rigged, and they double as a to-do
-list for the codegen.
+matter (recursion, sorting, sieving) and can **lose** where a naive lowering costs
+more than a warmed JIT (`O(n²)` string concatenation, allocation-heavy closure
+chains). Those losses are the point: they show the comparison isn't rigged, and they
+double as a to-do list for the codegen.
+
+That to-do list is live. **`loopsum`** was the worst result in the suite — a tight
+`f64`-modulo loop lowering to a libm `frem` call ×5M, where a warmed JIT used
+hardware integer modulo. **Series 103 (numeric type-specialization)** closed it: the
+inference pass now proves the counter/accumulator integer-valued and retypes them
+`f64` → `i64`, emitting a native `for i in 0i64..N` range with hardware integer
+arithmetic — so `loopsum` moves from the *loses* column to a **win** (~95ms → ~7ms
+steady-state), with byte-identical output. The accepted `i64` divergence (past 2⁵³)
+is documented in `docs/dialect.md`. Remaining losses (`strbuild`, `arraypipe`) are
+tracked under perf epic **#86** (string lowering **#88**, iterator fusion **#89**).

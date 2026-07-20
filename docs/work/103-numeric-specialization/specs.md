@@ -2,9 +2,11 @@
 
 Drives the public `emit(...)` / `compile(...)` entry via the differential harness
 (`tests/_support/differential`), which cargo-compiles and runs the emitted Rust so
-every shape assertion is also a COMPILES/BEHAVES proof. New spec files:
-`tests/numeric-int-modulo.test.ts` (103a) and additions to `tests/numeric.test.ts`
-(103b).
+every shape assertion is also a COMPILES/BEHAVES proof. Spec files as shipped:
+`tests/numeric-int-modulo.test.ts` (103a + 103b-1, NIM/NIS) and
+`tests/numeric-int-range.test.ts` (103b-2 range promotion + return specialization).
+The NIS ideas below landed under those NIM/NIS-range IDs (no separate
+`numeric.test.ts`).
 
 ## 103a — local integer-domain `%` (RED until the int-modulo emit lands)
 
@@ -43,11 +45,12 @@ every shape assertion is also a COMPILES/BEHAVES proof. New spec files:
 
 ## Cross-spec updates (live files the impl must touch)
 
-- **`tests/for-range.test.ts` RANGE5** — currently asserts the accumulator loop
-  stays a `while` "because `i` is `f64`." Under 103b both bindings become `i64`, so
-  it now **promotes** to `for i in 0i64..5`. Update RANGE5 to assert the promoted
-  `i64` range (or repoint it at a genuinely-`f64` accumulator, e.g. `total + i*0.5`,
-  to keep a non-promotion control).
+- **`tests/for-range.test.ts` RANGE5** — *(done, 103b-2)* flipped from "stays a
+  `while`" to asserting the promoted `for i in 0i64..5` + specialized `fn sum() ->
+  i64` (return bridge dropped). The C-style-`for` desugar and 018 continue-inline
+  specs (`for_loop`/`for-continue`/`break_continue`) were repointed at a
+  non-promotable doubling loop (`i = i * 2`) so they keep exercising the while
+  form; `for_of` FOF5 and `numeric-int-modulo` NIM1 assert the range form.
 - **`docs/dialect.md`** — add the accepted-divergence table (2⁵³ / `i64::MAX`) from
   the design doc; this is the first sanctioned divergence from the pure-`f64` model.
 - **`benchmarks/README.md`** — move `loopsum` from the "loses" to the "wins"
