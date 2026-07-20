@@ -35,11 +35,12 @@ const ARITHMETIC = new Set(["+", "-", "*", "/", "%"]);
 export function refineNumerics(module: HirModule): HirModule {
   for (const item of module.items) {
     if (item.kind === "fn") {
-      item.body = refineBody(item.params, item.body);
+      item.body = refineBody(item.params, item.body, item.ret);
     } else if (item.kind === "class") {
       if (item.ctor)
-        item.ctor.body = refineBody(item.ctor.params, item.ctor.body);
-      for (const m of item.methods) m.body = refineBody(m.params, m.body);
+        item.ctor.body = refineBody(item.ctor.params, item.ctor.body, item.ctor.ret);
+      for (const m of item.methods)
+        m.body = refineBody(m.params, m.body, m.ret);
     }
   }
   module.main = refineBody([], module.main);
@@ -56,7 +57,11 @@ export function refineNumerics(module: HirModule): HirModule {
  * so a non-eligible construct is left untouched. Range promotion rewrites
  * structure, so the (possibly rewritten) statement list is returned.
  */
-function refineBody(params: HirParam[], stmts: HirStmt[]): HirStmt[] {
+function refineBody(
+  params: HirParam[],
+  stmts: HirStmt[],
+  retTy?: RustType,
+): HirStmt[] {
   // Flatten control-flow bodies into one list of statement references so the
   // name-based fixpoint reaches indices inside `if`/`while` blocks (the shared
   // statement objects are mutated in place, so retyping still lands).
@@ -64,7 +69,11 @@ function refineBody(params: HirParam[], stmts: HirStmt[]): HirStmt[] {
   const usize = computeUsizeNames(all);
   detectConflicts(all, usize);
   applyTypes(params, all, usize);
-  tagIntegerModulo(all, usize);
+  // 103b-1 (retype integer counters/accumulators to `i64`) runs before 103a
+  // (`tagIntegerModulo`), which falls back to a local integer-domain cast only for
+  // an integer `%` whose operands did *not* retype.
+  const i64 = specializeIntegerBindings(all, usize, retTy);
+  tagIntegerModulo(all, usize, i64);
   return promoteRanges(stmts, usize);
 }
 
@@ -80,7 +89,11 @@ const INTEGER_ARITH = new Set(["+", "-", "*", "%"]);
  * retypes a binding and never fails loud — a non-integer `%` is left as an `f64`
  * remainder. `usize`-touching modulos are left to the existing index pass.
  */
-function tagIntegerModulo(stmts: HirStmt[], usize: Set<string>): void {
+function tagIntegerModulo(
+  stmts: HirStmt[],
+  usize: Set<string>,
+  i64: Set<string>,
+): void {
   const ints = computeIntegerNames(stmts, usize);
   for (const stmt of stmts) {
     eachStmtExpr(stmt, (e) => {
@@ -91,11 +104,31 @@ function tagIntegerModulo(stmts: HirStmt[], usize: Set<string>): void {
         !touchesUsize(e.left, usize) &&
         !touchesUsize(e.right, usize) &&
         isIntegerValued(e.left, ints, usize) &&
-        isIntegerValued(e.right, ints, usize)
+        isIntegerValued(e.right, ints, usize) &&
+        // Already native `i64 % i64` after a 103b-1 retype — no cast needed.
+        !(isI64Typed(e.left, i64) && isI64Typed(e.right, i64))
       ) {
         e.intDomain = true;
       }
     });
+  }
+}
+
+/** Is `e` already `i64`-typed (a retyped binding or an `i64`-tagged integer tree)? */
+function isI64Typed(e: HirExpr, i64: Set<string>): boolean {
+  switch (e.kind) {
+    case "ident":
+      return i64.has(e.name);
+    case "number":
+      return e.ty === "i64";
+    case "binary":
+      return (
+        INTEGER_ARITH.has(e.op) &&
+        isI64Typed(e.left, i64) &&
+        isI64Typed(e.right, i64)
+      );
+    default:
+      return false;
   }
 }
 
@@ -197,6 +230,285 @@ function touchesUsize(e: HirExpr, usize: Set<string>): boolean {
     if (n.kind === "ident" && usize.has(n.name)) found = true;
   });
   return found;
+}
+
+// ── Integer counter/accumulator specialization (series 103b-1) ────────────────
+
+/** Binary ops that require operands to share a type (a member forces its sibling).
+ * Comparisons keep their JS spelling in the HIR (`===`/`!==`, mapped to `==`/`!=`
+ * only at emit), so both spellings are listed. */
+const BALANCE_OPS = new Set([
+  "+", "-", "*", "%",
+  "<", ">", "<=", ">=", "==", "!=", "===", "!==",
+]);
+
+/**
+ * Retype `let`-bound integer counters/accumulators from `f64` to `i64`, so a loop
+ * like `for(i){ acc += i }` runs in native integer arithmetic (design 103b-1). The
+ * retype is **all-or-nothing per pure-integer connected component**: a member is
+ * kept only if its whole component never meets an `f64` quantity — an unbalanced
+ * binary (`i < arr.length`, `i * 0.5`), a `/` (i64 division truncates), a
+ * call/method argument (an `f64` parameter), or a flow into a non-member binding.
+ * A surviving component touches `f64` only at a *sink* we bridge: a `return` of a
+ * member from an `f64`-returning function is wrapped `… as f64` (103b-2 removes the
+ * cast by specializing the return type). Values beyond `i64` range take accepted
+ * `i64` semantics (ruling 1). Returns the retyped name set (for 103a's skip check).
+ */
+function specializeIntegerBindings(
+  stmts: HirStmt[],
+  usize: Set<string>,
+  retTy: RustType | undefined,
+): Set<string> {
+  const members = computeIntegerNames(stmts, usize);
+  if (members.size === 0) return members;
+
+  for (;;) {
+    let changed = false;
+    const drop = (name: string): void => {
+      if (members.delete(name)) changed = true;
+    };
+    for (const stmt of stmts) {
+      if (stmt.kind === "let") {
+        if (members.has(stmt.name)) {
+          // A member's own initializer must be pure `i64` (not e.g. a `usize`
+          // `.length`, which `computeIntegerNames` admits as integer-valued).
+          if (!i64Compat(stmt.init, members)) drop(stmt.name);
+        } else {
+          // A member flowing into a `let` of a non-member binding crosses to `f64`.
+          for (const n of memberRefs(stmt.init, members)) drop(n);
+        }
+      }
+      // A member returned from a non-`f64` function can't be bridged with a cast.
+      if (
+        stmt.kind === "return" &&
+        stmt.value &&
+        referencesMember(stmt.value, members) &&
+        !(retTy?.kind === "f64" && i64Compat(stmt.value, members))
+      ) {
+        for (const n of memberRefs(stmt.value, members)) drop(n);
+      }
+      // A `switch` discriminant that is a member: its lowered guards compare
+      // against `f64` literals (`_ if x == 0.0`), which the local-`let` deferral in
+      // `promoteIntegerMatches` leaves untouched — an `i64` disc would mismatch.
+      if (stmt.kind === "match") {
+        for (const n of memberRefs(stmt.disc, members)) drop(n);
+      }
+      eachStmtExpr(stmt, (e) => {
+        if (e.kind === "binary") {
+          if (e.op === "/") {
+            // i64 division truncates (JS `/` is float) — a member can't be i64.
+            for (const n of memberRefs(e, members)) drop(n);
+          } else if (BALANCE_OPS.has(e.op)) {
+            const refs =
+              referencesMember(e.left, members) ||
+              referencesMember(e.right, members);
+            const balanced =
+              i64Compat(e.left, members) && i64Compat(e.right, members);
+            if (refs && !balanced) {
+              for (const n of memberRefs(e, members)) drop(n);
+            }
+          }
+        } else if (e.kind === "assign") {
+          if (e.target.kind === "ident" && members.has(e.target.name)) {
+            // A member's assignment value must be pure `i64` (a `usize`/`f64` RHS,
+            // e.g. `x = arr.length`, can't land in an `i64` binding).
+            if (!i64Compat(e.value, members)) drop(e.target.name);
+          } else {
+            for (const n of memberRefs(e.value, members)) drop(n);
+          }
+        } else if (e.kind === "cond") {
+          // Ternary arms must share a type — a member arm with a non-i64 sibling.
+          if (
+            (referencesMember(e.conseq, members) ||
+              referencesMember(e.alt, members)) &&
+            !(i64Compat(e.conseq, members) && i64Compat(e.alt, members))
+          ) {
+            for (const n of memberRefs(e.conseq, members)) drop(n);
+            for (const n of memberRefs(e.alt, members)) drop(n);
+          }
+        } else if (e.kind === "call") {
+          for (const a of e.args)
+            for (const n of memberRefs(a.expr, members)) drop(n);
+        } else if (e.kind === "method") {
+          // A member arg *or* receiver crosses into an `f64`-typed slot.
+          for (const n of memberRefs(e.receiver, members)) drop(n);
+          for (const a of e.args)
+            for (const n of memberRefs(a, members)) drop(n);
+        } else if (
+          e.kind === "array" ||
+          e.kind === "hashmap" ||
+          e.kind === "structLit"
+        ) {
+          // A member placed into an `f64`-typed container element/field/entry.
+          for (const n of memberRefs(e, members)) drop(n);
+        }
+      });
+    }
+    if (!changed) break;
+  }
+  if (members.size === 0) return members;
+
+  // Only bother when a surviving component actually does loop-like work (a
+  // reassigned counter/accumulator); a lone integer `const` gains nothing from a
+  // retype and would only churn the emit.
+  if (!hasReassignedMember(stmts, members)) return new Set();
+
+  applyI64Bindings(stmts, members, retTy);
+  return members;
+}
+
+/** Member names that appear anywhere in `e`. */
+function memberRefs(e: HirExpr, members: Set<string>): string[] {
+  const out: string[] = [];
+  eachExpr(e, (n) => {
+    if (n.kind === "ident" && members.has(n.name)) out.push(n.name);
+  });
+  return out;
+}
+
+function referencesMember(e: HirExpr, members: Set<string>): boolean {
+  let found = false;
+  eachExpr(e, (n) => {
+    if (n.kind === "ident" && members.has(n.name)) found = true;
+  });
+  return found;
+}
+
+/** Is `e` a pure-`i64` expression given the member set (integer literals, member
+ * idents, and integer arithmetic over them — never `len`/`/`/non-member idents)? */
+function i64Compat(e: HirExpr, members: Set<string>): boolean {
+  switch (e.kind) {
+    case "number":
+      return Number.isInteger(e.value);
+    case "ident":
+      return members.has(e.name);
+    case "binary":
+      return (
+        INTEGER_ARITH.has(e.op) &&
+        i64Compat(e.left, members) &&
+        i64Compat(e.right, members)
+      );
+    default:
+      return false;
+  }
+}
+
+/** Does any surviving member get reassigned (i.e. is a real counter/accumulator)? */
+function hasReassignedMember(
+  stmts: HirStmt[],
+  members: Set<string>,
+): boolean {
+  let found = false;
+  for (const stmt of stmts) {
+    eachStmtExpr(stmt, (e) => {
+      if (
+        e.kind === "assign" &&
+        e.target.kind === "ident" &&
+        members.has(e.target.name)
+      ) {
+        found = true;
+      }
+    });
+  }
+  return found;
+}
+
+/**
+ * Retype member `let` bindings to `i64`, tag the integer literals that sit in an
+ * `i64` context so they emit bare (`3`, not `3.0`), and bridge a member `return`
+ * into an `f64`-returning function with an `as f64` cast.
+ */
+function applyI64Bindings(
+  stmts: HirStmt[],
+  members: Set<string>,
+  retTy: RustType | undefined,
+): void {
+  for (const stmt of stmts) {
+    if (stmt.kind === "let" && members.has(stmt.name)) {
+      stmt.ty = { kind: "i64" };
+      tagI64Tree(stmt.init); // the initializer of an `i64` binding is `i64`
+    }
+  }
+
+  // An assignment to an `i64` member is `i64` on both sides — tag its literals
+  // (covers a bare compound-assign RHS like `x += 5`, which the binary-operand
+  // fixpoint below never reaches).
+  for (const stmt of stmts) {
+    eachStmtExpr(stmt, (e) => {
+      if (
+        e.kind === "assign" &&
+        e.target.kind === "ident" &&
+        members.has(e.target.name)
+      ) {
+        tagI64Tree(e.value);
+      }
+    });
+  }
+
+  // Propagate `i64`-ness to integer-literal operands sitting beside an `i64`
+  // operand, to a fixpoint (tagging one literal can make its parent `i64`).
+  for (;;) {
+    let changed = false;
+    for (const stmt of stmts) {
+      eachStmtExpr(stmt, (e) => {
+        if (e.kind !== "binary" || !BALANCE_OPS.has(e.op)) return;
+        if (!isI64Expr(e.left, members) && !isI64Expr(e.right, members)) return;
+        if (tagIfIntLiteral(e.left)) changed = true;
+        if (tagIfIntLiteral(e.right)) changed = true;
+      });
+    }
+    if (!changed) break;
+  }
+
+  if (retTy && retTy.kind === "f64") {
+    for (const stmt of stmts) {
+      if (
+        stmt.kind === "return" &&
+        stmt.value &&
+        referencesMember(stmt.value, members) &&
+        i64Compat(stmt.value, members)
+      ) {
+        stmt.value = { kind: "cast", expr: stmt.value, ty: { kind: "f64" } };
+      }
+    }
+  }
+}
+
+/** Tag every integer-literal leaf of a known-`i64` expression tree. */
+function tagI64Tree(e: HirExpr): void {
+  if (e.kind === "number" && Number.isInteger(e.value)) {
+    e.ty = "i64";
+  } else if (e.kind === "binary" && INTEGER_ARITH.has(e.op)) {
+    tagI64Tree(e.left);
+    tagI64Tree(e.right);
+  }
+}
+
+/** Tag a non-`i64` integer literal `i64`; returns whether it changed. */
+function tagIfIntLiteral(e: HirExpr): boolean {
+  if (e.kind === "number" && Number.isInteger(e.value) && e.ty !== "i64") {
+    e.ty = "i64";
+    return true;
+  }
+  return false;
+}
+
+/** Is `e` `i64`-typed: a member ident, an `i64`-tagged literal, or integer
+ * arithmetic with at least one `i64` operand? */
+function isI64Expr(e: HirExpr, members: Set<string>): boolean {
+  switch (e.kind) {
+    case "ident":
+      return members.has(e.name);
+    case "number":
+      return e.ty === "i64";
+    case "binary":
+      return (
+        INTEGER_ARITH.has(e.op) &&
+        (isI64Expr(e.left, members) || isI64Expr(e.right, members))
+      );
+    default:
+      return false;
+  }
 }
 
 /** All statements, descending into `if`/`while` bodies (references preserved). */
@@ -470,6 +782,16 @@ function eachExpr(e: HirExpr, fn: (e: HirExpr) => void): void {
       break;
     case "collectVec":
       eachExpr(e.iter, fn);
+      break;
+    case "strConcat":
+      // A `+`/template concatenation (`s + "x" + (i % 10)`): numeric inference must
+      // reach interpolated numeric sub-expressions so an index/counter inside one is
+      // typed like anywhere else (series 103b-1 — an untyped `i % 10` under an `i64`
+      // `i` would be `i64 % f64`).
+      for (const p of e.parts) eachExpr(p, fn);
+      break;
+    case "jsObjectStr":
+      eachExpr(e.value, fn);
       break;
     // Leaves carry no nested expressions:
     case "number":
