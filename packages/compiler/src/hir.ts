@@ -914,6 +914,11 @@ export type HirStmt =
    * the range. `break`/`continue` render natively. Series 064 extends it beyond
    * the ascending unit step: `descending` renders `(start..=end).rev()`; a `step`
    * ≠ 1 renders `.step_by(step)`; `label` is the loop's lifetime label.
+   *
+   * `counterTy` is the counter's numeric type: `usize` (the index-driven default,
+   * series 020) or `i64` (a pure-integer counter, series 103b-2). An `i64` counter
+   * pins its range element type with a literal suffix (`0i64..N`) so Rust does not
+   * default the range to `i32`.
    */
   | {
       kind: "forRange";
@@ -925,6 +930,7 @@ export type HirStmt =
       descending?: boolean;
       step?: number;
       label?: string;
+      counterTy?: "usize" | "i64";
     }
   /**
    * `match <disc> { arms }`. A `switch` lowers here with **guarded wildcard**

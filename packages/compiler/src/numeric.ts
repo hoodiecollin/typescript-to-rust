@@ -46,6 +46,7 @@ export function refineNumerics(module: HirModule): HirModule {
   module.main = refineBody([], module.main);
   promoteIntegerMatches(module);
   propagateIntegerParams(module);
+  specializeReturnTypes(module);
   return module;
 }
 
@@ -74,7 +75,7 @@ function refineBody(
   // an integer `%` whose operands did *not* retype.
   const i64 = specializeIntegerBindings(all, usize, retTy);
   tagIntegerModulo(all, usize, i64);
-  return promoteRanges(stmts, usize);
+  return promoteRanges(stmts, usize, i64);
 }
 
 // ── Local integer-domain modulo (series 103a) ─────────────────────────────────
@@ -509,6 +510,102 @@ function isI64Expr(e: HirExpr, members: Set<string>): boolean {
     default:
       return false;
   }
+}
+
+// ── Return-type specialization (series 103b-2) ────────────────────────────────
+
+/**
+ * Specialize a free function's `f64` return type to `i64` when 103b-1 bridged
+ * *every* `return` with an `as f64` cast over an integer expression **and** every
+ * call site uses the result in an `i64`-safe position — printed via `Display`
+ * (`console.log(run())`) or discarded (`run();`). The bridge casts are then removed
+ * (`return acc`, not `return (acc as f64)`) and the signature becomes
+ * `fn f() -> i64`.
+ *
+ * *Preferring*, like the other integer promotions: if any call site flows the
+ * result into an `f64` context we can't prove is integer-safe (a binding, further
+ * arithmetic, an argument), the function keeps its `f64` return and the bridge cast
+ * — no change, no fail-loud. Scoped to free functions; methods/constructors keep
+ * the bridge (their call sites need receiver resolution).
+ */
+function specializeReturnTypes(module: HirModule): void {
+  for (const item of module.items) {
+    if (item.kind !== "fn" || item.ret.kind !== "f64") continue;
+
+    const i64names = i64BindingNames(item.params, item.body);
+    const returns = flattenStmts(item.body).filter(
+      (s): s is Extract<HirStmt, { kind: "return" }> =>
+        s.kind === "return" && s.value !== undefined,
+    );
+    if (returns.length === 0) continue;
+    // Every return must be an `as f64` bridge over a pure-`i64` expression.
+    if (!returns.every((r) => r.value && isI64Bridge(r.value, i64names)))
+      continue;
+
+    if (!allCallSitesI64Safe(module, item.name)) continue;
+
+    for (const r of returns) {
+      r.value = (r.value as Extract<HirExpr, { kind: "cast" }>).expr;
+    }
+    item.ret = { kind: "i64" };
+  }
+}
+
+/** Names bound to `i64` in a body: `i64`-retyped `let`s (series 103b-1) and params. */
+function i64BindingNames(params: HirParam[], stmts: HirStmt[]): Set<string> {
+  const names = new Set<string>();
+  for (const p of params) if (p.ty.kind === "i64") names.add(p.name);
+  for (const s of flattenStmts(stmts)) {
+    if (s.kind === "let" && s.ty?.kind === "i64") names.add(s.name);
+  }
+  return names;
+}
+
+/** Is `e` an `(E as f64)` bridge whose inner `E` is a pure-`i64` expression? */
+function isI64Bridge(e: HirExpr, i64names: Set<string>): boolean {
+  return (
+    e.kind === "cast" && e.ty.kind === "f64" && i64Compat(e.expr, i64names)
+  );
+}
+
+/**
+ * Is every call to `fnName` across the module in an `i64`-safe result position —
+ * a discarded `expr` statement (`run();`) or a `println` argument (`Display` on an
+ * integer prints identically to the `f64`)? A call anywhere else (bound, in
+ * arithmetic, an argument, a nested receiver) is not proven safe, so we bail.
+ */
+function allCallSitesI64Safe(module: HirModule, fnName: string): boolean {
+  const isCall = (e: HirExpr): boolean =>
+    e.kind === "call" && e.callee === fnName;
+  const safe = new Set<HirExpr>();
+  for (const stmts of moduleBodies(module)) {
+    for (const stmt of flattenStmts(stmts)) {
+      if (stmt.kind !== "expr") continue;
+      if (isCall(stmt.expr)) safe.add(stmt.expr); // `run();` — discarded
+      else if (stmt.expr.kind === "println") {
+        for (const a of stmt.expr.args) if (isCall(a)) safe.add(a); // printed
+      }
+    }
+  }
+  let ok = true;
+  eachModuleExpr(module, (e) => {
+    if (isCall(e) && !safe.has(e)) ok = false;
+  });
+  return ok;
+}
+
+/** Every statement list in the module — function/method/ctor bodies and `main`. */
+function moduleBodies(module: HirModule): HirStmt[][] {
+  const bodies: HirStmt[][] = [];
+  for (const item of module.items) {
+    if (item.kind === "fn") bodies.push(item.body);
+    else if (item.kind === "class") {
+      if (item.ctor) bodies.push(item.ctor.body);
+      for (const m of item.methods) bodies.push(m.body);
+    }
+  }
+  bodies.push(module.main);
+  return bodies;
 }
 
 /** All statements, descending into `if`/`while` bodies (references preserved). */
@@ -1172,15 +1269,20 @@ function reconcileArgs(
 /**
  * Recursively rewrite each canonical `usize` counting `for` — already a
  * `block { let mut i = start; while (i </<= end) { …; i = i + 1; } }` — into a
- * `forRange` (`for i in start..end`). Purely structural: the counter is `usize`
- * before and after, so no type can conflict. Every non-eligible loop keeps its
- * correct while-desugar. Returns the (possibly rewritten) statement list.
+ * `forRange` (`for i in start..end`). Purely structural: the counter keeps its
+ * type (`usize`, or an `i64` counter retyped by series 103b-1) before and after,
+ * so no type can conflict. Every non-eligible loop keeps its correct while-desugar.
+ * Returns the (possibly rewritten) statement list.
  */
-function promoteRanges(stmts: HirStmt[], usize: Set<string>): HirStmt[] {
+function promoteRanges(
+  stmts: HirStmt[],
+  usize: Set<string>,
+  i64: Set<string>,
+): HirStmt[] {
   return stmts.map((stmt) => {
-    const recursed = mapStmtBodies(stmt, (b) => promoteRanges(b, usize));
+    const recursed = mapStmtBodies(stmt, (b) => promoteRanges(b, usize, i64));
     if (recursed.kind === "block") {
-      const range = tryRange(recursed, usize);
+      const range = tryRange(recursed, usize, i64);
       if (range) return range;
     }
     return recursed;
@@ -1215,12 +1317,14 @@ function mapStmtBodies(
 }
 
 /**
- * If `block` is the canonical counting-loop shape with a `usize` counter and an
+ * If `block` is the canonical counting-loop shape with a `usize` (index-driven,
+ * series 020) or `i64` (pure-integer, series 103b-2) counter and a matching
  * integer-compatible bound, return the equivalent `forRange`; else `null`.
  */
 function tryRange(
   block: Extract<HirStmt, { kind: "block" }>,
   usize: Set<string>,
+  i64: Set<string>,
 ): HirStmt | null {
   if (block.body.length !== 2) return null;
   const [letStmt, whileStmt] = block.body;
@@ -1228,12 +1332,14 @@ function tryRange(
   if (!whileStmt || whileStmt.kind !== "while") return null;
 
   const counter = letStmt.name;
-  if (!usize.has(counter)) return null; // index-driven counters only
+  const isI64 = !usize.has(counter) && i64.has(counter);
+  if (!usize.has(counter) && !isI64) return null; // usize or i64 counters only
+  const counterTy: "usize" | "i64" = isI64 ? "i64" : "usize";
 
   const cond = whileStmt.cond;
   if (cond.kind !== "binary") return null;
   if (!isNamedIdent(cond.left, counter)) return null;
-  if (!isIntegerBound(cond.right, usize)) return null;
+  if (!isIntegerBound(cond.right, usize, i64, counterTy)) return null;
 
   const body = whileStmt.body;
   const last = body[body.length - 1];
@@ -1256,36 +1362,40 @@ function tryRange(
     return {
       kind: "forRange",
       counter,
-      start: tagUsizeIfInt(letStmt.init),
-      end: tagUsizeIfInt(cond.right),
+      start: tagIntIfInt(letStmt.init, counterTy),
+      end: tagIntIfInt(cond.right, counterTy),
       inclusive: cond.op === "<=",
       step: step.by,
       body: inner,
       label,
+      counterTy,
     };
   }
   // Descending unit step (series 064): `(lo..=hi).rev()` counts `hi…lo`. `i > E`
   // stops at `E+1` (lo = E+1); `i >= E` includes `E` (lo = E). `hi` is the init.
-  // Non-unit descending step and non-`usize` bound-driven ranges stay `while`.
+  // Non-unit descending step ranges stay `while`.
   if (descending && step.dir === "down" && step.by === 1) {
     const lo =
-      cond.op === ">" ? addOne(tagUsizeIfInt(cond.right)) : tagUsizeIfInt(cond.right);
+      cond.op === ">"
+        ? addOne(tagIntIfInt(cond.right, counterTy), counterTy)
+        : tagIntIfInt(cond.right, counterTy);
     return {
       kind: "forRange",
       counter,
       start: lo,
-      end: tagUsizeIfInt(letStmt.init),
+      end: tagIntIfInt(letStmt.init, counterTy),
       inclusive: true,
       descending: true,
       body: inner,
       label,
+      counterTy,
     };
   }
   return null;
 }
 
-/** `e + 1`, folded when `e` is an integer literal (keeps the `usize` tag). */
-function addOne(e: HirExpr): HirExpr {
+/** `e + 1`, folded when `e` is an integer literal (keeps the counter's int tag). */
+function addOne(e: HirExpr, counterTy: "usize" | "i64"): HirExpr {
   if (e.kind === "number" && Number.isInteger(e.value)) {
     return { ...e, value: e.value + 1 };
   }
@@ -1293,7 +1403,7 @@ function addOne(e: HirExpr): HirExpr {
     kind: "binary",
     op: "+",
     left: e,
-    right: { kind: "number", value: 1, ty: "usize" },
+    right: { kind: "number", value: 1, ty: counterTy },
   };
 }
 
@@ -1380,8 +1490,23 @@ function stripForContinue(stmts: HirStmt[], counter: string): HirStmt[] {
   });
 }
 
-/** A bound is integer-compatible: a `.len()`, an integer literal, or a `usize`. */
-function isIntegerBound(e: HirExpr, usize: Set<string>): boolean {
+/**
+ * Is the loop bound compatible with the counter's type? A `usize` counter accepts
+ * a `.len()`, a non-negative integer literal, or another `usize`. An `i64` counter
+ * (series 103b-2) accepts an integer literal or another `i64` — never a `.len()`
+ * or `usize` (those would type-mismatch the `i64` range element).
+ */
+function isIntegerBound(
+  e: HirExpr,
+  usize: Set<string>,
+  i64: Set<string>,
+  counterTy: "usize" | "i64",
+): boolean {
+  if (counterTy === "i64") {
+    if (e.kind === "number") return Number.isInteger(e.value);
+    if (e.kind === "ident") return i64.has(e.name);
+    return false;
+  }
   if (e.kind === "len") return true;
   if (e.kind === "number") return Number.isInteger(e.value) && e.value >= 0;
   if (e.kind === "ident") return usize.has(e.name);
@@ -1400,12 +1525,15 @@ function assignsName(stmts: HirStmt[], name: string): boolean {
   return false;
 }
 
-/** Tag a non-negative integer literal `usize` (so a range bound emits bare). */
-function tagUsizeIfInt(e: HirExpr): HirExpr {
-  if (e.kind === "number" && Number.isInteger(e.value) && e.value >= 0) {
-    return { ...e, ty: "usize" };
-  }
-  return e;
+/**
+ * Tag an integer-literal range endpoint with the counter's type so it emits bare
+ * (`5000000`, not `5000000.0`). A `usize` endpoint must be non-negative; an `i64`
+ * endpoint may be negative. A non-literal endpoint is returned unchanged.
+ */
+function tagIntIfInt(e: HirExpr, counterTy: "usize" | "i64"): HirExpr {
+  if (e.kind !== "number" || !Number.isInteger(e.value)) return e;
+  if (counterTy === "usize" && e.value < 0) return e;
+  return { ...e, ty: counterTy };
 }
 
 function isNamedIdent(e: HirExpr, name: string): boolean {

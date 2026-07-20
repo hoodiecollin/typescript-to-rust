@@ -1193,7 +1193,16 @@ function emitStmt(stmt: HirStmt): string {
       return emitReborrowLoop(stmt);
     case "forRange": {
       const dots = stmt.inclusive ? "..=" : "..";
-      let range = `${emitExpr(stmt.start)}${dots}${emitExpr(stmt.end)}`;
+      // An `i64` counter (series 103b-2) pins the range element type so Rust does
+      // not default the untyped range literals to `i32`: suffix a literal endpoint
+      // (`0i64`), or cast a non-literal one (`(e as i64)`).
+      const endpoint = (e: HirExpr): string =>
+        stmt.counterTy === "i64"
+          ? e.kind === "number" && Number.isInteger(e.value)
+            ? `${e.value}i64`
+            : `(${emitExpr(e)} as i64)`
+          : emitExpr(e);
+      let range = `${endpoint(stmt.start)}${dots}${emitExpr(stmt.end)}`;
       // A non-ascending / non-unit-step range (series 064). `.rev()` needs the
       // parenthesized range; `.step_by(k)` takes the positive stride.
       if (stmt.descending) range = `(${range}).rev()`;
