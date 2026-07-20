@@ -24,15 +24,18 @@ const occurrences = (haystack: string, needle: string) =>
 
 describe("for-continue: unblock continue in a C-style for", () => {
   test("FORCONT1 an own continue inlines the update before it", () => {
+    // A *doubling* step (`i = i * 2`) is non-linear, so the loop is never lifted to
+    // a native range (series 103b-2) — it keeps the while-desugar this spec pins,
+    // where the update must be inlined before the own `continue`. `i`/`sum` still
+    // retype to `i64` (series 103b-1), so the update is `i = i * 2`.
     const rust = compile(
       `function run(): number { let sum: number = 0;` +
-        ` for (let i = 0; i < 5; i = i + 1) { if (i === 2) { continue; } sum = sum + i; }` +
+        ` for (let i = 1; i < 20; i = i * 2) { if (i === 2) { continue; } sum = sum + i; }` +
         ` return sum; }`,
     );
     expect(rust).toContain("continue;");
     // update at the continue site AND at the loop bottom → at least twice.
-    // `i`/`sum` retype to `i64` (series 103b-1), so the update is `i = i + 1`.
-    expect(occurrences(rust, "i = i + 1;")).toBeGreaterThanOrEqual(2);
+    expect(occurrences(rust, "i = i * 2;")).toBeGreaterThanOrEqual(2);
   });
 
   test("FORCONT2 a break in the same for stays a bare break", () => {
@@ -45,11 +48,13 @@ describe("for-continue: unblock continue in a C-style for", () => {
   });
 
   test("FORCONT3 (green control) a for without a continue is unchanged (one update)", () => {
+    // Same non-promotable doubling loop, without a `continue`: the update appears
+    // exactly once (the loop bottom), with nothing inlined.
     const rust = compile(
       `function run(): number { let s: number = 0;` +
-        ` for (let i = 0; i < 3; i = i + 1) { s = s + i; } return s; }`,
+        ` for (let i = 1; i < 20; i = i * 2) { s = s + i; } return s; }`,
     );
-    expect(occurrences(rust, "i = i + 1")).toBe(1);
+    expect(occurrences(rust, "i = i * 2")).toBe(1);
   });
 
   test("FORCONT4 a for with no update but a continue no longer throws", () => {

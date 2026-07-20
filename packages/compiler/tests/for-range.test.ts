@@ -62,11 +62,12 @@ describe("for-range: canonical usize counting for → range", () => {
     expect(rust).not.toContain("while");
   });
 
-  test("RANGE5 (non-promotion) the i64 accumulator loop stays a `while`", () => {
-    // Series 103b-1 retypes `i` and `total` to `i64` (a pure-integer accumulator
-    // loop), so this is native integer arithmetic — but it stays a `while`, because
-    // `promoteRanges` still only lifts a `usize` counter to a range (103b-2
-    // generalizes range promotion to `i64`). The `f64` return is bridged with a cast.
+  test("RANGE5 the i64 accumulator loop promotes to a typed range (series 103b-2)", () => {
+    // Series 103b-1 retypes `i`/`total` to `i64`; 103b-2 then lifts the `i64`
+    // counter to a range (`for i in 0i64..5`, the literal suffix pins the element
+    // type off `i32`) and specializes the return — since the only use of `sum()`'s
+    // result is `Display` (or here, none), `fn sum() -> i64` drops the `as f64`
+    // bridge and returns `total` directly.
     const rust = compile(
       `function sum(): number {\n` +
         `  let total: number = 0;\n` +
@@ -74,11 +75,12 @@ describe("for-range: canonical usize counting for → range", () => {
         `  return total;\n` +
         `}`,
     );
-    expect(rust).toContain("let mut i: i64 = 0");
     expect(rust).toContain("let mut total: i64 = 0");
-    expect(rust).toContain("while i < 5 {");
-    expect(rust).toContain("return (total as f64)");
-    expect(rust).not.toContain("for i in");
+    expect(rust).toContain("for i in 0i64..5 {");
+    expect(rust).toContain("fn sum() -> i64");
+    expect(rust).toContain("return total;");
+    expect(rust).not.toContain("while");
+    expect(rust).not.toContain("as f64");
   });
 
   test("RANGE6 an own `continue` now promotes to a range with a native `continue` (series 064)", () => {

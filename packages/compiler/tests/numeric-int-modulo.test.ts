@@ -20,7 +20,8 @@ for (let i: number = 0; i < 10; i = i + 1) {
 console.log(hits);`,
     expected: "4",
     extra: ({ rust }) => {
-      expect(rust).toContain("let mut i: i64 = 0");
+      // The `i64` counter also lifts to a typed range (series 103b-2).
+      expect(rust).toContain("for i in 0i64..10");
       expect(rust).toContain("i % 3 == 0");
       expect(rust).not.toContain("as i64");
       expect(rust).not.toContain("i % 3.0");
