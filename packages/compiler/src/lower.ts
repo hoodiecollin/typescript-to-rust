@@ -96,6 +96,7 @@ import { refineTaskEscape } from "./task-escape";
 import { refineRc } from "./rc";
 import { computeAutoRc } from "./alias-escape";
 import { refineStrings } from "./strings";
+import { refineIterFusion } from "./iter-fusion";
 import {
   createCrateTypeOracle,
   createTypeOracle,
@@ -631,21 +632,26 @@ export function lower(
   // struct, so the `return self.field` move-out drops the 038 clone. Runs after
   // `computeAutoRc` (which decides consuming vs demoted).
   applyOwnedSelf(module, autoRc.consumingMethods);
-  const result = fixKeyBorrows(
-    fixStringScrutinees(
-      refineOwnership(
-        refineTaskEscape(
-          refineArena(
-            refineRc(
-              refineStrings(refineNumerics(refineBitwise(module))),
-              {
-                rcScopes: analysis.rcScopes,
-                autoRc,
-                classes: analysis.classes,
-                mutatingMethods: analysis.mutatingMethods,
-              },
+  // `refineIterFusion` (series 104) runs **last** — on the fully-refined module, so it
+  // sees final adapter/element-mode shapes and settled ownership before fusing single-
+  // use map/filter/reduce chains.
+  const result = refineIterFusion(
+    fixKeyBorrows(
+      fixStringScrutinees(
+        refineOwnership(
+          refineTaskEscape(
+            refineArena(
+              refineRc(
+                refineStrings(refineNumerics(refineBitwise(module))),
+                {
+                  rcScopes: analysis.rcScopes,
+                  autoRc,
+                  classes: analysis.classes,
+                  mutatingMethods: analysis.mutatingMethods,
+                },
+              ),
+              analysis.arenaScopes,
             ),
-            analysis.arenaScopes,
           ),
         ),
       ),
