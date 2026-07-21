@@ -25,6 +25,7 @@ import type {
   GenericParam,
   HirArg,
   HirCatchArm,
+  IterRecv,
   HirClass,
   HirEnum,
   HirErrorEnum,
@@ -2141,7 +2142,11 @@ function emitExpr(expr: HirExpr): string {
         const i = rid(expr.indexParam);
         return `${recv}.iter().enumerate().map(|(${i}, ${p})| ${expr.cbName}(${elem}, ${i} as f64${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
       }
-      return `${recv}.iter().map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+      // Fused (series 104): `recvIter` owns the element (bare `p`); `lazy` drops the
+      // terminal collect so the chain stays a single lazy iterator.
+      const el = expr.recvIter ? p : elem;
+      const tail = expr.lazy ? "" : ".collect::<Vec<_>>()";
+      return `${recv}${iterPrefix(expr.recvIter)}.map(|${p}| ${expr.cbName}(${el}${emitForwarded(expr.forwarded)}))${tail}`;
     }
     case "arrayFromMap": {
       // `Array.from(src, fn)` (075). A generator source is already an iterator by
@@ -2164,11 +2169,18 @@ function emitExpr(expr: HirExpr): string {
       return `${src}.iter().map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
     }
     case "iterFilter": {
-      // A filter predicate receives `&&T`; a Copy element derefs `**p` and the
-      // terminal is `.copied()`, a non-Copy element derefs one level and clones.
-      const elem = elemDouble(expr.elemMode, expr.elemParam);
-      const term = expr.elemMode === "copy" ? "copied" : "cloned";
-      return `${emitExpr(expr.receiver)}.iter().filter(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).${term}().collect::<Vec<_>>()`;
+      // A filter predicate receives `&&T` off `.iter()`; a Copy element derefs `**p`
+      // and the terminal is `.copied()`, a non-Copy derefs one level and clones. Fused
+      // (series 104) over an owned iterator (`recvIter`) the predicate receives `&T`
+      // (single deref) and there is no `.copied()/.cloned()`; `lazy` drops the collect.
+      const elem = expr.recvIter
+        ? elemSingle(expr.elemMode, expr.elemParam)
+        : elemDouble(expr.elemMode, expr.elemParam);
+      const term = expr.recvIter
+        ? ""
+        : `.${expr.elemMode === "copy" ? "copied" : "cloned"}()`;
+      const tail = expr.lazy ? "" : ".collect::<Vec<_>>()";
+      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.filter(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)}))${term}${tail}`;
     }
     case "iterFlatMap": {
       // `.flat_map(cb)` — the lifted `cb` returns a `Vec<U>`; `flat_map` flattens
@@ -2176,8 +2188,9 @@ function emitExpr(expr: HirExpr): string {
       // shim as `iterMap` (`.iter()` borrow, `elemSingle` deref).
       const recv = emitExpr(expr.receiver);
       const p = rid(expr.elemParam);
-      const elem = elemSingle(expr.elemMode, expr.elemParam);
-      return `${recv}.iter().flat_map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).collect::<Vec<_>>()`;
+      const elem = expr.recvIter ? p : elemSingle(expr.elemMode, expr.elemParam);
+      const tail = expr.lazy ? "" : ".collect::<Vec<_>>()";
+      return `${recv}${iterPrefix(expr.recvIter)}.flat_map(|${p}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)}))${tail}`;
     }
     case "objectKeys":
       return `${emitExpr(expr.map)}.keys().cloned().collect::<Vec<_>>()`;
@@ -2197,16 +2210,27 @@ function emitExpr(expr: HirExpr): string {
       return `{ let mut __o = ${seed}; ${steps.join(" ")} __o }`;
     }
     case "iterFind": {
-      const elem = elemDouble(expr.elemMode, expr.elemParam);
-      const term = expr.elemMode === "copy" ? "copied" : "cloned";
-      return `${emitExpr(expr.receiver)}.iter().find(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)})).${term}()`;
+      // `find` receives `&Item`; off `.iter()` that is `&&T` (`elemDouble` + a
+      // `.copied()/.cloned()`), fused over an owned iterator it is `&T` (`elemSingle`,
+      // no terminal — `Option<T>` is already owned).
+      const elem = expr.recvIter
+        ? elemSingle(expr.elemMode, expr.elemParam)
+        : elemDouble(expr.elemMode, expr.elemParam);
+      const term = expr.recvIter
+        ? ""
+        : `.${expr.elemMode === "copy" ? "copied" : "cloned"}()`;
+      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.find(|${rid(expr.elemParam)}| ${expr.cbName}(${elem}${emitForwarded(expr.forwarded)}))${term}`;
     }
     case "iterAny":
-      return `${emitExpr(expr.receiver)}.iter().any(|${rid(expr.elemParam)}| ${expr.cbName}(${elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
+      // `any`/`all` receive `Item` by value: `&T` off `.iter()` (`elemSingle`), owned
+      // `T` when fused over an iterator (bare param).
+      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.any(|${rid(expr.elemParam)}| ${expr.cbName}(${expr.recvIter ? rid(expr.elemParam) : elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterAll":
-      return `${emitExpr(expr.receiver)}.iter().all(|${rid(expr.elemParam)}| ${expr.cbName}(${elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
+      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.all(|${rid(expr.elemParam)}| ${expr.cbName}(${expr.recvIter ? rid(expr.elemParam) : elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterReduce":
-      return `${emitExpr(expr.receiver)}.iter().fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, *${rid(expr.elem)}${emitForwarded(expr.forwarded)}))`;
+      // `fold` receives `Item` by value: `&T` off `.iter()` (`*b`), owned `T` when
+      // fused over an iterator (bare `b`).
+      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, ${expr.recvIter ? rid(expr.elem) : `*${rid(expr.elem)}`}${emitForwarded(expr.forwarded)}))`;
     case "iterSortDefault":
       return `tslib::array::sort_default(&mut ${emitExpr(expr.receiver)})`;
     case "iterSortBy":
@@ -2241,6 +2265,20 @@ function emitForwarded(forwarded: HirExpr[]): string {
 function elemSingle(mode: ElemMode, name: string): string {
   const p = rid(name);
   return mode === "copy" ? `*${p}` : mode === "clone" ? `${p}.clone()` : p;
+}
+
+/**
+ * How a fused adapter (series 104) prefixes its receiver: the default borrows the
+ * collection (`.iter()`), `"own"` moves it (`.into_iter()`, 3c dead-out source),
+ * and `"iter"` leaves the receiver as-is (it is already an iterator — a fused
+ * upstream stage). Both non-default modes yield owned `T` elements.
+ */
+function iterPrefix(recvIter?: IterRecv): string {
+  return recvIter === "own"
+    ? ".into_iter()"
+    : recvIter === "iter"
+      ? ""
+      : ".iter()";
 }
 
 /**

@@ -174,6 +174,17 @@ export type NumericType = "f64" | "usize" | "i64" | "i128";
  */
 export type ElemMode = "copy" | "borrow" | "clone";
 
+/**
+ * How a fused iter-adapter (series 104, #89) treats its receiver. Absent ⇒ the
+ * shipped default: the receiver is a collection borrowed via `.iter()` (element is
+ * `&T`). `"own"` ⇒ the receiver is a collection whose binding is dead after the
+ * chain, moved via `.into_iter()` (element is owned `T`, 3c). `"iter"` ⇒ the
+ * receiver is *already* an iterator (a fused upstream stage) — no `.iter()`, element
+ * owned `T`. Both non-default modes drop the `filter`/`find` `.copied()`/`.cloned()`
+ * terminal. Set by `refineIterFusion`.
+ */
+export type IterRecv = "own" | "iter";
+
 // ── Expressions ──────────────────────────────────────────────────────────────
 
 /** A call argument plus the borrow to apply to it (`x` / `&x` / `&mut x`). */
@@ -580,6 +591,11 @@ export type HirExpr =
        * usize` is threaded before the forwarded free vars. Absent → single-param.
        */
       indexParam?: string;
+      /** Fused (series 104): drop the terminal `.collect::<Vec<_>>()` — this stage
+       * feeds another adapter, so it stays a lazy iterator. */
+      lazy?: boolean;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /**
    * `Array.from(src, fn)` — the mapping overload (series 075), reusing 057's
@@ -612,6 +628,10 @@ export type HirExpr =
       elemParam: string;
       forwarded: HirExpr[];
       elemMode: ElemMode;
+      /** Fused (series 104): drop the terminal `.copied()/.collect::<Vec<_>>()`. */
+      lazy?: boolean;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /**
    * `xs.flatMap(p => [..])` →
@@ -628,6 +648,10 @@ export type HirExpr =
       elemParam: string;
       forwarded: HirExpr[];
       elemMode: ElemMode;
+      /** Fused (series 104): drop the terminal `.collect::<Vec<_>>()`. */
+      lazy?: boolean;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /** `Object.keys(m)` → `m.keys().cloned().collect::<Vec<_>>()` → `Vec<String>` (041). */
   | { kind: "objectKeys"; map: HirExpr }
@@ -659,6 +683,8 @@ export type HirExpr =
       elemParam: string;
       forwarded: HirExpr[];
       elemMode: ElemMode;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /** `xs.some(p => c)` → `xs.iter().any(|p| cbName(*p, forwarded…))` → `bool` (048). */
   | {
@@ -668,6 +694,8 @@ export type HirExpr =
       elemParam: string;
       forwarded: HirExpr[];
       elemMode: ElemMode;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /** `xs.every(p => c)` → `xs.iter().all(|p| cbName(*p, forwarded…))` → `bool` (048). */
   | {
@@ -677,6 +705,8 @@ export type HirExpr =
       elemParam: string;
       forwarded: HirExpr[];
       elemMode: ElemMode;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /**
    * `xs.reduce((acc, x) => e, init)` →
@@ -692,6 +722,8 @@ export type HirExpr =
       elem: string;
       forwarded: HirExpr[];
       init: HirExpr;
+      /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
+      recvIter?: IterRecv;
     }
   /**
    * `xs.sort()` → `tslib::array::sort_default(&mut xs)` (040). Default JS sort is
