@@ -194,6 +194,9 @@ function stdImports(items: HirItem[], main: HirStmt[]): string[] {
   // (tslib); import it so the `impl Steppable` / `step()` arms name it unqualified.
   if (items.some((i) => i.kind === "generator"))
     imports.push("use tslib::gen::GenStep;");
+  // An in-place string append (series 106, #88/2a) emits `write!(s, …)`, which
+  // resolves `write_fmt` through the `std::fmt::Write` trait — import it unqualified.
+  if (usesKind(scan, "strAppend")) imports.push("use std::fmt::Write;");
   // A module-level value default (#70) → a `LazyLock` static; a non-scalar payload
   // is `Rc`-wrapped. Import each unqualified (deduped against the `rc` branch above).
   if (items.some((i) => i.kind === "lazyStatic"))
@@ -1870,6 +1873,19 @@ function emitExpr(expr: HirExpr): string {
         p.kind === "string" ? JSON.stringify(p.value) : emitExpr(p),
       );
       return `format!(${JSON.stringify(fmt)}, ${args.join(", ")})`;
+    }
+    case "strAppend": {
+      // In-place string append (series 106, #88/2a): the self-append rebind
+      // `s = s + …` → `write!(s, "{}…", tail…).unwrap()`. `write!` autoref-borrows
+      // the target as `&mut String` and appends through its `std::fmt::Write` impl
+      // (amortized-O(1), capacity doubling) instead of `format!`-and-rebind's O(n²)
+      // whole-buffer copy. Args mirror `strConcat` (a literal → bare `&str`); the
+      // `Result` is infallible for `String`, so `.unwrap()` never panics.
+      const fmt = expr.parts.map(() => "{}").join("");
+      const args = expr.parts.map((p) =>
+        p.kind === "string" ? JSON.stringify(p.value) : emitExpr(p),
+      );
+      return `write!(${emitExpr(expr.target)}, ${JSON.stringify(fmt)}, ${args.join(", ")}).unwrap()`;
     }
     case "jsObjectStr":
       // A plain struct interpolated into a template (series 095) → JS

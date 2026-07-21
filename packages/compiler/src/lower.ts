@@ -95,6 +95,7 @@ import { refineOwnership } from "./ownership";
 import { refineTaskEscape } from "./task-escape";
 import { refineRc } from "./rc";
 import { computeAutoRc } from "./alias-escape";
+import { refineStrAppend } from "./str-append";
 import { refineStrings } from "./strings";
 import { refineIterFusion } from "./iter-fusion";
 import {
@@ -642,7 +643,9 @@ export function lower(
           refineTaskEscape(
             refineArena(
               refineRc(
-                refineStrings(refineNumerics(refineBitwise(module))),
+                refineStrAppend(
+                  refineStrings(refineNumerics(refineBitwise(module))),
+                ),
                 {
                   rcScopes: analysis.rcScopes,
                   autoRc,

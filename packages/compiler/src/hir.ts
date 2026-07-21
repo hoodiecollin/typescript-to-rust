@@ -236,6 +236,16 @@ export type HirExpr =
    */
   | { kind: "strConcat"; parts: HirExpr[] }
   /**
+   * In-place string append (series 106, #88/2a): the self-append rebind
+   * `s = s + …` — where the accumulator `s` is an owned `String` local and the head
+   * of the RHS `+` chain — rewritten from an O(n²) `s = format!(…)` (fresh buffer +
+   * full copy each iteration) into a single amortized-O(n) `write!(target, "{}…",
+   * parts…).unwrap()` that appends through `target`'s `std::fmt::Write` impl. `parts`
+   * is the *tail* of the chain (the head `s` is dropped); a string-literal part
+   * renders as a bare `&str`, matching `strConcat`. Produced by `refineStrAppend`.
+   */
+  | { kind: "strAppend"; target: HirExpr; parts: HirExpr[] }
+  /**
    * A plain-data-struct value interpolated into a template literal (series 095) —
    * `` `${point}` `` → the JS `String(object)` result `"[object Object]"`. Plain
    * structs derive only `Clone`+`Debug` (never `Display`), so this is the JS-faithful
