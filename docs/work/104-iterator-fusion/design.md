@@ -45,13 +45,22 @@ completion (all maps, then all filters, then the fold); the lazy fused form inte
 them per element (map x₀, filter x₀, fold; map x₁, …). Two conditions must hold, or the
 chain is left eager — a third (callback purity) is **free by construction**:
 
-- **G1 — intermediate not observed later.** Each fused intermediate binding
-  (`doubled`, `kept`) must be **dead-out** after its consumer statement, per
-  `computeLiveOut` over the enclosing body. This subsumes textual single-use and also
-  rejects closure captures / loop back-edge reuse (liveness keeps those live). *(This is
-  the #89↔#88 "shared escape check" — it already exists and is already reused by the 068
-  consuming-edge in `alias-escape.ts` and by the for-of ownership-mode pass. #89 reuses
-  it; it does not build a new analysis.)*
+- **G1 — intermediate not observed elsewhere.** Each fused intermediate binding
+  (`doubled`, `kept`) must be referenced **exactly once** in the enclosing body — that
+  one reference being the consumer's `receiver` — via a complete deep reference count
+  (every `{kind:"ident"}` occurrence, over the whole statement subtree). The consumer
+  need not be adjacent (the aggressive relaxation); non-adjacency is made safe by G3.
+
+  *Ground-truth correction:* the plan was to reuse `ownership.ts`'s `computeLiveOut`
+  (the "shared escape check"). On inspection its `collectUses` is **move-liveness** — it
+  deliberately skips borrow-only uses (an `iterReduce`/`iterFind`/`iterAny`/`iterAll`
+  receiver is a `.iter()` borrow, so it is *not* recorded), because it exists to place
+  clones on moves. Using it for "is this value *read* later?" would **under-count**
+  reads and could fuse an intermediate that is still observed → unsound. So G1 uses a
+  complete reference count instead. (Name-shadowing only ever *inflates* the count, so
+  the gate stays conservative/sound.) Full read-liveness precision — fusing when an
+  intermediate is referenced more than once but dead on the fused path — is **deferred**;
+  it needs a read-liveness pass the codebase doesn't have yet.
 - **G3 — no source/capture mutation in the gap.** For a non-adjacent consumer, no
   statement between producer and consumer may write to the chain **source** or to any
   **forwarded free variable** the callbacks capture — lazy reads them at fold time, not
@@ -79,23 +88,25 @@ A new pure, idempotent HIR → HIR pass (`packages/compiler/src/iter-fusion.ts`)
 to the refine chain (`refineBitwise → refineNumerics → refineStrings → refineIterFusion`).
 Runs per function/method/main body, recursing into nested bodies. Per body:
 
-1. `computeLiveOut(body, allLocals)`.
-2. Find a **producer**: `let NAME = <iterMap | iterFilter | iterFlatMap>` (the lazy,
+1. Find a **producer**: `let NAME = <iterMap | iterFilter | iterFlatMap>` (the lazy,
    `Vec`-collecting adapters — the *intermediate* shapes).
-3. Find its **consumer**: the unique later use of `NAME` as the `receiver` of another
+2. Find its **consumer** in the same statement list: a later statement holding an
    iter-adapter (`iterMap`/`iterFilter`/`iterFlatMap`/`iterReduce`/`iterFind`/`iterAny`/
-   `iterAll`). Require G1 (dead-out after consumer) and G3 (no interfering write in the
-   gap). Also bail if any fused stage carries an `indexParam` — its index would be
-   miscounted once the chain is a single lazy pass (a conservative correctness guard).
-4. Rewrite: mark the producer node `lazy` (drop terminal `.collect()`) and `sourceIter`
-   on the consumer where its receiver is now an iterator (drop `.iter()`, switch the
-   element shim to by-value, drop `.copied()`); splice the producer node in as the
-   consumer's `receiver`; **delete** the producer statement.
-5. Fixpoint: a 3-stage chain fuses in two rounds (map+filter, then (map∘filter)+reduce).
+   `iterAll`) whose `receiver` is `{ident NAME}`. Require **G1** (refCount(body, NAME) ===
+   1) and **G3** (no write to source/forwarded names in the gap). Bail if any fused stage
+   carries an `indexParam` — its index would be miscounted once the chain is a single
+   lazy pass (a conservative correctness guard).
+3. Rewrite: set the producer node `lazy` (drop terminal `.collect()`) and the consumer
+   `recvIter = "iter"` (drop `.iter()`, by-value element shim, drop `.copied()`); splice
+   the producer node in as the consumer's `receiver`; **delete** the producer statement.
+4. Fixpoint: a 3-stage chain fuses in two rounds (map+filter, then (map∘filter)+reduce).
 
-**3c (into_iter):** after fusion, if the chain **head**'s source is a local that is
-dead-out after the (now single) chain statement, emit `.into_iter()` instead of `.iter()`
-and drop the head deref shim. Same `computeLiveOut` result; same guard style.
+**3c (into_iter):** scoped to *fused* chains only (to avoid re-lowering every `xs.map`
+in the codebase). After fusion, a chain **head** is a producer node with `lazy===true`,
+`recvIter` unset, and an ident receiver `SRC` that is a body-local `let`. If `SRC` is not
+referenced in any top-level statement after the chain statement, set `recvIter = "own"`
+(`into_iter()`, owned element). A lone unfused `map` has no `lazy` flag, so 3c never
+touches it — its `.iter()` shape is unchanged.
 
 ## Emit change
 
