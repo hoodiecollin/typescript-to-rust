@@ -33,17 +33,29 @@ import { UnsupportedError } from "./lower";
 const ARITHMETIC = new Set(["+", "-", "*", "/", "%"]);
 
 export function refineNumerics(module: HirModule): HirModule {
+  // Module-wide integrality seeds (series 105 / #90): compute *before* any body is
+  // refined (it reads the pre-refine `number`/`f64` shape) which param names are
+  // provably integer inter-procedurally — a lifted `__cb_*` element/acc param from
+  // its adapter's receiver element, or a free-fn param integer at every call site.
+  // Threaded into each body's `tagIntegerModulo` so an integer-domain `%` inside a
+  // callback (`v % 5`) specializes exactly as 103a does for intra-body counters.
+  const seeds = computeIntegralitySeeds(module);
   for (const item of module.items) {
     if (item.kind === "fn") {
-      item.body = refineBody(item.params, item.body, item.ret);
+      item.body = refineBody(item.params, item.body, item.ret, seeds.get(item.body));
     } else if (item.kind === "class") {
       if (item.ctor)
-        item.ctor.body = refineBody(item.ctor.params, item.ctor.body, item.ctor.ret);
+        item.ctor.body = refineBody(
+          item.ctor.params,
+          item.ctor.body,
+          item.ctor.ret,
+          seeds.get(item.ctor.body),
+        );
       for (const m of item.methods)
-        m.body = refineBody(m.params, m.body, m.ret);
+        m.body = refineBody(m.params, m.body, m.ret, seeds.get(m.body));
     }
   }
-  module.main = refineBody([], module.main);
+  module.main = refineBody([], module.main, undefined, seeds.get(module.main));
   promoteIntegerMatches(module);
   propagateIntegerParams(module);
   specializeReturnTypes(module);
@@ -62,6 +74,7 @@ function refineBody(
   params: HirParam[],
   stmts: HirStmt[],
   retTy?: RustType,
+  seedInts?: Set<string>,
 ): HirStmt[] {
   // Flatten control-flow bodies into one list of statement references so the
   // name-based fixpoint reaches indices inside `if`/`while` blocks (the shared
@@ -72,9 +85,11 @@ function refineBody(
   applyTypes(params, all, usize);
   // 103b-1 (retype integer counters/accumulators to `i64`) runs before 103a
   // (`tagIntegerModulo`), which falls back to a local integer-domain cast only for
-  // an integer `%` whose operands did *not* retype.
+  // an integer `%` whose operands did *not* retype. The module-wide integrality
+  // seed (series 105) is threaded into 103a only — v1 tags the modulo, it does not
+  // retype params/elements to `i64` (deferred), so 103b-1's local pass is unaffected.
   const i64 = specializeIntegerBindings(all, usize, retTy);
-  tagIntegerModulo(all, usize, i64);
+  tagIntegerModulo(all, usize, i64, seedInts);
   return promoteRanges(stmts, usize, i64);
 }
 
@@ -94,8 +109,9 @@ function tagIntegerModulo(
   stmts: HirStmt[],
   usize: Set<string>,
   i64: Set<string>,
+  seed?: Set<string>,
 ): void {
-  const ints = computeIntegerNames(stmts, usize);
+  const ints = computeIntegerNames(stmts, usize, seed);
   for (const stmt of stmts) {
     eachStmtExpr(stmt, (e) => {
       if (
@@ -145,11 +161,18 @@ function isI64Typed(e: HirExpr, i64: Set<string>): boolean {
 function computeIntegerNames(
   stmts: HirStmt[],
   usize: Set<string>,
+  seed?: Set<string>,
 ): Set<string> {
   const names = new Set<string>();
   for (const stmt of stmts) {
     if (stmt.kind === "let" && !usize.has(stmt.name)) names.add(stmt.name);
   }
+  // Module-wide integrality seed (series 105 / #90): param names proven integer
+  // inter-procedurally — a lifted `__cb_*` element/acc param, or a free-fn param
+  // integer at every call site. The greatest-fixpoint drop loop below still applies
+  // (a seeded param reassigned to a fractional value is disqualified), so the seed
+  // only *admits* candidates; it never overrides a local disqualification.
+  if (seed) for (const n of seed) if (!usize.has(n)) names.add(n);
   for (;;) {
     let changed = false;
     for (const stmt of stmts) {
@@ -1538,4 +1561,393 @@ function tagIntIfInt(e: HirExpr, counterTy: "usize" | "i64"): HirExpr {
 
 function isNamedIdent(e: HirExpr, name: string): boolean {
   return e.kind === "ident" && e.name === name;
+}
+
+// ── Module-wide integrality seeds (series 105 / #90) ──────────────────────────
+
+/**
+ * A body that owns numeric params we may prove integer-valued: a free function,
+ * a method, a constructor, or a lifted `__cb_*` callback (series 048). `main` is
+ * included (no params) so its bindings and adapter chains act as integrality
+ * *sources* for the callbacks they feed.
+ */
+interface FnUnit {
+  body: HirStmt[];
+  params: HirParam[];
+  usize: Set<string>;
+  /** Free-fn / ctor / `__cb_*` name for call-site & adapter matching; else null. */
+  callKey: string | null;
+  /** True for a lifted `__cb_*` callback (seeded from its adapter, not call sites). */
+  isCb: boolean;
+}
+
+/**
+ * A lifted callback's adapter site (series 105): the one `map`/`filter`/`reduce`/…
+ * that references it, plus the param names it seeds and where the input element
+ * comes from. A callback is single-use (048), so it has exactly one such site.
+ */
+interface CbSite {
+  unit: FnUnit;
+  /** The Vec/iterator whose element feeds the callback element param. */
+  source: HirExpr;
+  /** Body owning the adapter (for typing a reduce's `init`). */
+  ownerBody: HirStmt[];
+  /** Callback param name(s) taking the input element (map/filter elem; reduce elem). */
+  elemNames: string[];
+  /** A reduce accumulator param, seeded from `init` ∧ the fold staying integer. */
+  accName?: string;
+  init?: HirExpr;
+}
+
+/**
+ * Compute, per function body, the set of param names provably integer-valued
+ * module-wide (series 105 / #90) — the graduation of 103's intra-body integer
+ * inference into lifted callbacks and across call sites. A greatest fixpoint over
+ * the integrality lattice: start every candidate param `Int`, demote to `Real` on
+ * the first contact with a fractional quantity, to a fixpoint. The result seeds
+ * `tagIntegerModulo` so an integer-domain `%` inside a callback body (`v % 5`)
+ * specializes to a hardware modulo, exactly as 103a does for a `let` counter.
+ *
+ * v1 seeds the modulo tag only — it does **not** retype params/elements to `i64`
+ * (deferred), and it seeds only the element/acc params (a callback's forwarded
+ * free-var and index params stay `f64`, the always-safe default). Soundness rests
+ * on the seed admitting a param *only when proven* integer: a fractional source
+ * element, an upstream `/`, or a single fractional call site each demote it, so the
+ * `as i64` cast never truncates real data (specs CI5–CI8).
+ */
+function computeIntegralitySeeds(module: HirModule): Map<HirStmt[], Set<string>> {
+  const units: FnUnit[] = [];
+  const byCallKey = new Map<string, FnUnit>();
+
+  const mkUnit = (
+    body: HirStmt[],
+    params: HirParam[],
+    callKey: string | null,
+  ): FnUnit => {
+    const u: FnUnit = {
+      body,
+      params,
+      usize: computeUsizeNames(flattenStmts(body)),
+      callKey,
+      isCb: callKey !== null && callKey.startsWith("__cb_"),
+    };
+    units.push(u);
+    if (callKey) byCallKey.set(callKey, u);
+    return u;
+  };
+
+  for (const item of module.items) {
+    if (item.kind === "fn") {
+      mkUnit(item.body, item.params, item.name);
+    } else if (item.kind === "class") {
+      if (item.ctor) mkUnit(item.ctor.body, item.ctor.params, `${item.name}::new`);
+      // Methods are not seeded in v1 (receiver-class call-site resolution is a
+      // follow-up); their params stay `f64` — conservative, never unsound.
+      for (const m of item.methods) mkUnit(m.body, m.params, null);
+    }
+  }
+  const mainUnit = mkUnit(module.main, [], null);
+
+  // Precompute the callback adapter sites and the free-fn call sites once — the
+  // call graph is static across the fixpoint; only argument integrality changes.
+  const cbSites: CbSite[] = [];
+  const callSites: { callee: FnUnit; args: HirExpr[]; ownerBody: HirStmt[] }[] = [];
+  for (const u of units) {
+    for (const stmt of flattenStmts(u.body)) {
+      eachStmtExprDeep(stmt, (e) => {
+        const site = adapterCbSite(e, byCallKey, u.body);
+        if (site) cbSites.push(site);
+        if (e.kind === "call") {
+          const callee = byCallKey.get(e.callee);
+          if (callee && !callee.isCb) {
+            callSites.push({
+              callee,
+              args: e.args.map((a) => a.expr),
+              ownerBody: u.body,
+            });
+          }
+        }
+      });
+    }
+  }
+  const calledUnits = new Set(callSites.map((s) => s.callee));
+
+  // Lattice state (start optimistic): a callback's element/acc param and a *called*
+  // free-fn's params start `Int`; everything else (methods, uncalled free fns, main)
+  // starts empty — unprovable ⇒ `Real`, the safe default.
+  const seed = new Map<FnUnit, Set<string>>();
+  const retInt = new Map<FnUnit, boolean>();
+  for (const u of units) {
+    retInt.set(u, true);
+    if (u.isCb) {
+      seed.set(u, new Set()); // filled by its CbSite in the loop below
+    } else if (calledUnits.has(u)) {
+      seed.set(u, new Set(u.params.map((p) => p.name)));
+    } else {
+      seed.set(u, new Set());
+    }
+  }
+  for (const cs of cbSites) {
+    const s = seed.get(cs.unit);
+    if (s) {
+      for (const n of cs.elemNames) s.add(n);
+      if (cs.accName) s.add(cs.accName);
+    }
+  }
+
+  // Greatest fixpoint: every step only *removes* names / demotes `retInt`, so the
+  // monotone-decreasing state converges.
+  for (;;) {
+    let changed = false;
+    const drop = (u: FnUnit, name: string): void => {
+      if (seed.get(u)?.delete(name)) changed = true;
+    };
+
+    const names = new Map<FnUnit, Set<string>>();
+    for (const u of units) {
+      names.set(
+        u,
+        computeIntegerNames(flattenStmts(u.body), u.usize, seed.get(u)),
+      );
+    }
+
+    // Return integrality: every `return` value integer-valued (map callbacks feed
+    // the next stage's element; a reduce's fold keeps the accumulator integer).
+    for (const u of units) {
+      const rets = flattenStmts(u.body).filter(
+        (s): s is Extract<HirStmt, { kind: "return" }> =>
+          s.kind === "return" && s.value !== undefined,
+      );
+      const ri =
+        rets.length > 0 &&
+        rets.every((r) => isIntegerValued(r.value!, names.get(u)!, u.usize));
+      if (retInt.get(u) && !ri) {
+        retInt.set(u, false);
+        changed = true;
+      }
+    }
+
+    // Element integrality per body, and the callback-element demotion it drives.
+    const elemInt = (
+      e: HirExpr,
+      nm: Set<string>,
+      usize: Set<string>,
+      vec: Map<string, boolean>,
+    ): boolean => elemIntOf(e, nm, usize, vec, byCallKey, retInt, elemInt);
+
+    for (const cs of cbSites) {
+      // Recompute the source body's Vec element map, then the input element.
+      const owner = units.find((u) => u.body === cs.ownerBody)!;
+      const nm = names.get(owner)!;
+      const vec = computeVecElem(owner, nm, elemInt);
+      const inElem = elemInt(cs.source, nm, owner.usize, vec);
+      if (!inElem) for (const n of cs.elemNames) drop(cs.unit, n);
+      if (cs.accName) {
+        const accOk =
+          cs.init !== undefined &&
+          isIntegerValued(cs.init, nm, owner.usize) &&
+          retInt.get(cs.unit)!;
+        if (!accOk) drop(cs.unit, cs.accName);
+      }
+    }
+
+    // A free-fn param is integer only if integer at *every* call site.
+    for (const site of callSites) {
+      const owner = units.find((u) => u.body === site.ownerBody)!;
+      const nm = names.get(owner)!;
+      site.callee.params.forEach((p, i) => {
+        const arg = site.args[i];
+        if (arg && !isIntegerValued(arg, nm, owner.usize)) drop(site.callee, p.name);
+      });
+    }
+
+    if (!changed) break;
+  }
+
+  const result = new Map<HirStmt[], Set<string>>();
+  for (const u of units) {
+    const s = seed.get(u)!;
+    if (s.size > 0) result.set(u.body, s);
+  }
+  void mainUnit;
+  return result;
+}
+
+/** Element integrality of a Vec/iterator-valued expression (series 105). */
+function elemIntOf(
+  e: HirExpr,
+  nm: Set<string>,
+  usize: Set<string>,
+  vec: Map<string, boolean>,
+  byCallKey: Map<string, FnUnit>,
+  retInt: Map<FnUnit, boolean>,
+  recur: (
+    e: HirExpr,
+    nm: Set<string>,
+    usize: Set<string>,
+    vec: Map<string, boolean>,
+  ) => boolean,
+): boolean {
+  switch (e.kind) {
+    case "ident":
+      return vec.get(e.name) ?? false;
+    case "array":
+      return e.elements.every((el) => isIntegerValued(el, nm, usize));
+    case "iterMap": {
+      const cb = byCallKey.get(e.cbName);
+      // A `map` output element is integer iff its source element is *and* the
+      // callback returns an integer (its `retInt`, computed with the seed above).
+      return recur(e.receiver, nm, usize, vec) && !!cb && retInt.get(cb) === true;
+    }
+    case "arrayFromMap": {
+      const cb = byCallKey.get(e.cbName);
+      return recur(e.source, nm, usize, vec) && !!cb && retInt.get(cb) === true;
+    }
+    case "iterFilter":
+      // `filter` preserves its input element's integrality.
+      return recur(e.receiver, nm, usize, vec);
+    case "collectVec":
+      return recur(e.iter, nm, usize, vec);
+    default:
+      // flatMap/find/etc. are not element sources for a downstream modulo in v1.
+      return false;
+  }
+}
+
+/**
+ * Per-body element integrality of every `Vec` `let` binding (series 105): an
+ * array literal or an adapter chain types directly; an empty `vec![]` grown by
+ * `push` is integer iff every pushed value is. Statements are visited in order so a
+ * later stage's receiver (`doubled` in `doubled.filter(…)`) is already resolved.
+ */
+function computeVecElem(
+  unit: FnUnit,
+  nm: Set<string>,
+  elemInt: (
+    e: HirExpr,
+    nm: Set<string>,
+    usize: Set<string>,
+    vec: Map<string, boolean>,
+  ) => boolean,
+): Map<string, boolean> {
+  const vec = new Map<string, boolean>();
+  for (const stmt of flattenStmts(unit.body)) {
+    if (stmt.kind === "let" && isVecType(stmt.ty)) {
+      vec.set(stmt.name, elemInt(stmt.init, nm, unit.usize, vec));
+    }
+    // A `push` narrows its receiver's element (an empty `vec![]` starts vacuously
+    // integer and each push either keeps or breaks it).
+    if (stmt.kind === "expr" && stmt.expr.kind === "method" && stmt.expr.name === "push") {
+      const recv = stmt.expr.receiver;
+      const arg = stmt.expr.args[0];
+      if (recv.kind === "ident" && vec.has(recv.name) && arg) {
+        vec.set(
+          recv.name,
+          vec.get(recv.name)! && isIntegerValued(arg, nm, unit.usize),
+        );
+      }
+    }
+  }
+  return vec;
+}
+
+/** Is `t` a `Vec<…>` binding type (an element-bearing container)? */
+function isVecType(t: RustType | null | undefined): boolean {
+  return t?.kind === "vec";
+}
+
+/**
+ * The callback adapter site for `e` if it lifts one (series 105): the receiver/
+ * source whose element feeds the callback, and the element/acc param names.
+ */
+function adapterCbSite(
+  e: HirExpr,
+  byCallKey: Map<string, FnUnit>,
+  ownerBody: HirStmt[],
+): CbSite | null {
+  switch (e.kind) {
+    case "iterMap":
+    case "iterFilter":
+    case "iterFlatMap":
+    case "iterFind":
+    case "iterAny":
+    case "iterAll": {
+      const unit = byCallKey.get(e.cbName);
+      if (!unit) return null;
+      return { unit, source: e.receiver, ownerBody, elemNames: [e.elemParam] };
+    }
+    case "arrayFromMap": {
+      const unit = byCallKey.get(e.cbName);
+      if (!unit) return null;
+      return { unit, source: e.source, ownerBody, elemNames: [e.elemParam] };
+    }
+    case "iterReduce": {
+      const unit = byCallKey.get(e.cbName);
+      if (!unit) return null;
+      return {
+        unit,
+        source: e.receiver,
+        ownerBody,
+        elemNames: [e.elem],
+        accName: e.acc,
+        init: e.init,
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Visit every expression in a statement, descending into the receivers/init of the
+ * borrow-only iterator terminals (`reduce`/`find`/`some`/`every`) that `eachExpr`
+ * stops at, so a nested adapter chain (`xs.map(…).reduce(…)`) is fully reached
+ * (series 105). Each node is visited exactly once.
+ */
+function eachStmtExprDeep(stmt: HirStmt, fn: (e: HirExpr) => void): void {
+  for (const root of stmtRootExprs(stmt)) eachExprAll(root, fn);
+}
+
+/** Fully walk one expression tree, including the iter-terminal edges `eachExpr` skips. */
+function eachExprAll(e: HirExpr, fn: (e: HirExpr) => void): void {
+  eachExpr(e, (n) => {
+    fn(n);
+    if (n.kind === "iterReduce") {
+      eachExprAll(n.receiver, fn);
+      eachExprAll(n.init, fn);
+    } else if (n.kind === "iterFind" || n.kind === "iterAny" || n.kind === "iterAll") {
+      eachExprAll(n.receiver, fn);
+    } else if (n.kind === "arrayFromMap") {
+      eachExprAll(n.source, fn);
+    }
+  });
+}
+
+/** The root expression(s) a statement carries directly (mirrors `eachStmtExpr`). */
+function stmtRootExprs(stmt: HirStmt): HirExpr[] {
+  switch (stmt.kind) {
+    case "let":
+      return [stmt.init];
+    case "return":
+      return stmt.value ? [stmt.value] : [];
+    case "expr":
+      return [stmt.expr];
+    case "if":
+    case "while":
+      return [stmt.cond];
+    case "forIn":
+      return [stmt.iter];
+    case "forRange":
+      return [stmt.start, stmt.end];
+    case "match":
+      return [stmt.disc, ...stmt.arms.flatMap((a) => (a.guard ? [a.guard] : []))];
+    case "throw":
+    case "breakTry":
+    case "carrierErr":
+      return [stmt.value];
+    case "carrierBreak":
+      return stmt.value ? [stmt.value] : [];
+    default:
+      return [];
+  }
 }
