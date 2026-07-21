@@ -104,5 +104,19 @@ moves from the *loses* column to a **win in both dimensions**: **steady-state ~1
 Bun 58MB — byte-identical throughout. The lattice only specializes a value it *proves*
 integer; a fractional source, an upstream `/`, or a single fractional call site leaves the
 modulo `f64` (no truncation). The accepted `i64` divergence (past 2⁵³) is documented in
-`docs/dialect.md`. The one remaining loss, **`strbuild`** (`O(n²)` `format!` concat), stays
-tracked under perf epic **#86** (string lowering, **#88**).
+`docs/dialect.md`.
+
+**`strbuild`** — the one remaining loss — taught the *same lesson* a second time. Its build
+loop `s = s + "abc" + (i % 10)` lowered to `s = format!("{}{}{}", s, …)` — a fresh buffer +
+full copy of the accumulator each iteration, `O(n²)`. **Series 106 (in-place string append,
+#88 sub-task 2a)** fixed exactly that: the self-append rebind now emits
+`write!(s, "{}{}", "abc", …).unwrap()`, appending through the accumulator's
+`std::fmt::Write` impl (amortized-O(n), and it even composes with #90's integer-domain
+modulo). But — as with `arraypipe` — the headline cost was elsewhere: isolating the halves,
+the whole build loop is **~1ms of compute** (a build-only binary runs in 4.6ms e2e, barely
+over the 3.6ms startup floor), while the **300-round `s.split("5")` scan is ~99ms** — it
+materializes a `Vec<String>` of thousands of one-char heap `String`s every round. So 2a is a
+real O(n²)→O(n) win (strbuild e2e **~138ms → 103ms**, steady **~135ms → 99.4ms**) but does
+**not** flip the workload: `strbuild` stays a loss (steady 99.4ms vs Bun 20.2ms, 0.2×) until
+**2c (borrow-yielding `split`)** lands. Both stay tracked under perf epic **#86** / **#88**.
+**Lesson kept:** measure the halves before claiming a workload is fixed.
