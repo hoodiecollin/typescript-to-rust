@@ -122,3 +122,108 @@ by `tagIntegerModulo` (and, later, the i64 retypers) across all bodies including
 - Non-modulo integer ops in callbacks where a measurable win exists (e.g. integer
   division semantics — but `/` is `Real`-forcing by definition, so this is narrow).
 - Integrality through `Map`/`Set` element/value types.
+
+### v2 increment — split-don't-demote monomorphization (LOCKED, Collin 2026-07-21)
+
+Today (and in v1) the lattice is **all-or-nothing per param slot**: a shared free
+fn / method whose param is `Real` at *any* call site demotes the param to `f64`
+everywhere, so the provably-integer call sites eat the `frem` too (see spec **CI7**).
+
+v2 **supersedes that demotion with monomorphization**: emit two variants and route
+each call site to the one matching its proven integrality —
+
+```rust
+fn f_i64(n: i64) -> …   // integer call sites
+fn f_f64(n: f64) -> …   // fractional / unproven call sites
+```
+
+This is the *static* dual of a runtime numeric tower: whole-module visibility lets us
+resolve "dispatch on numeric kind" at **compile time**, with zero runtime tag. It is
+soundness-clean (standard monomorphization) subject to:
+
+- **The integer-division trap (soundness-critical).** Inside `f_i64`, `n` enters as
+  `i64` but `n / 2` in i64 domain **truncates** (`5/2 = 2`, not `2.5`) — a *silent
+  wrong answer*, not the sanctioned past-2⁵³ divergence, because JS division is always
+  float. The i64 variant is therefore **not** "n is i64 everywhere"; it is "n enters
+  i64 and is cast back to `f64` at every `Real`-forcing use (`/`, fractional literal,
+  `Math.sqrt`, …)." The lattice already marks `/` `Real`-forcing, so the machinery
+  exists — but a variant that naively keeps the param i64 through a `/` is unsound.
+- **Recursion crosses variants.** A recursive `f` whose self-call passes a `Real`
+  argument (`n/2`) must route `f_i64` → `f_f64`; routing is **per-call-site**, not
+  per-fn, so the call graph may span both variants. Sound as long as each call site
+  routes to the variant matching its proven integrality.
+- **Variant bound.** k independently-int-or-real numeric params ⇒ up to 2^k variants;
+  bound the explosion (scope, not soundness) — cap arity and fall back to the demoted
+  single `f64` fn above the cap.
+
+**Moot for v1.** The measured arraypipe win is a lifted `__cb_filter_2` with exactly
+one call site (the adapter); callbacks are single-use by construction, so there is
+nothing to split. Monomorphization only pays off for **shared** free fns / methods in
+mixed contexts (CI7). Hence v1 = callback/element modulo tag; v2 = split-don't-demote
+for shared numeric fns.
+
+## Rejected alternative — pervasive runtime `Numeric { F64(f64), I64(i64) }` enum
+
+Considered (Collin, 2026-07-21) and **rejected as a pervasive number representation**.
+It is *soundable* — every JS numeric op can be defined on the enum to match `f64`
+semantics — and that is precisely the problem: the sound form reintroduces the runtime
+numeric-tower cost that AOT static specialization exists to erase.
+
+1. **The tag check defeats the win.** #90's point is to prove integrality *statically*
+   so the hot loop emits a bare `i64 %` with **zero branching**. A runtime enum makes
+   every arithmetic op a `match` on both operands' tags → dispatch → maybe-widen, plus
+   a layout tax (16 bytes: tag + payload, vs 8 for bare `f64`) on *every* numeric op.
+   That is V8's SMI/heap-number tower — which a JIT pays because it *cannot* prove types
+   ahead of time; we can, so paying it voluntarily is moving backward. The static
+   lattice gets the same speed with **no runtime tag**.
+2. **Overflow lane is lose-lose against the accepted-i64 ruling.** To match JS exactly,
+   `I64(a)+I64(b)` needs a `checked_add` + widen-to-`f64` branch per op. But series 103
+   already ruled accepted-i64 divergence past 2⁵³. So the enum must pick a lane:
+   (a) match JS exactly → *more* branching, and now the dialect is inconsistent (enum
+   values more correct past 2⁵³ than statically-specialized ones); or (b) keep
+   accepted-i64 → **zero** soundness gain over static i64, only cost. Dominated either
+   way.
+3. **`===` / Map-key unification is a latent soundness bug.** JS: `1 === 1.0`, and `1`
+   and `1.0` are the *same* Map key (also `-0 === 0`, `NaN !== NaN`). Two constructors
+   make `I64(1)` and `F64(1.0)` structurally distinct, so `PartialEq`/`Hash` must be
+   hand-written to unify them — and any leaked derive silently makes `1` and `1.0`
+   different keys, an invisible divergence. The static approach never has this: a value
+   has exactly one type, so `f64`/`ordered-float` keying stays uniform.
+4. **It rips through the whole `f64`-typed runtime.** `Vec<f64>`, tslib signatures,
+   `ordered-float` total-order for sort/keys — all become `Numeric`, each needing a
+   hand-written JS-faithful `Ord`/`Hash`/`Display`. Every one is a new correctness
+   surface where there is none today.
+
+## Sanctioned hybrid — boundary-boxed `Numeric`, monomorphic inside (dynamic residual ONLY)
+
+The one place a numeric tag *is* the right tool is a value whose kind is **genuinely
+dynamic and statically unprovable** — `JSON.parse` output, a `number` off polymorphic
+external data, a real union-typed number. There, the sound shape is **"box at the
+boundary, unbox once, run monomorphic inside"**, leaning entirely on idea 1's variants:
+
+```rust
+fn f(x: Numeric) -> Numeric {
+    match x {
+        Numeric::I64(n) => Numeric::I64(f_i64(n)),   // arm result kind is STATIC
+        Numeric::F64(n) => Numeric::F64(f_f64(n)),
+    }
+}
+```
+
+This is **not a new mechanism** — `f_i64`/`f_f64` are the same variants idea 1 already
+produces; the enum only *selects* one. It differs from the rejected pervasive enum in
+that the tag is checked **once** at the boundary, then the arm runs straight-line
+i64/f64 with **no per-op tagging**, and the *return* constructor is statically known
+per arm (an `I64` arm may legitimately return `F64` if its body hit a `/`) — so no
+runtime kind-detection on the result, and accepted-i64 is inherited with no per-op
+overflow branch.
+
+**Out of #90 scope.** #90's targets (loopsum, arraypipe) are *all* statically
+provable, so no `Numeric` tag is ever introduced on any targeted path — the hybrid
+buys nothing here. It is a **dynamic-number-typing feature**, broad-scoped (impact
+across the entire generation surface — every container, tslib signature, and numeric
+op that could carry a dynamic value), and is tracked as its **own future issue**
+(**#91**, under perf epic #86 — see it for the tag-introduction / **tag-death**
+discipline the "infectious tag" coloring problem requires). Recorded here so that when
+that feature is built, the sound shape is already decided and pervasive per-op
+`Numeric` is not re-litigated.
