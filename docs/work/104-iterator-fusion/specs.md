@@ -5,8 +5,12 @@ Drives the public `emit(...)` / `compile(...)` entry via the differential harnes
 every shape assertion is also a COMPILES/BEHAVES proof. Spec file:
 `packages/compiler/tests/iter-fusion.test.ts`.
 
-Per the corpus-coverage rule, every decided behavior below gets a fixture — the three
-guards (G1/G2/G3) each get an explicit **negative** scenario, not just the happy path.
+Per the corpus-coverage rule, every decided behavior below gets a fixture — the real
+guards (G1, and G3's two mutation sub-cases) each get an explicit **negative** scenario,
+not just the happy path. G2 (callback purity) is *free by construction* — the series-048
+lift surface accepts only a bounded numeric expression, so a liftable-but-impure callback
+isn't constructible; IF-G2 below asserts that property (a non-numeric callback is
+fail-loud *before* fusion), it isn't a fusion decision.
 
 ## Positive — fuses (RED until `refineIterFusion` lands)
 
@@ -25,16 +29,18 @@ guards (G1/G2/G3) each get an explicit **negative** scenario, not just the happy
 ## Negative — left eager (each isolates one guard)
 
 - **IF4** (G1 — intermediate observed later) — `const doubled = xs.map(f); …;
-  console.log(doubled.length); const total = doubled.filter(g).reduce(h,0)` → `doubled`
+  console.log(doubled.length); const total = doubled.reduce(h,0)` → `doubled`
   is live-out, so it is **not** fused: its `.collect::<Vec<_>>()` remains. Value identical.
-- **IF5** (G2 — impure callback) — a `map` callback that mutates a captured counter (or
-  performs I/O) → the chain is **not** fused (both stages keep `.collect()`), preserving
-  JS's run-all-maps-then-all-filters ordering. Stdout identical to node/bun (the point of
-  the guard: eager output must match, and fused output would have reordered it).
-- **IF6** (G3 — source mutated in the gap) — `const doubled = xs.map(f);
-  xs.push(999); const total = doubled.filter(g).reduce(h,0)` → the intervening
-  `xs.push` forbids fusion; `doubled` keeps `.collect()` (materialized before the push).
-  Value identical to node/bun.
+- **IF6a** (G3 — source mutated in the gap) — `const doubled = xs.map(f);
+  xs.push(999); const total = doubled.reduce(h,0)` → the intervening `xs.push` forbids
+  fusion; `doubled` keeps `.collect()` (materialized before the push). Value identical.
+- **IF6b** (G3 — forwarded free var reassigned in the gap) — `let k = 2; const doubled =
+  xs.map(v => v + k); k = 5; const total = doubled.reduce(h,0)` → `k` is captured by the
+  map callback and reassigned before the consumer; eager captures `k=2`, lazy would
+  capture `k=5`, so fusion is forbidden. `doubled` keeps `.collect()`. Value identical.
+- **IF-G2** (purity by construction) — a callback outside the numeric surface (e.g. one
+  that calls a helper) is **fail-loud at lift time** (`too complex to lift`), never
+  reaching fusion. Asserts the property that makes G2 free; not a fusion path.
 
 ## Edge
 
@@ -57,7 +63,8 @@ guards (G1/G2/G3) each get an explicit **negative** scenario, not just the happy
 ## Differential (cargo-backed)
 
 - arraypipe prints its checksum identically under node/bun/ttr before and after fusion.
-- The IF5 impure-callback program prints the identical value eager (fusion would have
-  changed the interleaving — this proves the guard is load-bearing, not cosmetic).
+- The IF6a/IF6b gap-mutation programs print the identical value in their eager form
+  (fusion would read the mutated source/capture — this proves the G3 guard is
+  load-bearing, not cosmetic).
 - Every fixture compiles under cargo (the fused element-shim threading is validated by
   the oracle, not by shape-matching alone).

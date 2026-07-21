@@ -42,8 +42,8 @@ fall-back.
 
 Fusion is a **reordering-of-side-effects** transform. Eager form runs each stage to
 completion (all maps, then all filters, then the fold); the lazy fused form interleaves
-them per element (map x₀, filter x₀, fold; map x₁, …). Three independent conditions
-must all hold, or the chain is left eager:
+them per element (map x₀, filter x₀, fold; map x₁, …). Two conditions must hold, or the
+chain is left eager — a third (callback purity) is **free by construction**:
 
 - **G1 — intermediate not observed later.** Each fused intermediate binding
   (`doubled`, `kept`) must be **dead-out** after its consumer statement, per
@@ -52,20 +52,26 @@ must all hold, or the chain is left eager:
   the #89↔#88 "shared escape check" — it already exists and is already reused by the 068
   consuming-edge in `alias-escape.ts` and by the for-of ownership-mode pass. #89 reuses
   it; it does not build a new analysis.)*
-- **G2 — callbacks are pure.** Because fusion reorders when each stage's callback runs
-  relative to the others, the lifted `__cb_*` callbacks must be side-effect-free (no
-  writes to captured/free bindings, no I/O, no calls to non-pure functions). Pure
-  callbacks yield identical results under any interleaving, so fusion is observationally
-  identical. Conservative: unknown ⇒ impure ⇒ don't fuse. arraypipe's callbacks
-  (`v*2+1`, `v%5!==0`, `a+b`) are pure.
 - **G3 — no source/capture mutation in the gap.** For a non-adjacent consumer, no
   statement between producer and consumer may write to the chain **source** or to any
-  **free variable** the callbacks capture (lazy reads them at fold time, not at producer
-  time). Scan the intervening statements for such writes; any ⇒ don't fuse. (Adjacent
-  consumers trivially satisfy G3.)
+  **forwarded free variable** the callbacks capture — lazy reads them at fold time, not
+  at producer time, so a mutation in the gap would change the result (e.g. `const d =
+  xs.map(f); xs.push(9); … d.reduce(…)`, or a captured `let k` reassigned in the gap).
+  Scan the intervening statements for writes to {source root} ∪ {forwarded names}; any ⇒
+  don't fuse. (Adjacent consumers trivially satisfy G3.)
+
+- **G2 — callback purity — holds by construction (no code needed).** Fusion reorders
+  *when* each stage's callback runs, so it is only sound if the callbacks are
+  side-effect-free. They always are: the series-048 callback-lift surface (`typeCbBody`
+  in `lower.ts`) accepts **only a bounded numeric expression** — literals, param/free-var
+  idents, arithmetic/comparison/logical binary ops, unary `!`/`-`, and (flatMap) an
+  array-literal of those. Any call, method, assignment, statement, or I/O is *already*
+  fail-loud at lift time, and forwarded free vars are read-only Copy. So every liftable
+  `__cb_*` is pure — a liftable-but-impure callback is not constructible, and fusion
+  never needs to check. (The numeric-surface restriction **is** the purity guarantee.)
 
 `computeLiveOut` handles loops/branches/nested blocks, so G1 is sound inside control
-flow. G2/G3 are conservative local scans that fall back to eager on any doubt.
+flow. G3 is a conservative local scan that falls back to eager on any doubt.
 
 ## The fusion pass — `refineIterFusion`
 
@@ -78,8 +84,9 @@ Runs per function/method/main body, recursing into nested bodies. Per body:
    `Vec`-collecting adapters — the *intermediate* shapes).
 3. Find its **consumer**: the unique later use of `NAME` as the `receiver` of another
    iter-adapter (`iterMap`/`iterFilter`/`iterFlatMap`/`iterReduce`/`iterFind`/`iterAny`/
-   `iterAll`). Require G1 (dead-out after consumer), G2 (both callbacks pure), G3 (no
-   interfering write in the gap).
+   `iterAll`). Require G1 (dead-out after consumer) and G3 (no interfering write in the
+   gap). Also bail if any fused stage carries an `indexParam` — its index would be
+   miscounted once the chain is a single lazy pass (a conservative correctness guard).
 4. Rewrite: mark the producer node `lazy` (drop terminal `.collect()`) and `sourceIter`
    on the consumer where its receiver is now an iterator (drop `.iter()`, switch the
    element shim to by-value, drop `.copied()`); splice the producer node in as the
@@ -121,8 +128,8 @@ has settled the element modes it reads.
 
 1. **Mock + RED specs** — `packages/compiler/tests/iter-fusion.test.ts`, differential
    (`tests/_support/differential`), one scenario per `specs.md` row.
-2. **G1/G2/G3 analysis** — `iter-fusion.ts`: reuse `computeLiveOut`; add a conservative
-   `isPureCallback` (over the lifted `__cb_*` bodies) and a gap-mutation scan.
+2. **G1/G3 analysis** — `iter-fusion.ts`: reuse `computeLiveOut` for dead-out; add the
+   gap-mutation scan over {source root} ∪ {forwarded names}. (G2 is free — see above.)
 3. **Rewrite + delete** — splice producer into consumer, set `lazy`/`sourceIter`, drop
    the dead statement; fixpoint loop.
 4. **Emit** — `lazy`/`sourceIter` branches on the adapter nodes (mirror `fromIterator`).
