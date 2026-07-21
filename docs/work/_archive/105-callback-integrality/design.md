@@ -99,6 +99,26 @@ Extends `refineNumerics` (`numeric.ts`) — the lattice replaces the current
 per-body `computeIntegerNames` seed with a module-level fixpoint computed once, consulted
 by `tagIntegerModulo` (and, later, the i64 retypers) across all bodies including `__cb_*`.
 
+## Results (measured 2026-07-21)
+
+**Shipped** (v1 — modulo tag only). `computeIntegralitySeeds` in `numeric.ts`: a
+module-wide greatest-fixpoint over param / return / Vec-element / callback-element
+slots, threaded into `tagIntegerModulo` via `refineBody`. No i64 retyping (deferred).
+
+- **arraypipe moved from a loss to a win in both dimensions.** Steady-state **~1.4ms
+  (2.9× Bun, 5.7× Node)** — the design target — up from 0.4× Bun; end-to-end **5.5ms
+  (4.4× Bun, 23.4× Node)**, RSS 7.4MB. The filter predicate now emits
+  `((v as i64) % 5) as f64`.
+- **Soundness holds on every reject.** CI5 (fractional source), CI6 (upstream `/`),
+  CI7 (one fractional call site), CI8 (fractional *divisor*) each keep the modulo
+  `f64` — byte-identical to node/bun. CI8 was revised from the design's original
+  `v % 5 + 0.5` (not a valid reject — a proven-integer `v` makes `(v as i64) % 5`
+  identical to `v % 5.0`) to a fractional **divisor**, the genuine guard.
+- Full compiler suite **1347/0** (isolated); the 9 `callback-integrality` differential
+  specs are cargo-backed. `bench` correctness gate byte-identical.
+- v1 seeds only element/acc params; a callback's **forwarded free-var and index**
+  params stay `f64` (safe default) — a follow-up increment if a profile shows a win.
+
 ## Impl plan (spec-first BDD slices)
 
 1. **Mock + RED specs** — `packages/compiler/tests/callback-integrality.test.ts`,

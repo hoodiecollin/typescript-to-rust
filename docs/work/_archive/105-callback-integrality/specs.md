@@ -32,8 +32,13 @@ every decided behavior gets a fixture — including the negative (`Real`) reject
 - **CI7** (param Real at one call site) — a free function called with an integer arg at
   one site and a fractional arg (`3.5`) at another keeps its param `f64`; its `%` is not
   specialized. Value identical.
-- **CI8** (mixed callback body) — a callback `v % 5 + 0.5` mixes a fractional literal;
-  the value is `Real`, modulo stays `f64`. Value identical.
+- **CI8** (fractional divisor) — a callback `v % 2.5` over a *proven-integer* element:
+  the **right** operand is fractional, so the modulo stays `v % 2.5` (`f64`).
+  (Revised during impl: the original `v % 5 + 0.5` was not a valid reject — a
+  proven-integer `v` makes `(v as i64) % 5` *identical* to `v % 5.0`, so tagging it is
+  sound even when the surrounding expression is `Real`. The genuine guard is a
+  fractional **divisor**, where `(v as i64) % (2.5 as i64)` would truncate the divisor
+  and diverge.) Value identical to node/bun.
 
 ## Cross-spec updates (live files the impl must touch)
 
