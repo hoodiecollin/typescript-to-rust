@@ -149,6 +149,26 @@ has settled the element modes it reads.
    win/parity) and record the fused-shape note; corpus coverage per the fixtures rule.
 7. **Archive** to `docs/work/_archive/`.
 
+## Results (measured 2026-07-21)
+
+Fusion landed and is correct: the `arraypipe` chain lowers to a single
+`xs.into_iter().map(|v| __cb_map_1(v)).filter(|v| __cb_filter_2(*v)).fold(0.0, |a, b|
+__cb_reduce_3(a, b))` — both intermediate `Vec`s gone. Full compiler suite green
+(1338/0), `bench:verify` byte-identical, e2e **13.4ms (1.7× Bun / 9.2× Node)**, RSS
+**7.4MB** (Bun 58MB).
+
+**But the steady-state loss did not flip** (9.7 → 9.3ms, still 0.4× Bun) — and the
+measurement explains why: allocation was never the cost. `build + fold` alone is
+**0.86ms**; isolating the predicate, **f64 `%` is 9.6ms vs i64 `%` 1.4ms** (7×). The
+entire loss is the libm `frem` from the `f64` modulo `v % 5` in the filter callback —
+the *same* root cause as `loopsum` (#87), except the modulo sits inside a lifted
+`__cb_*` body that series-103 numeric specialization does not reach. `#[inline]` on the
+callbacks buys only ~10% (10.1 → 9.1ms). So `arraypipe`'s steady-state win depends on a
+**#87 graduation — integer-domain modulo inside callback bodies**, not on fusion. #89's
+own tasks (3a fuse, 3c into_iter) are complete; the arraypipe steady-state loss is
+re-attributed to #87. Lesson: measure the bottleneck before picking the fix — the epic's
+"three materialized Vecs" diagnosis was wrong.
+
 ## Deferred (future series)
 
 - Fusing chains that cross a `sort` (would need a materialize-at-sort boundary).

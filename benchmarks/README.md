@@ -83,5 +83,19 @@ inference pass now proves the counter/accumulator integer-valued and retypes the
 `f64` → `i64`, emitting a native `for i in 0i64..N` range with hardware integer
 arithmetic — so `loopsum` moves from the *loses* column to a **win** (~95ms → ~7ms
 steady-state), with byte-identical output. The accepted `i64` divergence (past 2⁵³)
-is documented in `docs/dialect.md`. Remaining losses (`strbuild`, `arraypipe`) are
-tracked under perf epic **#86** (string lowering **#88**, iterator fusion **#89**).
+is documented in `docs/dialect.md`.
+
+**`arraypipe`** taught a lesson about *measuring* before optimizing. It looked like an
+allocation problem — `map`/`filter`/`reduce` materialized two throwaway `Vec`s — so
+**series 104 (iterator fusion, #89)** fused the chain into one lazy
+`xs.into_iter().map(…).filter(…).fold(…)` pass with no intermediates. That shipped and
+is correct (byte-identical, lower RSS at **7.4MB** vs Bun 58MB, and an **end-to-end win**
+at 13.4ms, 1.7× Bun / 9.2× Node). But the *steady-state* barely moved (9.7 → 9.3ms,
+still 0.4× Bun) — because allocation was never the cost. Isolating it: `build + fold`
+alone is **0.86ms**; the whole loss is the predicate's `f64` modulo (`v % 5`), a libm
+`frem` per element — **f64 `%` 9.6ms vs i64 `%` 1.4ms** (7×). That is the same root cause
+as `loopsum`, except the modulo lives inside a lifted `__cb_*` callback the numeric pass
+doesn't yet reach. So `arraypipe`'s steady-state loss re-homes under **#87**
+(numeric-specialization *into callback bodies*), not fusion; integer-specializing that
+modulo would take it to ~1.4ms — a win. Remaining losses (`strbuild`, `arraypipe`) stay
+tracked under perf epic **#86** (string lowering **#88**; the arraypipe modulo, **#87**).

@@ -52,13 +52,15 @@ fail-loud *before* fusion), it isn't a fusion decision.
 
 ## Cross-spec updates (live files the impl must touch)
 
-- **`benchmarks/README.md`** — after 104 re-measures, move `arraypipe` out of the
-  "loses" discussion in *Reading the numbers* (to a win/parity note) and record the
-  fused single-pass shape.
+- **`benchmarks/README.md`** — *(done)* record the fused single-pass shape and the
+  **measured** outcome: fusion is an e2e/RSS win but the steady-state loss persists,
+  because the real cost is the predicate's `f64` modulo (`frem`), not allocation
+  (`build + fold` alone is 0.86ms; f64 `%` 9.6ms vs i64 `%` 1.4ms). arraypipe's
+  steady-state loss re-homes under **#87**, not #89.
 - **`benchmarks/corpus/arraypipe.ts`** — already exercises the positive fusion path as a
   perf workload; no new corpus workload needed for the happy path. (The G1/G2/G3
   negatives are correctness fixtures, not perf workloads — they live in the spec file.)
-- **`docs/plan.md`** — note the new `refineIterFusion` step in the refine-chain summary.
+- **`docs/plan.md`** — no refine-chain enumeration exists there today; nothing to add.
 
 ## Differential (cargo-backed)
 
