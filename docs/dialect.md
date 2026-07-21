@@ -172,6 +172,17 @@ flip it.
   arithmetic here. Pinned by `packages/compiler/tests/numeric-int-modulo.test.ts`
   and `numeric-int-range.test.ts`; see `docs/work/103-numeric-specialization/`.
 
+  **The same posture reaches across procedures (series 105, #90).** A module-wide
+  integrality lattice proves the property *inter-procedurally* — a lifted callback's
+  element/accumulator param, a free-function param integer at **every** call site,
+  and an iterator/`Vec` **element** threaded through `push`/`map`/`filter` — so an
+  integer-domain modulo lowers to `(v as i64) % k` *inside* a callback body too, not
+  only for intra-body counters. No new dialect posture: the accepted-`i64` table
+  above governs it unchanged, and the same proof discipline applies — a fractional
+  source element, an upstream `/`, or a single fractional call site keeps the value
+  `f64` (the `as i64` cast never truncates real data). Pinned by
+  `callback-integrality.test.ts`; see `docs/work/105-callback-integrality/`.
+
 ---
 
 ## Types & the accepted type surface
