@@ -80,41 +80,38 @@ function iterOverSplit(iter: HirExpr): Split | null {
 }
 
 function rewriteList(list: HirStmt[], root: HirStmt[]): void {
-  // Temp-binding form: `let parts = split(...)` consumed by a later `for…of parts`.
+  // Temp-binding form: `let parts = split(...)` with a single non-retaining consumer
+  // later in the SAME list — a `for…of parts` (stream), `parts.length` (count), or a
+  // single `parts[i]` (nth). Consuming in this list means the gap-mutation scan covers
+  // everything between producer and consumer.
   for (let i = 0; i < list.length; i++) {
     const prod = list[i];
     if (!prod || prod.kind !== "let") continue;
     const split = asSplit(prod.init);
     if (!split) continue;
     const name = prod.name;
-    // G1: referenced exactly once across the whole body (the loop's iterable).
+    // G1: referenced exactly once across the whole body.
     if (refCount(root, name) !== 1) continue;
 
-    // The consumer must be a `for p in parts.iter()` later in the SAME list, so the
-    // gap-mutation scan below covers everything between producer and consumer.
+    // The consumer is the single statement in this list that references `name`.
     let consumerIdx = -1;
     for (let j = i + 1; j < list.length; j++) {
-      const s = list[j];
-      if (s && s.kind === "forIn" && isIterOverIdent(s.iter, name)) {
+      if (list[j] && refCount(list[j], name) === 1) {
         consumerIdx = j;
         break;
       }
     }
     if (consumerIdx < 0) continue;
-    const forIn = list[consumerIdx] as Extract<HirStmt, { kind: "forIn" }>;
+    const consumer = list[consumerIdx]!;
 
     const srcRoot = rootName(split.recv);
     // G3a: no write to the source between producer and consumer.
     if (srcRoot && gapMutates(list, i + 1, consumerIdx, srcRoot)) continue;
-    // G3b: the loop body must not mutate the borrowed source.
-    if (srcRoot && mutatesRoot(forIn.body, srcRoot)) continue;
-    // G-elem: the element must not escape as an owned `String`.
-    const binder = binderName(forIn.pat);
-    if (binder === null || bindersEscape(forIn.body, binder)) continue;
 
-    forIn.iter = { kind: "strSplitIter", recv: split.recv, sep: split.sep };
-    list.splice(i, 1);
-    i--; // the list shrank; re-examine this index
+    if (rewriteTempConsumer(consumer, name, split, srcRoot)) {
+      list.splice(i, 1);
+      i--; // the list shrank; re-examine this index
+    }
   }
 
   // Inline form + recurse into nested lists.
@@ -134,8 +131,130 @@ function rewriteList(list: HirStmt[], root: HirStmt[]): void {
         }
       }
     }
+    // Inline count/index over a split call directly: `s.split(sep).length` /
+    // `s.split(sep)[i]` (no temp binding). Count is always sound; index only in a
+    // read-only slot. The stream borrows the source for the enclosing expression, so
+    // a statement that also writes the source is left materialized.
+    rewriteUse(s, (parent, key, inArray, e) => {
+      const objSplit =
+        e.kind === "len" || e.kind === "index" ? asSplit(e.object) : null;
+      if (!objSplit) return null;
+      const srcRoot = rootName(objSplit.recv);
+      if (srcRoot && mutatesRoot(s, srcRoot)) return null;
+      if (e.kind === "len") {
+        return { kind: "strSplitCount", recv: objSplit.recv, sep: objSplit.sep };
+      }
+      if (e.kind === "index" && indexSlotSafe(parent, key, inArray)) {
+        return {
+          kind: "strSplitNth",
+          recv: objSplit.recv,
+          sep: objSplit.sep,
+          index: e.index,
+        };
+      }
+      return null;
+    });
     for (const child of childLists(s)) rewriteList(child, root);
   }
+}
+
+/**
+ * Rewrite the single consumer of a split temp to a lazy node, or return false to leave
+ * it materialized. `srcRoot` is the split source's root (for the borrow guards).
+ */
+function rewriteTempConsumer(
+  consumer: HirStmt,
+  name: string,
+  split: Split,
+  srcRoot: string | null,
+): boolean {
+  // (i) `for…of parts` — stream the elements.
+  if (consumer.kind === "forIn" && isIterOverIdent(consumer.iter, name)) {
+    if (srcRoot && mutatesRoot(consumer.body, srcRoot)) return false; // G3b
+    const binder = binderName(consumer.pat);
+    if (binder === null || bindersEscape(consumer.body, binder)) return false; // G-elem
+    consumer.iter = { kind: "strSplitIter", recv: split.recv, sep: split.sep };
+    return true;
+  }
+  // The stream borrows the source across the consumer expression; a consumer that also
+  // writes the source would be a live-borrow conflict, so leave it materialized.
+  if (srcRoot && mutatesRoot(consumer, srcRoot)) return false;
+  // (ii) `parts.length` — count (f64, no borrow held past, no escape) — any slot.
+  // (iii) `parts[i]` — the i-th piece, only where the `&str` result is read-only.
+  return rewriteUse(consumer, (parent, key, inArray, e) => {
+    if (e.kind === "len" && isIdent(e.object, name)) {
+      return { kind: "strSplitCount", recv: split.recv, sep: split.sep };
+    }
+    if (
+      e.kind === "index" &&
+      isIdent(e.object, name) &&
+      indexSlotSafe(parent, key, inArray)
+    ) {
+      return { kind: "strSplitNth", recv: split.recv, sep: split.sep, index: e.index };
+    }
+    return null;
+  });
+}
+
+/** Is the slot holding a `parts[i]` expression a read-only `&str`-safe position? */
+function indexSlotSafe(
+  parent: Record<string, unknown>,
+  key: string,
+  inArray: boolean,
+): boolean {
+  const kind = typeof parent.kind === "string" ? parent.kind : undefined;
+  return inArray ? safeArraySlot(kind, key) : safeScalarSlot(parent, kind, key);
+}
+
+function isIdent(e: HirExpr | undefined, name: string): boolean {
+  return !!e && e.kind === "ident" && e.name === name;
+}
+
+/**
+ * Walk `node`'s expression slots and replace the first for which `make` returns a
+ * replacement. `make` receives the immediate parent object, the slot key, whether the
+ * slot is an array element (for scalar-vs-array read-only classification), and the
+ * candidate expression. Returns whether a replacement was made.
+ */
+function rewriteUse(
+  node: unknown,
+  make: (
+    parent: Record<string, unknown>,
+    key: string,
+    inArray: boolean,
+    e: HirExpr,
+  ) => HirExpr | null,
+): boolean {
+  if (node === null || typeof node !== "object") return false;
+  if (Array.isArray(node)) {
+    for (const el of node) if (rewriteUse(el, make)) return true;
+    return false;
+  }
+  const o = node as Record<string, unknown>;
+  for (const key in o) {
+    const v = o[key];
+    if (Array.isArray(v)) {
+      for (let idx = 0; idx < v.length; idx++) {
+        const el = v[idx];
+        if (el && typeof el === "object" && !Array.isArray(el)) {
+          const r = make(o, key, true, el as HirExpr);
+          if (r) {
+            v[idx] = r;
+            return true;
+          }
+        }
+        if (rewriteUse(el, make)) return true;
+      }
+    } else if (v && typeof v === "object") {
+      const r = make(o, key, false, v as HirExpr);
+      if (r) {
+        o[key] = r;
+        return true;
+      }
+      if (rewriteUse(v, make)) return true;
+    }
+  }
+  return false;
 }
 
 /** Is `iter` an `ident(name).iter()` method call? */
@@ -149,11 +268,11 @@ function isIterOverIdent(iter: HirExpr, name: string): boolean {
 }
 
 /** The bound element name of a for-of pattern, or `null` when it is not a plain
- * identifier (a `&x` ref pattern is unwrapped; a newtype `Foo(x)`/tuple pattern is
- * treated as unknown → `null` → caller materializes). */
+ * identifier — a `&x` ref pattern (as `.forEach` lowers under its Copy-element
+ * assumption) can't bind an unsized `str` off a `&str` stream, and a newtype
+ * `Foo(x)`/tuple pattern is unknown; both → `null` → the caller materializes. */
 function binderName(pat: string): string | null {
-  const p = pat.startsWith("&") ? pat.slice(1) : pat;
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(p) ? p : null;
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(pat) ? pat : null;
 }
 
 // ── Escape analysis (default-deny) ───────────────────────────────────────────
@@ -193,6 +312,11 @@ function isBinderIdent(v: unknown, binder: string): boolean {
   );
 }
 
+/** Methods that turn a borrow into an **owned** `String` — the value escapes, so a
+ * borrowed `&str` receiver is unsound (`(&str).clone()` is a `&str`, not a `String`;
+ * `.to_string()`/`.to_owned()` on a `&str` allocate the owned copy the context needs). */
+const OWNED_PRODUCING = new Set(["clone", "to_string", "to_owned", "toString"]);
+
 /** Scalar (non-array) child slots where a borrowed `&str` element is safe. */
 function safeScalarSlot(
   o: Record<string, unknown>,
@@ -200,7 +324,12 @@ function safeScalarSlot(
   key: string,
 ): boolean {
   // Read-only projections and comparisons.
-  if (kind === "method" && key === "receiver") return true; // p.len(), p.contains(…)
+  if (kind === "method" && key === "receiver") {
+    // …except an owned-producing method (`.clone()`/`.to_string()`), which signals the
+    // value is wanted owned — an escape a borrowed `&str` can't satisfy.
+    return !OWNED_PRODUCING.has(typeof o.name === "string" ? o.name : "");
+  }
+  if (kind === "field" && key === "object") return true; // p.foo
   if (kind === "field" && key === "object") return true; // p.foo
   if (kind === "len" && key === "object") return true; // p.length → p.chars().count()
   if (kind === "index" && (key === "object" || key === "index")) return true;
