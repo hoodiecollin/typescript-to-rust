@@ -61,6 +61,12 @@ import type {
   WhileStatement,
 } from "../ast";
 import { DialectError, UnsupportedError } from "../errors";
+import {
+  DEFAULT_EXPORT_SYM,
+  EMPTY_TYPE_PARAMS,
+  ERR_STRING,
+  UNIT,
+} from "./constants";
 import { translateRegex, translateReplacement } from "../regex-translate";
 import type {
   Borrow,
@@ -138,10 +144,6 @@ import {
 // no longer a cycle — just a convenience surface. Migrating the remaining
 // importers to ./errors and dropping this is a Phase-2 cleanup candidate.
 export { DialectError, UnsupportedError };
-
-const UNIT: RustType = { kind: "unit" };
-/** The default fallible error type: the `Error` message as a `String`. */
-const ERR_STRING: RustType = { kind: "String" };
 
 /**
  * A `<T, U extends I>` type-parameter declaration on a class/method/fn (series
@@ -708,8 +710,6 @@ export function lower(
  * a `pub(crate) use self::<name> as __default_export;` alias (named fn/class), and
  * a default import binds it via `use crate::<mod>::__default_export as <local>;`.
  */
-const DEFAULT_EXPORT_SYM = "__default_export";
-
 /** A short deterministic FNV-1a hash (base-36) — used to give each module's value
  *  default a unique item name (#70), aliased back to `__default_export`. */
 function shortHash(s: string): string {
@@ -16460,6 +16460,3 @@ function lowerType(
   }
 }
 
-/** A shared frozen empty set — the default `typeParams` of a non-generic `lowerType`
- * call (series 081), so no allocation per call and no accidental mutation. */
-const EMPTY_TYPE_PARAMS: Set<string> = new Set();
