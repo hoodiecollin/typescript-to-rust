@@ -139,8 +139,36 @@ oracle, and any intentional byte drift must be reviewed as such.
   them first means dragging half the file along or leaving dangling imports. Leaves-first
   keeps every intermediate commit self-consistent and byte-clean.
 
+## Progress (Phase 1, as of 2026-07-23)
+
+`lower.ts` (16,465) → `lower/index.ts`, now **13,352 LOC**; **~3,100 lines / 19%
+extracted** across 8 sibling modules, every commit byte-identical + typecheck-clean:
+
+- **Infra:** `bun run lower:snapshot` / `lower:verify` (62-entry corpus, 1,324 lines
+  of emitted Rust pinned); error-import cycles broken (`numeric`/`bitwise`/`emitter`
+  → `./errors`); `lower/` folder-module scaffolded.
+- **Modules shipped:** `constants.ts`, `utils.ts` (15 leaf helpers), `regex.ts`,
+  `unions.ts` (registration/coercion), `async.ts` (await/combinator/spawn),
+  `method-routing.ts` (primitive method dispatch + string/number catalog — future
+  plugin-hook home), `io-shim.ts` (std-I/O + @ttr/std + JSON/RNG), `collections.ts`
+  (Map/Set/Date/new + Object statics).
+
+The module set diverged from the proposed leaf list where natural clusters were
+cleaner (added `async`/`io-shim`/`collections`; `date`/`object-literals`/`var-decl`
+folded or still pending). Shared leaf helpers are exported from `index.ts` on demand
+(lowerExpr/lowerType/lowerTyped/lowerCall/lowerKey/wrapKey/…).
+
+**Remaining (entangled — need a shared-helper-home decision, not just a cut):**
+`generators` (buildGeneratorStateMachine — its `collectRefs`/`rewriteFieldRefs`/
+`collectDeclaredLocals` helpers are shared with try-carrier/closures, so they go to
+`utils` or a shared module first), `try-carrier`/errors, `classes` (ctor/method/
+trait synthesis), `closures`/arrows (liftCallback/freeVarsOf/typeCbBody),
+`object-literals`, `var-decl` (lowerVarDecl), `types` (lowerType). Then the
+dispatch hubs (`statements`/`expressions`/`calls`) last, leaving `index.ts` as
+orchestration only.
+
 ## Scope / status
 
-- **Phase 1 (blocking):** issue TBD — extraction to `lower/`, byte-identical gate.
-  Closing this unblocks series 110.
-- **Phase 2 (non-blocking):** issue TBD — per-module cleanup, behavioral gate.
+- **Phase 1 (blocking):** #93 — extraction to `lower/`, byte-identical gate.
+  ~19% done (above). Closing this unblocks series 110.
+- **Phase 2 (non-blocking):** #94 — per-module cleanup, behavioral gate.
