@@ -1887,6 +1887,20 @@ function emitExpr(expr: HirExpr): string {
       );
       return `write!(${emitExpr(expr.target)}, ${JSON.stringify(fmt)}, ${args.join(", ")}).unwrap()`;
     }
+    case "strSplitIter":
+      // Lazy split source (series 107, #88/2c) → native `recv.split(sep)`, yielding
+      // borrowed `&str` pieces with no `Vec<String>` allocation. `sep` is already a
+      // `&str` pattern (a bare literal after 2b, else an `AsRef` coercion).
+      return `${emitExpr(expr.recv)}.split(${emitExpr(expr.sep)})`;
+    case "strSplitCount":
+      // `.length`-only consumer → count the pieces without materializing them. JS
+      // `.length` is an `f64`, matching the materialized `.len() as f64`.
+      return `(${emitExpr(expr.recv)}.split(${emitExpr(expr.sep)}).count() as f64)`;
+    case "strSplitNth":
+      // A single `parts[i]` → walk to the i-th piece and stop. `.unwrap()` reproduces
+      // today's `Vec`-index panic on out-of-range (the materialized form already
+      // diverges from JS's `undefined` here — this is behavior-preserving vs. it).
+      return `${emitExpr(expr.recv)}.split(${emitExpr(expr.sep)}).nth((${emitExpr(expr.index)}) as usize).unwrap()`;
     case "jsObjectStr":
       // A plain struct interpolated into a template (series 095) → JS
       // `String(object)` === `"[object Object]"`. The `let _ = &(…)` evaluates an

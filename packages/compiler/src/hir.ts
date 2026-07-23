@@ -246,6 +246,22 @@ export type HirExpr =
    */
   | { kind: "strAppend"; target: HirExpr; parts: HirExpr[] }
   /**
+   * Lazy `String.prototype.split` (series 107, #88/2c): a non-empty-separator split
+   * whose result is consumed **without keeping the pieces** streams Rust's native
+   * `str::split` (borrowed `&str`, zero allocation) instead of materializing a
+   * `Vec<String>`. Three shapes by consumer, all produced by `refineSplitLazy`:
+   *   - `strSplitIter` — the lazy iterator source (`recv.split(sep)`), used as a
+   *     `forIn.iter`, a `.forEach` receiver, or a fused adapter-chain head.
+   *   - `strSplitCount` — `.length`-only consumer → `recv.split(sep).count() as f64`.
+   *   - `strSplitNth` — a single `[index]` → `recv.split(sep).nth((index) as usize)
+   *     .unwrap()` (reproducing today's `Vec`-index panic on out-of-range).
+   * `recv` is the split receiver (a `String`/`&str`); `sep` the pattern (a bare
+   * `&'static str` literal after 2b interning, else an `AsRef::<str>::as_ref(…)`).
+   */
+  | { kind: "strSplitIter"; recv: HirExpr; sep: HirExpr }
+  | { kind: "strSplitCount"; recv: HirExpr; sep: HirExpr }
+  | { kind: "strSplitNth"; recv: HirExpr; sep: HirExpr; index: HirExpr }
+  /**
    * A plain-data-struct value interpolated into a template literal (series 095) —
    * `` `${point}` `` → the JS `String(object)` result `"[object Object]"`. Plain
    * structs derive only `Clone`+`Debug` (never `Display`), so this is the JS-faithful

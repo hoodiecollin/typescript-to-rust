@@ -98,6 +98,7 @@ import { computeAutoRc } from "./alias-escape";
 import { refineStrAppend } from "./str-append";
 import { refineStrings } from "./strings";
 import { refineIterFusion } from "./iter-fusion";
+import { refineSplitLazy } from "./split-lazy";
 import {
   createCrateTypeOracle,
   createTypeOracle,
@@ -635,8 +636,11 @@ export function lower(
   applyOwnedSelf(module, autoRc.consumingMethods);
   // `refineIterFusion` (series 104) runs **last** — on the fully-refined module, so it
   // sees final adapter/element-mode shapes and settled ownership before fusing single-
-  // use map/filter/reduce chains.
-  const result = refineIterFusion(
+  // use map/filter/reduce chains. `refineSplitLazy` (series 107, #88/2c) wraps it,
+  // rewriting a non-retaining `split` consumer to stream `str::split` (no `Vec`) on the
+  // fully-settled `forIn` shapes.
+  const result = refineSplitLazy(
+    refineIterFusion(
     fixKeyBorrows(
       fixStringScrutinees(
         refineOwnership(
@@ -658,6 +662,7 @@ export function lower(
           ),
         ),
       ),
+    ),
     ),
   );
   // Namespaces (series 050d, Axis 4): lower each extracted block **recursively**
