@@ -30,6 +30,7 @@ import {
   type StdShimName,
   collectStdShimBindings,
 } from "./std-shim";
+import { type PluginBinding, collectPluginBindings } from "./plugins";
 import type { TypeOracle } from "./type-oracle";
 
 /** JS array/collection methods that mutate the receiver in place. */
@@ -494,6 +495,15 @@ export interface ModuleAnalysis {
    * generic user-fn path). Recognition is by the reserved specifier, not a name.
    */
   stdShim: Map<string, StdShimName>;
+  /**
+   * Plugin std-shim bindings (epic #95): local-alias → `{ owner, export }`, from
+   * an `import { … } from "<registered plugin specifier>"`. A call whose
+   * identifier callee is a key here routes to the opaque `{ kind: "plugin" }` node
+   * (`recognizePluginCall`), which `refinePlugins` later expands to core HIR.
+   * Recognition is by the reserved specifier, exactly like `stdShim`; the
+   * special-cased `@ttr/std` lane keeps its own `stdShim` map and is excluded here.
+   */
+  plugins: Map<string, PluginBinding>;
   /**
    * Bindings whose value is a `parseJson<T>` result (series 084) → their inner
    * `T` (the deserialized `RustType`). A member access `.ok`/`.value`/`.error`
@@ -1781,6 +1791,9 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     // `@ttr/std` std-shim bindings (series 084) — recognized by the reserved
     // import specifier. `parseResultBindings` fills during lowering.
     stdShim,
+    // Plugin bindings (epic #95) — recognized by registered plugin specifiers,
+    // excluding the special-cased `@ttr/std` lane (which uses `stdShim`).
+    plugins: collectPluginBindings(program),
     parseResultBindings: new Map(),
     // Populated during lowering as `const r = rng(seed)` handle bindings are seen (089).
     rngBindings: new Set(),

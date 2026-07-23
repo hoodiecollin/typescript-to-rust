@@ -94,6 +94,7 @@ import {
   redirectBareJson,
   redirectBareMathRandom,
 } from "./io-shim";
+import { isPluginCallInit } from "../plugins";
 import {
   lowerDiscriminatedSwitch,
   recognizeInIfLadder,
@@ -1572,6 +1573,10 @@ export function lowerVarDecl(
       // `const w = stdout()`, `const res = await http.get(u)` — is typed by
       // construction (the `tslib` return); Rust infers it, so no annotation.
       !isStdIoInit(d.init, analysis) &&
+      // A plugin-bound intrinsic call (epic #95) — `const s = leftPad(…)` — is
+      // typed by construction (its `expand()` produces concrete core HIR Rust
+      // infers), so no annotation is required, like the `@ttr/std` exemptions.
+      !isPluginCallInit(d.init, analysis.plugins) &&
       // A regex value or a regex `match`/`exec`/`split`/`test`/`search`/`replace`
       // result (series 101) is typed by construction (the `tslib::regex` return);
       // Rust infers it, so no annotation is required (like `.find`/`.at`).

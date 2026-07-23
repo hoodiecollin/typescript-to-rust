@@ -31,6 +31,7 @@ import type {
 } from "../ast";
 import { isTypePartialEq } from "../derives";
 import { UnsupportedError } from "../errors";
+import { recognizePluginCall } from "../plugins";
 import type { Borrow, HirArg, HirExpr, HirStmt, RustType } from "../hir";
 import { assertSpawnArgsSafe, lowerAwait, lowerSetTimeout } from "./async";
 import { rootBaseOf, traitNameOf } from "./classes";
@@ -643,6 +644,19 @@ export function lowerCall(
   if (call.callee.type === "Identifier") {
     const shim = analysis.stdShim.get((call.callee as Identifier).name);
     if (shim) return lowerStdShimCall(shim, call, analysis);
+  }
+
+  // Plugin-owned shapes (epic #95) — recognized by a registered plugin's reserved
+  // import specifier (the local alias is a key in `analysis.plugins`). Routed to
+  // the single opaque `{ kind: "plugin" }` node, which `refinePlugins` expands to
+  // core HIR before any other pass. Like the std-shim lane, this is anchored to
+  // the specifier, never a name heuristic. Checked after the std-shim lane (the
+  // special-cased `@ttr/std` names are excluded from `analysis.plugins`).
+  if (call.callee.type === "Identifier") {
+    const binding = analysis.plugins.get((call.callee as Identifier).name);
+    if (binding) {
+      return recognizePluginCall(binding, call, (e) => lowerExpr(e, analysis));
+    }
   }
 
   // Direct call to a known function: adapt each argument to the callee's

@@ -24,7 +24,7 @@
 
 import type { Program } from "./ast";
 import { DialectError, UnsupportedError } from "./errors";
-import { STD_SHIM_EXPORTS, STD_SHIM_SPECIFIER } from "./std-shim";
+import { pluginForSpecifier, registeredSpecifiers } from "./plugins";
 
 export { DialectError };
 
@@ -291,7 +291,7 @@ export function validate(program: Program): void {
     // 4. The only modeled import is `@ttr/std` (series 084). Any other specifier,
     //    or an unknown `@ttr/std` name, is fail-loud — general module imports
     //    (050) are unshipped.
-    if (n.type === "ImportDeclaration") checkStdShimImport(n);
+    if (n.type === "ImportDeclaration") checkModuleImport(n);
     // 5. Bare I/O footguns (series 100) → redirect to the `@ttr/std` surface.
     //    Runs before lowering, so `process.exit(0)` (which would otherwise lower
     //    silently) and `process.argv`/`env`/`stdin` / `fetch(...)` all fail loud
@@ -399,27 +399,32 @@ function checkIoFootgunRedirect(n: AnyNode): void {
 }
 
 /**
- * Guard the sole modeled import: `import { … } from "@ttr/std"`. Rejects a
- * bare/other specifier and an unknown imported name. `@throws {UnsupportedError}`.
+ * Guard a modeled module import. The set of recognized specifiers is the plugin
+ * **registry** (epic #95) — `@ttr/std` is the registered first plugin, plus any
+ * third-party plugin's reserved specifier — so the validator consults one
+ * authority instead of a hardcoded name. Rejects a bare/relative/unregistered
+ * specifier and an imported name the owning plugin does not export.
+ * `@throws {UnsupportedError}`.
  */
-function checkStdShimImport(n: AnyNode): void {
+function checkModuleImport(n: AnyNode): void {
   const source = (n.source as { value?: unknown } | undefined)?.value;
-  if (source !== STD_SHIM_SPECIFIER) {
+  const plugin = typeof source === "string" ? pluginForSpecifier(source) : undefined;
+  if (!plugin) {
     throw new UnsupportedError({
-      type: `import from '${String(source)}' — only "${STD_SHIM_SPECIFIER}" is a recognized module (bare/relative module imports are not yet supported)`,
+      type: `import from '${String(source)}' — only registered modules are recognized (${[...registeredSpecifiers()].join(", ")}); bare/relative module imports are not yet supported`,
     });
   }
   const specifiers = (n.specifiers as AnyNode[] | undefined) ?? [];
   for (const spec of specifiers) {
     if (spec.type !== "ImportSpecifier") {
       throw new UnsupportedError({
-        type: `unsupported import form from "${STD_SHIM_SPECIFIER}" (only named imports are recognized)`,
+        type: `unsupported import form from "${source}" (only named imports are recognized)`,
       });
     }
     const name = (spec.imported as { name?: unknown } | undefined)?.name;
-    if (typeof name !== "string" || !STD_SHIM_EXPORTS.has(name)) {
+    if (typeof name !== "string" || !plugin.exports.has(name)) {
       throw new UnsupportedError({
-        type: `'${String(name)}' is not exported by "${STD_SHIM_SPECIFIER}" (Tier A exports: ${[...STD_SHIM_EXPORTS].join(", ")})`,
+        type: `'${String(name)}' is not exported by "${source}" (exports: ${[...plugin.exports].join(", ")})`,
       });
     }
   }
