@@ -45,7 +45,8 @@ import type {
   RustType,
   Vis,
 } from "./hir";
-import { DialectError, UnsupportedError, lower } from "./lower";
+import { DialectError, UnsupportedError } from "./errors";
+import { lower } from "./lower";
 
 export { UnsupportedError, DialectError };
 

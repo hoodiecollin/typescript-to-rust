@@ -23,8 +23,8 @@
  *      literals that share a pure-`i128` arithmetic context (so they emit bare).
  */
 
+import { UnsupportedError } from "./errors";
 import type { HirExpr, HirModule, HirParam, HirStmt } from "./hir";
-import { UnsupportedError } from "./lower";
 
 /** The bitwise binary operators (`>>>` handled specially → `ushr`). */
 const BITWISE_BIN = new Set(["&", "|", "^", "<<", ">>", ">>>"]);

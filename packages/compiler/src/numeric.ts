@@ -26,8 +26,8 @@
  * range promotion, which rewrites structure and threads the new body back.
  */
 
+import { UnsupportedError } from "./errors";
 import type { HirExpr, HirModule, HirParam, HirStmt, RustType } from "./hir";
-import { UnsupportedError } from "./lower";
 
 /** Arithmetic operators that keep both operands in the same numeric type. */
 const ARITHMETIC = new Set(["+", "-", "*", "/", "%"]);
