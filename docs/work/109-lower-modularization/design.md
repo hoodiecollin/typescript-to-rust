@@ -84,10 +84,14 @@ internal to the folder.
 
 The order runs *leaves → hubs*, cheapest and safest first:
 
-1. **Kill the cosmetic error-cycle.** `numeric.ts` / `bitwise.ts` / `emitter.ts`
-   back-import `UnsupportedError` through `lower.ts` (the re-export at `lower.ts:137`).
-   Repoint them at `./errors` directly and drop the re-export. This severs the only
-   reason those files depend on `lower.ts` and unblocks moving `lower.ts` at all.
+1. **Break the error-import cycles.** `numeric.ts` / `bitwise.ts` / `emitter.ts`
+   back-import `DialectError`/`UnsupportedError` through `lower.ts` while `lower.ts`
+   imports `refineNumerics`/`refineBitwise` from them — genuine import cycles that
+   fight the extraction. Repoint those three src consumers at `./errors` directly.
+   **Keep** the `lower.ts` re-export (`lower.ts:137`) as a labeled compat shim: ~30
+   test files still `import … from "./lower"`, and dropping it would churn all of
+   them for no extraction benefit. Migrating those test imports to `./errors` and
+   removing the shim is a **Phase-2** cleanup candidate, not a Phase-1 blocker.
 2. **`utils.ts`** — pure, dependency-free helpers. The first real extraction; proves the
    folder-module wiring end-to-end.
 3. **`constants.ts`** — frozen tables / note strings.
