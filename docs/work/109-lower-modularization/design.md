@@ -139,10 +139,19 @@ it — stronger than required.)
   `UnsupportedError` `from "../src/lower"` now import them `from "../src/errors"`;
   `index.ts`'s `export { DialectError, UnsupportedError }` is removed (it still
   imports them from `../errors` for its own throws).
-- **Sub-seam split.** The discriminated-union / `typeof` / `in` narrowing
-  recognizers (a self-contained ~650-LOC cluster, every symbol internal to
-  `statements.ts`, 2 analysis fields) split into **`narrowing.ts`** (690 LOC);
-  `statements.ts` 3,727 → 3,080. The folder is now **18 modules**.
+- **Sub-seam splits (two).**
+  1. The discriminated-union / `typeof` / `in` narrowing recognizers (a
+     self-contained ~650-LOC cluster, every symbol internal to `statements.ts`,
+     2 analysis fields) → **`narrowing.ts`** (690 LOC).
+  2. The shared "light typer" — the expression-typing predicates (`receiverTypeOf`
+     core + `optionExprType`/`structTypeOfOperand`/`paramTypeOfOperand`/string-ness
+     predicates/`truthyCond`/`needsTruthy`/`registerOpBound`+`JS_OP_TRAIT`/string-
+     method catalogs), imported by expressions/types/method-routing/closures/
+     statements — → **`typing.ts`** (545 LOC). This was the interleaved seam
+     flagged below as a follow-up; done by extracting the contiguous predicate range
+     and relocating the one interleaved statement lowerer (`lowerNarrowedBlock`) back.
+
+  `statements.ts` 3,727 → 2,573. The folder is now **19 modules**.
 
 ### Assessed & resolved (not deferred)
 
@@ -160,14 +169,13 @@ it — stronger than required.)
   intentionally explicit — deduping the three `recognize*IfLadder` recognizers into a
   shared walker would obscure three distinct narrowing shapes for marginal LOC.
 
-### Remaining (opportunistic, non-blocking)
+### Status
 
-- A second sub-seam is *possible* — the shared expression-typing predicates in
-  `statements.ts` (`receiverTypeOf`/`optionExprType`/`structTypeOfOperand`/… — the
-  "light typer" imported by many siblings) could become a `typing.ts`. It's an
-  interleaved (non-contiguous) cluster, so it's a surgical extraction rather than a
-  clean slice; deferred unless a read-through makes it worthwhile. The current
-  granularity (18 cohesive modules; hubs at 3,080 / 2,416) is sound.
+All Phase-2 first-target work + both viable sub-seams are done; the two open
+cleanup categories are assessed-and-resolved (ModuleAnalysis rejected, idiom-dedup
+empty). The folder is **19 cohesive modules**; the largest hubs are `statements.ts`
+2,573 / `expressions.ts` 2,548 / `index.ts` 2,328 — all reasonable for dispatch
+hubs. #94 is complete.
 
 ## Rejected alternatives
 
@@ -234,8 +242,9 @@ prune dead imports via `tsc --noUnusedLocals` → gate on `typecheck` +
 - **Phase 2 (non-blocking):** #94 — per-module cleanup, behavioral gate. **First
   targets DONE (2026-07-23):** parked lowerers re-homed (`types → expressions`),
   all 13 siblings repointed off the `./index` re-export hub (hub emptied), error
-  re-export shim dropped (tests → `../src/errors`), and the narrowing recognizers
-  split out to `narrowing.ts` (statements 3,727 → 3,080; 18 modules). `ModuleAnalysis`
+  re-export shim dropped (tests → `../src/errors`), and two sub-seams split out —
+  `narrowing.ts` (disc-union/typeof/in recognizers) + `typing.ts` (the shared light
+  typer); statements.ts 3,727 → 2,573, folder now **19 modules**. `ModuleAnalysis`
   narrowing assessed and **rejected** (architecturally blocked by transitive context
-  threading); idiom-dedup assessed (no high-value target). See the Phase 2 section
-  above for the full record.
+  threading); idiom-dedup assessed (no high-value target). #94 complete — see the
+  Phase 2 section above for the full record.
