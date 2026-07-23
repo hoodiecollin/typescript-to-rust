@@ -18,6 +18,7 @@ import type {
 } from "../ast";
 import { UnsupportedError } from "../errors";
 import type { ElemMode, HirExpr, HirParam, HirStmt, RustType } from "../hir";
+import { CB_GLOBALS } from "./constants";
 import { classifyElementUse, lowerExpr, truthyCond } from "./index";
 import { isAstNode, isCopyRustType, sameRustType } from "./utils";
 
@@ -36,16 +37,6 @@ export const LIFT_ADAPTERS = new Set([
   "every",
   "reduce",
   "sort",
-]);
-
-/** JS globals a callback body may read without them being *free variables*. */
-export const CB_GLOBALS = new Set([
-  "console",
-  "JSON",
-  "Math",
-  "Object",
-  "undefined",
-  "NaN",
 ]);
 
 /**

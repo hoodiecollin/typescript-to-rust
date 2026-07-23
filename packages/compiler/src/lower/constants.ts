@@ -22,3 +22,14 @@ export const DEFAULT_EXPORT_SYM = "__default_export";
 /** A shared frozen empty set — the default `typeParams` of a non-generic `lowerType`
  * call (series 081), so no allocation per call and no accidental mutation. */
 export const EMPTY_TYPE_PARAMS: Set<string> = new Set();
+
+/** Global names that are never free variables of a callback / never a threaded
+ * capture (series 048/079). Shared by arrow normalization and callback lifting. */
+export const CB_GLOBALS = new Set([
+  "console",
+  "JSON",
+  "Math",
+  "Object",
+  "undefined",
+  "NaN",
+]);
