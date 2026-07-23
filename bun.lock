@@ -6,6 +6,7 @@
       "name": "typescript-to-rust",
       "devDependencies": {
         "@biomejs/biome": "^1.8.3",
+        "@ttr/plugin-leftpad": "workspace:*",
         "@ttr/std": "workspace:*",
         "@types/bun": "^1.3.14",
         "mitata": "^1.0.34",
@@ -23,6 +24,10 @@
       "peerDependencies": {
         "typescript": "^5",
       },
+    },
+    "packages/plugin-leftpad": {
+      "name": "@ttr/plugin-leftpad",
+      "version": "0.0.0",
     },
     "packages/std": {
       "name": "@ttr/std",
@@ -97,6 +102,8 @@
     "@oxc-parser/binding-win32-x64-msvc": ["@oxc-parser/binding-win32-x64-msvc@0.138.0", "", { "os": "win32", "cpu": "x64" }, "sha512-QZplnCxS4vPe4StAVBtvD2bW3pELlidf0Ek6iQ/HHiCjbEtrs5pFZZfLAoPhKLJyDzyxoGAdic9bSIYrJYTZcg=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.138.0", "", {}, "sha512-1a7ZKmrRTCoN1XMZ4L0PyyqrMnrNlLyPuOkdSX2MZg7IiIGRUyurNhAm73ptDOraoBcIordsIGKNPKUzy3ZmfA=="],
+
+    "@ttr/plugin-leftpad": ["@ttr/plugin-leftpad@workspace:packages/plugin-leftpad"],
 
     "@ttr/std": ["@ttr/std@workspace:packages/std"],
 

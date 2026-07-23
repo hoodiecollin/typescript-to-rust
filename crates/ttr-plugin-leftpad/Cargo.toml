@@ -1,0 +1,14 @@
+# ttr-plugin-leftpad — the reference plugin crate (epic #95, series 110).
+#
+# The Rust half of the reference `@ttr/plugin-leftpad` plugin. A plugin ships its
+# own crate (design §4, bilingual from v1) instead of extending tslib; the emitted
+# core-HIR `call` targets `ttr_plugin_leftpad::left_pad`. This crate is declared as
+# a path dependency of the verification oracle (`rust-oracle/Cargo.toml`) so
+# `ensureDepsWarm` pre-warms it before any spec runs. Dependency-free by design —
+# it demonstrates the seam, not a heavy runtime.
+[package]
+name = "ttr-plugin-leftpad"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]

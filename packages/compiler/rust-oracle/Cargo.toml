@@ -21,6 +21,12 @@ ts-primitives = { path = "../../../crates/ts-primitives" }
 # routes to it (series 027) — `Array.at` negative indexing, `String.padStart`…
 # Present-but-unused when generated output stays native (costs nothing at check).
 tslib = { path = "../../../crates/tslib" }
+# ttr-plugin-leftpad is the reference plugin crate (epic #95): the bundled runtime
+# the `@ttr/plugin-leftpad` plugin's `expand()` emits a `ttr_plugin_leftpad::left_pad`
+# call into. Declared here (mirroring the plugin's `crate.manifest`) so
+# `ensureDepsWarm` pre-warms it. Present-but-unused by plugin-free output (costs
+# nothing at check time).
+ttr-plugin-leftpad = { path = "../../../crates/ttr-plugin-leftpad" }
 # Async lowering targets tokio: TS `async function` → `async fn`, and the
 # generated `main` becomes `#[tokio::main]`. Pinned so the offline cache stays
 # warm; the harness fetches it online on a cold cache. Unused by non-async
