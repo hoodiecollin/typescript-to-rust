@@ -28,10 +28,10 @@ import {
   liftCallback,
   lowerCall,
   lowerExpr,
-  lowerIoAsyncCall,
   lowerStatements,
   lowerType,
 } from "./index";
+import { lowerIoAsyncCall } from "./io-shim";
 import { isCopyRustType } from "./utils";
 
 /**
