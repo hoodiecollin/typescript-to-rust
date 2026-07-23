@@ -21,10 +21,8 @@ import type {
   FunctionDeclaration,
   Identifier,
   IfStatement,
-  ReturnStatement,
   Statement,
   TSType,
-  TSTypeReference,
   VariableDeclaration,
   WhileStatement,
 } from "../ast";
@@ -37,6 +35,7 @@ import type {
   HirStmt,
   RustType,
 } from "../hir";
+import { typeCbBody } from "./closures";
 import { UNIT } from "./constants";
 import {
   isGeneratorCall,
@@ -44,7 +43,6 @@ import {
   lowerParam,
   lowerStatement,
   lowerType,
-  typeCbBody,
 } from "./index";
 import {
   blockBody,

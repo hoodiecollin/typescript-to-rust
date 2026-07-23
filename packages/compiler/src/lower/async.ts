@@ -23,9 +23,9 @@ import type {
 } from "../ast";
 import { UnsupportedError } from "../errors";
 import type { HirExpr, HirStmt, RustType } from "../hir";
+import { liftCallback } from "./closures";
 import {
   elementTypeOf,
-  liftCallback,
   lowerCall,
   lowerExpr,
   lowerStatements,
