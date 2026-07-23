@@ -115,15 +115,59 @@ a one-command check runnable from repo root (e.g. `bun run lower:snapshot` /
 
 ## Phase 2 — cleanup & efficiency (separate epic, non-blocking)
 
-Once Phase 1 closes, the folder is safe to actually improve, per module:
+Once Phase 1 closes, the folder is safe to actually improve, per module. Phase 2's
+gate is behavioral, not byte-level: the corpus must still pass the cargo oracle, and
+any intentional byte drift must be reviewed as such. (In practice the first-target
+work below was all pure motion and stayed *byte-identical*, so `lower:verify` gated
+it — stronger than required.)
 
-- Simplify signatures; reduce the `ModuleAnalysis` surface each module actually needs
-  (today everything takes the whole ~58-field object — most modules use a slice of it).
-- Dedupe the repeated shape-matching idioms the switch hubs accreted.
-- Break `calls.ts` down internally if it is still too large after extraction.
+### First targets — DONE (2026-07-23)
 
-Phase 2's gate is behavioral, not byte-level: the corpus must still pass the cargo
-oracle, and any intentional byte drift must be reviewed as such.
+- **Re-home the parked lowerers.** Template-string (`lowerTemplate`/
+  `lowerTemplatePart`/`TEMPLATE_SCALAR_ELEM`) and update (`lowerUpdateAssign`/
+  `lowerUpdateValue`) lowering moved `types.ts → expressions.ts` (they lower
+  expressions; Phase 1 only parked them in `types.ts` for a byte-clean cut).
+- **Repoint siblings off the `./index` re-export hub.** All 13 siblings now import
+  each lowerer from its owning module (`./expressions` / `./statements` / `./types`);
+  the three forwarding re-export blocks + `export type { ClassFieldPlan }` are gone.
+  `index.ts` exports only real orchestration surface (`lower`/`lowerCrate` + its own
+  item/directive helpers). Genuinely index-owned symbols (`collectionOf`/
+  `retargetStructKey`/`structKeyName`/`wrapKey`/`tryHashMapInsert`/`tryMapSetMethod`/
+  `lowerMethod`/`lowerParam`/`programErrType`/`takeDirectives`/`TSTypeParamDecl`) stay
+  sourced from `./index` — those are its own exports, not forwards.
+- **Drop the error re-export shim.** The ~18 test files importing `DialectError`/
+  `UnsupportedError` `from "../src/lower"` now import them `from "../src/errors"`;
+  `index.ts`'s `export { DialectError, UnsupportedError }` is removed (it still
+  imports them from `../errors` for its own throws).
+- **Sub-seam split.** The discriminated-union / `typeof` / `in` narrowing
+  recognizers (a self-contained ~650-LOC cluster, every symbol internal to
+  `statements.ts`, 2 analysis fields) split into **`narrowing.ts`** (690 LOC);
+  `statements.ts` 3,727 → 3,080. The folder is now **18 modules**.
+
+### Assessed & resolved (not deferred)
+
+- **`ModuleAnalysis` surface reduction — rejected as architecturally blocked.** The
+  measured per-module field usage is 42 (statements) / 36 (index) / 36 (expressions)
+  / 23 (classes) of ~72 fields for the hubs — a `Pick<>` there is noise, not clarity.
+  Every small-slice leaf (regex reads 2 fields, unions 3, types 6, …) *calls back
+  into the hubs* (`lowerExpr`/`lowerType`/`lowerStatement`), so it must hold and pass
+  the **full** `analysis` transitively — a narrowed type can't be handed to a hub that
+  needs the whole object. Narrowing only "works" for pure leaves that never re-enter
+  lowering, and there are none. Not worth the churn; the explicit-context-threading
+  pattern stays.
+- **Idiom dedup — no high-value target.** No top-level helper is duplicated across
+  modules (nothing to lift into `utils`), and the switch-hub shape-matching is
+  intentionally explicit — deduping the three `recognize*IfLadder` recognizers into a
+  shared walker would obscure three distinct narrowing shapes for marginal LOC.
+
+### Remaining (opportunistic, non-blocking)
+
+- A second sub-seam is *possible* — the shared expression-typing predicates in
+  `statements.ts` (`receiverTypeOf`/`optionExprType`/`structTypeOfOperand`/… — the
+  "light typer" imported by many siblings) could become a `typing.ts`. It's an
+  interleaved (non-contiguous) cluster, so it's a surgical extraction rather than a
+  clean slice; deferred unless a read-through makes it worthwhile. The current
+  granularity (18 cohesive modules; hubs at 3,080 / 2,416) is sound.
 
 ## Rejected alternatives
 
@@ -187,7 +231,11 @@ prune dead imports via `tsc --noUnusedLocals` → gate on `typecheck` +
 - **Phase 1 (blocking):** #93 — extraction to `lower/`, byte-identical gate.
   **Core extraction complete** — the monolith is fully dissolved into 16 sibling
   modules; `index.ts` is orchestration-only. Closing this unblocks series 110.
-- **Phase 2 (non-blocking):** #94 — per-module cleanup, behavioral gate. Natural
-  first targets: repoint siblings off the `./index` re-export hub onto owning
-  modules, and re-home the parked lowerers (template/update-assign live in
-  `types.ts` today for byte-cleanliness, not cohesion).
+- **Phase 2 (non-blocking):** #94 — per-module cleanup, behavioral gate. **First
+  targets DONE (2026-07-23):** parked lowerers re-homed (`types → expressions`),
+  all 13 siblings repointed off the `./index` re-export hub (hub emptied), error
+  re-export shim dropped (tests → `../src/errors`), and the narrowing recognizers
+  split out to `narrowing.ts` (statements 3,727 → 3,080; 18 modules). `ModuleAnalysis`
+  narrowing assessed and **rejected** (architecturally blocked by transitive context
+  threading); idiom-dedup assessed (no high-value target). See the Phase 2 section
+  above for the full record.
