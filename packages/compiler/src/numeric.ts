@@ -90,7 +90,64 @@ function refineBody(
   // retype params/elements to `i64` (deferred), so 103b-1's local pass is unaffected.
   const i64 = specializeIntegerBindings(all, usize, retTy);
   tagIntegerModulo(all, usize, i64, seedInts);
-  return promoteRanges(stmts, usize, i64);
+  const promoted = promoteRanges(stmts, usize, i64);
+  // Series 109 (#88): last, on the settled structure, cast every `.length` in an
+  // `f64` context. Must run after range promotion (so `forRange` bounds exist) and
+  // after usize retyping (so the usize slots are known).
+  coerceLenToF64(flattenStmts(promoted), usize);
+  return promoted;
+}
+
+/** Comparison operators (both JS and lowered spellings) — an operand next to a
+ * `usize` identifier in one is itself a `usize` slot (an un-promoted loop bound). */
+const COMPARISON_OPS = new Set(["<", ">", "<=", ">=", "==", "!=", "===", "!=="]);
+
+/**
+ * `.length` → `f64` coercion (series 111, #88). Tag every `len` node that sits in an
+ * **f64** context with `f64: true`, so `.len()`/`.chars().count()` (a `usize`) is cast
+ * `(… as f64)` and composes with `number` arithmetic, bindings, returns, and arguments.
+ * Today `.length` in an `f64` context does not compile (counts must go through a `for…of`
+ * counter); this graduates that away (Collin, 2026-07-23). Lossless in practice — a length
+ * past 2⁵³ is unrepresentable — under the same accepted-`i64` posture as series 103.
+ *
+ * A `len` stays a **bare `usize`** wherever the numeric pass proved a `usize` slot, so no
+ * working index/bound loop regresses: an array index, a `usize`-counter `forRange` bound,
+ * a `usize`-binding initializer/RHS, or a comparison against a `usize` identifier (an
+ * un-promoted `while (i < arr.length)`). Everything else is an `f64` consumer. A missed
+ * f64 context only leaves a program that already did not compile (never a regression);
+ * only an over-broad `usize` claim could regress, so the `usize` set is the authority.
+ */
+function coerceLenToF64(stmts: HirStmt[], usize: Set<string>): void {
+  const bare = new Set<HirExpr>(); // `len` nodes that must stay `usize`
+  const collectLens = (root: HirExpr): void =>
+    markContext(root, (n) => {
+      if (n.kind === "len") bare.add(n);
+    });
+
+  // usize slots: (a) array index args + (b) usize-binding inits/assigns.
+  for (const root of usizeContextRoots(stmts, usize)) collectLens(root);
+  for (const stmt of stmts) {
+    // (c) usize-counter range bounds (an `i64` counter's bounds hold no `len`).
+    if (stmt.kind === "forRange" && stmt.counterTy !== "i64") {
+      collectLens(stmt.start);
+      collectLens(stmt.end);
+    }
+    // (d) a comparison against a usize identifier (an un-promoted loop condition).
+    eachStmtExpr(stmt, (e) => {
+      if (e.kind !== "binary" || !COMPARISON_OPS.has(e.op)) return;
+      if (isUsizeIdent(e.left, usize) || isUsizeIdent(e.right, usize)) {
+        collectLens(e.left);
+        collectLens(e.right);
+      }
+    });
+  }
+
+  // Every `len` the usize analysis did not claim is an f64 consumer.
+  for (const stmt of stmts) {
+    eachStmtExpr(stmt, (e) => {
+      if (e.kind === "len" && !bare.has(e)) e.f64 = true;
+    });
+  }
 }
 
 // ── Local integer-domain modulo (series 103a) ─────────────────────────────────

@@ -337,8 +337,15 @@ export type HirExpr =
    * `chars: true` → `s.chars().count()` (JS counts UTF-16 code units; the dialect
    * counts Rust `char`s, consistent with the char-indexed `slice`/`charAt` model,
    * and diverges from a byte `.len()`).
+   *
+   * `.len()`/`.chars().count()` return `usize`; `f64: true` (series 111, #88) wraps
+   * the result `(… as f64)` so a `.length` consumed in an `f64` context (a `number`
+   * binding, `return`, arithmetic, an `f64` argument) type-checks. The numeric pass
+   * sets it on every `len` **not** in a `usize` slot (index / range bound / usize
+   * comparison), so index-and-bound uses stay a bare `usize` `.len()`. Lossless in
+   * practice (a length past 2⁵³ is unrepresentable), the same accepted-`i64` posture.
    */
-  | { kind: "len"; object: HirExpr; chars?: boolean }
+  | { kind: "len"; object: HirExpr; chars?: boolean; f64?: boolean }
   /** array literal → `vec![...]`. */
   | { kind: "array"; elements: HirExpr[] }
   /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */

@@ -2069,8 +2069,13 @@ function emitExpr(expr: HirExpr): string {
     // `left.js_add(&right)`. The arg is by-reference (`&Self`), ownership-safe.
     case "jsOp":
       return `${emitReceiver(expr.receiver)}.${expr.method}(&${emitExpr(expr.arg)})`;
-    case "len":
-      return `${emitReceiver(expr.object)}.${expr.chars ? "chars().count()" : "len()"}`;
+    case "len": {
+      const call = `${emitReceiver(expr.object)}.${expr.chars ? "chars().count()" : "len()"}`;
+      // `f64` (series 111): a `.length` in an `f64` context — the usize count cast to
+      // `f64` so it composes with `number` arithmetic/bindings. Bare `.len()` stays a
+      // `usize` where the numeric pass proved a usize slot (index / range bound).
+      return expr.f64 ? `(${call} as f64)` : call;
+    }
     case "field":
       return `${emitReceiver(expr.object)}.${rid(expr.name)}`;
     case "index":
