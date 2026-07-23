@@ -49,6 +49,7 @@ and the reports live under `benchmarks/.build/` (gitignored).
 | `arraypipe` | `map`/`filter`/`reduce` — allocation + closure calls |
 | `sort` | comparator-callback sort of a pseudo-random array |
 | `strbuild` | string concatenation + `split`/`indexOf` scanning |
+| `splitscan` | `split` + for-of that reads each piece (lazy-split streaming) |
 | `histogram` | number-keyed `Map` — hashing + insert/update churn |
 
 ### Dialect constraints (why the corpus looks the way it does)
@@ -117,6 +118,20 @@ the whole build loop is **~1ms of compute** (a build-only binary runs in 4.6ms e
 over the 3.6ms startup floor), while the **300-round `s.split("5")` scan is ~99ms** — it
 materializes a `Vec<String>` of thousands of one-char heap `String`s every round. So 2a is a
 real O(n²)→O(n) win (strbuild e2e **~138ms → 103ms**, steady **~135ms → 99.4ms**) but does
-**not** flip the workload: `strbuild` stays a loss (steady 99.4ms vs Bun 20.2ms, 0.2×) until
-**2c (borrow-yielding `split`)** lands. Both stay tracked under perf epic **#86** / **#88**.
-**Lesson kept:** measure the halves before claiming a workload is fixed.
+**not** flip the workload. **Series 107 (borrow-yielding/lazy `split`, #88 2c)** then streamed
+the scan's `split` — a non-empty-separator `split` consumed by a non-retaining for-of now
+emits Rust's native `str::split` (borrowed `&str`, zero allocation) instead of materializing
+a `Vec<String>` of thousands of pieces per round. On a **clean** split-scan shape that is a
+decisive win: the new `splitscan` workload (split + for-of that *reads* each piece) is
+**1.6× steady / 1.7× e2e vs Bun, RSS 1.6MB vs 63MB (40×)**.
+
+But — the *fourth* time this lesson recurs — 2c did **not** flip `strbuild` (still steady
+81.4ms / 0.2×, e2e 83.6ms / 0.4×). Isolating strbuild's scan loop into two native probes
+(startup floor 3.4ms) shows the split was never the bottleneck: **split-only 18.0ms e2e
+(~14.6ms compute), `indexOf("789")`-only 72.8ms (~69ms compute)**. The pre-2c note "~99ms is
+the split scan" was itself unmeasured — it conflated the split with the `s.indexOf("789")`
+sitting next to it (a full ~80KB substring search returning −1, ×300). So strbuild's real
+cost is **substring search** (`tslib::string::index_of` vs Bun's native `indexOf`) — a
+separate item, filed as **#92**. 2c did shave strbuild ~18ms (the removed `Vec<String>`).
+All tracked under perf epic **#86**. **Lesson kept, and paid for again:** measure the halves
+before claiming a workload is fixed — `splitscan` is the honest witness for 2c, not `strbuild`.
