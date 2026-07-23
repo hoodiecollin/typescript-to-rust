@@ -139,3 +139,131 @@ export function isCopyRustType(ty: RustType): boolean {
 export function refExpr(expr: HirExpr): HirExpr {
   return { kind: "ref", mut: false, expr };
 }
+
+// ── structural AST/HIR walks (shared: generators, try-carrier, closures) ─────
+
+/** All local names declared (via `let`/`const`/`var`) anywhere in `stmts`, in
+ * source order, deduped. Descends through control flow (not nested functions). */
+export function collectDeclaredLocals(stmts: Statement[]): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  const set = new Set<string>();
+  for (const s of stmts) collectDeclaredLocalsInto(s, set, order, seen);
+  return order;
+}
+
+export function collectDeclaredLocalsInto(
+  node: unknown,
+  out: Set<string>,
+  order?: string[],
+  seen?: Set<string>,
+): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { type?: string };
+  if (
+    n.type === "FunctionDeclaration" ||
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression"
+  ) {
+    return;
+  }
+  if (n.type === "VariableDeclaration") {
+    for (const d of (n as unknown as { declarations: { id: unknown }[] })
+      .declarations) {
+      const id = d.id as { type?: string; name?: string };
+      if (id.type === "Identifier" && id.name) {
+        out.add(id.name);
+        if (order && seen && !seen.has(id.name)) {
+          seen.add(id.name);
+          order.push(id.name);
+        }
+      }
+    }
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    const v = (node as Record<string, unknown>)[key];
+    if (Array.isArray(v)) {
+      for (const el of v) collectDeclaredLocalsInto(el, out, order, seen);
+    } else {
+      collectDeclaredLocalsInto(v, out, order, seen);
+    }
+  }
+}
+
+/** Collect identifier *reads* in `node` whose name is in `universe`. Skips
+ * member property names (`o.f` — `f` is not a variable), a `VariableDeclarator`'s
+ * binding `id` (a declaration is a write, not a read — only its `init` is read),
+ * and nested functions. */
+export function collectRefs(
+  node: unknown,
+  universe: Set<string>,
+  out: Set<string>,
+): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { type?: string };
+  if (n.type === "Identifier") {
+    const nm = (n as { name?: string }).name;
+    if (nm && universe.has(nm)) out.add(nm);
+    return;
+  }
+  if (
+    n.type === "FunctionDeclaration" ||
+    n.type === "FunctionExpression" ||
+    n.type === "ArrowFunctionExpression"
+  ) {
+    return;
+  }
+  if (n.type === "VariableDeclarator") {
+    collectRefs((n as unknown as { init: unknown }).init, universe, out);
+    return; // the binding `id` is a write, not a read
+  }
+  if (n.type === "MemberExpression") {
+    const m = n as unknown as {
+      object: unknown;
+      property: unknown;
+      computed: boolean;
+    };
+    collectRefs(m.object, universe, out);
+    if (m.computed) collectRefs(m.property, universe, out); // `o[e]` reads `e`
+    return; // a non-computed `.prop` name is not a variable read
+  }
+  for (const key in node) {
+    if (key === "type") continue;
+    const v = (node as Record<string, unknown>)[key];
+    if (Array.isArray(v)) {
+      for (const el of v) collectRefs(el, universe, out);
+    } else {
+      collectRefs(v, universe, out);
+    }
+  }
+}
+
+/** Rewrite every `{kind:"ident", name}` whose name is a field to `self.<name>`
+ * (a struct-field access). A generic structural walk over the lowered HIR — it
+ * never touches string field names, so struct-literal keys / method names are
+ * safe; the introduced `self` ident is not a field, so no double-rewrite. */
+export function rewriteFieldRefs<T>(node: T, fields: Set<string>): T {
+  if (Array.isArray(node)) {
+    return node.map((n) => rewriteFieldRefs(n, fields)) as unknown as T;
+  }
+  if (node && typeof node === "object") {
+    const obj = node as { kind?: string; name?: string };
+    if (obj.kind === "ident" && obj.name && fields.has(obj.name)) {
+      return {
+        kind: "field",
+        object: { kind: "ident", name: "self" },
+        name: obj.name,
+      } as unknown as T;
+    }
+    const out: Record<string, unknown> = {};
+    for (const key in node) {
+      out[key] = rewriteFieldRefs(
+        (node as Record<string, unknown>)[key],
+        fields,
+      );
+    }
+    return out as unknown as T;
+  }
+  return node;
+}
