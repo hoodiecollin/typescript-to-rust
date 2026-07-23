@@ -2,7 +2,9 @@
  * Lowering: JS collection & date construction — `new Map`/`new Set`/`new Date`,
  * the generic `new` dispatch, and `Object.keys`/`values` statics (series 041,
  * 060/061 Map/Set, 102 Date). Extracted from the lowering monolith (series 109);
- * the core lowerers and key helpers are imported from `./index`.
+ * the core lowerers come from the sibling hubs (`lowerExpr` from `./expressions`,
+ * `lowerKey` from `./statements`, `lowerType`/`lowerMapKeyType` from `./types`) and
+ * the key helpers `retargetStructKey`/`wrapKey` from `./index`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -19,14 +21,10 @@ import type {
 } from "../ast";
 import { UnsupportedError } from "../errors";
 import type { HirArg, HirExpr, MapBuildPart, RustType } from "../hir";
-import {
-  lowerExpr,
-  lowerKey,
-  lowerMapKeyType,
-  lowerType,
-  retargetStructKey,
-  wrapKey,
-} from "./index";
+import { lowerExpr } from "./expressions";
+import { retargetStructKey, wrapKey } from "./index";
+import { lowerKey } from "./statements";
+import { lowerMapKeyType, lowerType } from "./types";
 import { lowerRegexValue, regexLiteralInfo } from "./regex";
 import { rustStrLit } from "./utils";
 

@@ -8,11 +8,10 @@
  * expression and type lowerers lean on.
  *
  * Extracted from the `lower.ts` monolith (series 109, Phase 1) verbatim — no logic
- * change; the byte-identical corpus gate proves it. `index.ts` (the orchestrator)
- * re-exports the shared predicates so siblings keep importing them `from "./index"`;
- * the expression/type lowerers it calls come from `./expressions` / `./types`, and
- * the few head helpers (`collectionOf` / `structKeyName` / `retargetStructKey`) from
- * `./index`.
+ * change; the byte-identical corpus gate proves it. Siblings import these shared
+ * predicates directly from `./statements`; the expression/type lowerers it calls
+ * come from `./expressions` / `./types`, and the few orchestrator-owned head
+ * helpers (`collectionOf` / `structKeyName` / `retargetStructKey`) from `./index`.
  */
 
 import { type ModuleAnalysis, isErrorSubclass } from "../analysis";

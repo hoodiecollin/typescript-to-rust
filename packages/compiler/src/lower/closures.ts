@@ -5,8 +5,8 @@
  * `freeVarsOf` finds the captured environment (rejecting mutable captures),
  * `typeCbBody` types the lifted body, and `liftFlatMapTernaryBody` handles the
  * flatMap-ternary special case. Extracted from the lowering monolith (series
- * 109); the core lowerer, the element-use classifier, and `truthyCond` are
- * imported from `./index`.
+ * 109); `lowerExpr` and the element-use classifier come from `./expressions`,
+ * `truthyCond` from `./statements`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -19,7 +19,8 @@ import type {
 import { UnsupportedError } from "../errors";
 import type { ElemMode, HirExpr, HirParam, HirStmt, RustType } from "../hir";
 import { CB_GLOBALS } from "./constants";
-import { classifyElementUse, lowerExpr, truthyCond } from "./index";
+import { classifyElementUse, lowerExpr } from "./expressions";
+import { truthyCond } from "./statements";
 import { isAstNode, isCopyRustType, sameRustType } from "./utils";
 
 // ── Callback lifting (series 048) ─────────────────────────────────────────────

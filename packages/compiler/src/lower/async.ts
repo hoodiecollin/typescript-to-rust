@@ -2,10 +2,10 @@
  * Lowering: async-lowering cluster (series 051a/051b/051c, 055, 100).
  *
  * The `await`/concurrency-combinator run split out of the lowering monolith:
- * `lowerAwait` and its combinator/fan-out/spawn helpers. Pure relocation —
- * imports the still-in-`index.ts` orchestrator helpers (`lowerCall`,
- * `lowerIoAsyncCall`, `liftCallback`, `elementTypeOf`, `lowerStatements`, plus
- * the exported `lowerExpr`/`lowerType`) from `./index`.
+ * `lowerAwait` and its combinator/fan-out/spawn helpers. Pure relocation — the
+ * shared lowerers come straight from the sibling hubs (`lowerExpr`/`lowerCall`/
+ * `elementTypeOf` from `./expressions`, `lowerStatements` from `./statements`,
+ * `lowerType` from `./types`).
  */
 
 import { SCRIPT_SCOPE } from "../analysis";
@@ -24,13 +24,9 @@ import type {
 import { UnsupportedError } from "../errors";
 import type { HirExpr, HirStmt, RustType } from "../hir";
 import { liftCallback } from "./closures";
-import {
-  elementTypeOf,
-  lowerCall,
-  lowerExpr,
-  lowerStatements,
-  lowerType,
-} from "./index";
+import { elementTypeOf, lowerCall, lowerExpr } from "./expressions";
+import { lowerStatements } from "./statements";
+import { lowerType } from "./types";
 import { lowerIoAsyncCall } from "./io-shim";
 import { isCopyRustType } from "./utils";
 

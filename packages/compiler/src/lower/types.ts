@@ -1,14 +1,14 @@
 /**
  * Type lowering (`lowerType`) and the type-adjacent lowerers that hang off it:
  * the Map/Set key-policy helpers (061/074 Hash+Eq + SameValueZero key newtypes),
- * `++`/`--` update lowering, template-literal lowering (095), the untyped-ternary
- * `lowerCond` (094), and the discriminated-switch scrutinee/field-read recognizers.
+ * the untyped-ternary `lowerCond` (094), and the discriminated-switch
+ * scrutinee/field-read recognizers.
  *
  * Extracted from the `lower.ts` monolith (series 109, Phase 1) verbatim — no logic
  * change; the byte-identical corpus gate proves it. `lowerType` is the type hub
- * (imported by 8 siblings); shared expression lowerers it leans on (`lowerExpr`,
- * `optionExprType`, `receiverTypeOf`, `truthyCond`, `structKeyName`,
- * `retargetStructKey`) are sourced from `./index`, which re-exports them.
+ * (imported by 8 siblings); the shared lowerers it leans on come from the sibling
+ * hubs (`lowerExpr` from `./expressions`, `truthyCond` from `./statements`) and the
+ * orchestrator-owned `structKeyName`/`retargetStructKey` from `./index`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -28,12 +28,9 @@ import type {
   RustType,
 } from "../hir";
 import { EMPTY_TYPE_PARAMS, UNIT } from "./constants";
-import {
-  lowerExpr,
-  retargetStructKey,
-  structKeyName,
-  truthyCond,
-} from "./index";
+import { lowerExpr } from "./expressions";
+import { retargetStructKey, structKeyName } from "./index";
+import { truthyCond } from "./statements";
 import {
   coerceScalarToUnion,
   inferScalarInner,

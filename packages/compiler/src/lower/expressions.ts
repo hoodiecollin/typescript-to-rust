@@ -7,9 +7,10 @@
  *
  * Extracted from the `lower.ts` monolith (series 109, Phase 1) verbatim — no logic
  * change; the byte-identical corpus gate proves it. Shared statement-level lowerers
- * and head helpers it leans on (`lowerStatements`, `lowerTyped`, `lowerVarDecl`,
- * `receiverTypeOf`, `optionExprType`, `lowerType`, …) are sourced from `./index`,
- * the orchestration + shared-lowering hub, which re-exports them.
+ * and typing predicates it leans on (`lowerStatements`, `lowerTyped`,
+ * `receiverTypeOf`, `optionExprType`, …) come from `./statements`; `lowerType`/
+ * `lowerCond` from `./types`; the orchestrator-owned helpers (`collectionOf`/
+ * `wrapKey`/`tryHashMapInsert`) from `./index`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -49,8 +50,13 @@ import {
   lowerStdShimCall,
 } from "./io-shim";
 import {
-  checkReadonlyAssign,
   collectionOf,
+  tryHashMapInsert,
+  tryMapSetMethod,
+  wrapKey,
+} from "./index";
+import {
+  checkReadonlyAssign,
   flattenConcat,
   isStringConcat,
   JS_OP_TRAIT,
@@ -62,10 +68,7 @@ import {
   receiverTypeOf,
   registerOpBound,
   structTypeOfOperand,
-  tryHashMapInsert,
-  tryMapSetMethod,
-  wrapKey,
-} from "./index";
+} from "./statements";
 import { lowerCond, lowerMapKeyType, lowerType } from "./types";
 import {
   lowerNumberStatic,

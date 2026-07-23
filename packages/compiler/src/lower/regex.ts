@@ -17,7 +17,7 @@ import type {
 import { UnsupportedError } from "../errors";
 import type { HirExpr, RustType } from "../hir";
 import { translateRegex, translateReplacement } from "../regex-translate";
-import { lowerExpr } from "./index";
+import { lowerExpr } from "./expressions";
 import { peelNonNull, refExpr, rustStrLit } from "./utils";
 
 /**

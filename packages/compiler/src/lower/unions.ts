@@ -46,7 +46,9 @@ import {
   type PropSig,
   sanitizeVariantIdent,
 } from "../unions";
-import { lowerExpr, lowerType, lowerTyped } from "./index";
+import { lowerExpr } from "./expressions";
+import { lowerTyped } from "./statements";
+import { lowerType } from "./types";
 
 /**
  * Union pre-pass (series 093). Walks the whole tree once, synthesizing a

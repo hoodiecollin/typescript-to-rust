@@ -5,8 +5,10 @@
  * data `struct` and/or a behavioral `trait` with per-class forwarders; an enum
  * becomes a Rust `enum`. Includes the base-class → trait synthesis, heterogeneous
  * (dyn-dispatch) array detection, and the `implements`/`extends` trait wiring.
- * Extracted from the lowering monolith (series 109); the core lowerers, field
- * planners, and directive/param helpers are imported from `./index`.
+ * Extracted from the lowering monolith (series 109); the core lowerers and field
+ * planners come from the sibling hubs (`./expressions` / `./statements` /
+ * `./types`), and the item-level `lowerMethod`/`lowerParam`/`takeDirectives`/
+ * `programErrType` from `./index`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -45,24 +47,25 @@ import type {
   RustType,
 } from "../hir";
 import { UNIT } from "./constants";
+import { baseHopsToField, inferInitType, lowerExpr } from "./expressions";
 import {
-  baseHopsToField,
-  fieldOmitsUndefined,
-  fieldRustType,
-  inferInitType,
-  lowerExpr,
   lowerMethod,
   lowerParam,
-  lowerStatement,
-  lowerStatements,
-  lowerType,
-  lowerTyped,
-  planClassFields,
   programErrType,
-  rejectImpureInitializer,
   takeDirectives,
 } from "./index";
-import type { ClassFieldPlan, TSTypeParamDecl } from "./index";
+import {
+  fieldOmitsUndefined,
+  fieldRustType,
+  lowerStatement,
+  lowerStatements,
+  lowerTyped,
+  planClassFields,
+  rejectImpureInitializer,
+} from "./statements";
+import { lowerType } from "./types";
+import type { ClassFieldPlan } from "./statements";
+import type { TSTypeParamDecl } from "./index";
 import { makeFallible } from "./try-carrier";
 import { resultType } from "./utils";
 

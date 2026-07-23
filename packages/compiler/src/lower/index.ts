@@ -68,26 +68,11 @@ import {
   retargetItemTypes,
   synthesizeStructKey,
 } from "./types";
-// Re-export the type-lowering surface siblings reach for (they import from
-// `./index`, the orchestration + shared-lowering hub) — `./types` owns the code.
-export { collectHashEqStructs, lowerMapKeyType, lowerType } from "./types";
 import {
   collectBindingTypes,
   collectBothPresentWarnings,
   collectSteppedGenerators,
   lowerExpr,
-} from "./expressions";
-// Re-export the expression-lowering surface siblings reach for — `./expressions`
-// owns the code; siblings import it from `./index`.
-export {
-  baseHopsToField,
-  classifyElementUse,
-  elementTypeOf,
-  inferInitType,
-  isGeneratorCall,
-  lowerCall,
-  lowerExpr,
-  lowerMember,
 } from "./expressions";
 import {
   collectReadonlyFields,
@@ -96,35 +81,6 @@ import {
   lowerTyped,
   receiverTypeOf,
 } from "./statements";
-// Re-export the statement-lowering hub + the shared expression-typing predicates
-// that siblings and the expression/type lowerers reach for — `./statements` owns
-// the code; everyone imports it `from "./index"`.
-export {
-  checkReadonlyAssign,
-  fieldOmitsUndefined,
-  fieldRustType,
-  flattenConcat,
-  isStringConcat,
-  JS_OP_TRAIT,
-  lowerBlock,
-  lowerForOf,
-  lowerKey,
-  lowerStatement,
-  lowerStatements,
-  lowerTyped,
-  lowerVarDecl,
-  needsTruthy,
-  optionExprType,
-  paramTypeOfOperand,
-  planClassFields,
-  receiverTypeOf,
-  registerOpBound,
-  rejectImpureInitializer,
-  STRING_METHOD_DEFERRED,
-  structTypeOfOperand,
-  truthyCond,
-} from "./statements";
-export type { ClassFieldPlan } from "./statements";
 import { collectUnions } from "./unions";
 import type {
   HirErrorEnum,

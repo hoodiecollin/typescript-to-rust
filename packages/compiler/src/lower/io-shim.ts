@@ -3,7 +3,8 @@
  * (epics #52/#53/#54, series 084/100/101). Recognizes the blessed `@ttr/std`
  * intrinsics and JsonValue/RNG boundary shapes and lowers them to their `tslib`
  * targets. Extracted from the lowering monolith (series 109); the core lowerers
- * (`lowerExpr`/`lowerType`/`lowerTyped`/`lowerCall`) are imported from `./index`.
+ * (`lowerExpr` from `./expressions`, `lowerTyped` from `./statements`, `lowerType`
+ * from `./types`) come straight from the sibling hubs.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -17,7 +18,9 @@ import type {
 import { UnsupportedError } from "../errors";
 import type { HirArg, HirExpr, RustType } from "../hir";
 import type { StdShimName } from "../std-shim";
-import { lowerCall, lowerExpr, lowerType, lowerTyped } from "./index";
+import { lowerExpr } from "./expressions";
+import { lowerTyped } from "./statements";
+import { lowerType } from "./types";
 
 /**
  * Lower a recognized `@ttr/std` std-shim call (series 084).

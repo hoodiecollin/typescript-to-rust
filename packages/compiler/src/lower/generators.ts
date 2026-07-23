@@ -4,9 +4,10 @@
  * resumable **state-machine** transform — an intra-fn CFG split at every `yield`,
  * backward live-variable analysis to promote across-yield locals to struct
  * fields, and the `impl Iterator`/`Steppable` synthesis. Extracted from the
- * lowering monolith (series 109); the core lowerers, the shared structural
- * AST/HIR walks (`collectRefs`/`rewriteFieldRefs`/`collectDeclaredLocals`), and
- * the callback typer are imported from `./index` and `./utils`.
+ * lowering monolith (series 109); the core lowerers come from the sibling hubs
+ * (`./expressions` / `./statements` / `./types`), `lowerParam` from `./index`, and
+ * the shared structural AST/HIR walks (`collectRefs`/`rewriteFieldRefs`/
+ * `collectDeclaredLocals`) from `./utils`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -37,13 +38,10 @@ import type {
 } from "../hir";
 import { typeCbBody } from "./closures";
 import { UNIT } from "./constants";
-import {
-  isGeneratorCall,
-  lowerExpr,
-  lowerParam,
-  lowerStatement,
-  lowerType,
-} from "./index";
+import { isGeneratorCall, lowerExpr } from "./expressions";
+import { lowerParam } from "./index";
+import { lowerStatement } from "./statements";
+import { lowerType } from "./types";
 import {
   blockBody,
   capitalizeAscii,

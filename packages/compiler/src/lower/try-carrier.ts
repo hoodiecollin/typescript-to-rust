@@ -6,7 +6,9 @@
  * binds destructured error fields), with the control-flow plumbing —
  * break/continue retargeting through the carrier, closure-escape detection, and
  * `Ok`-wrapping of a now-fallible body (`makeFallible`). Extracted from the
- * lowering monolith (series 109); the core lowerers are imported from `./index`.
+ * lowering monolith (series 109); the core lowerers come from the sibling hubs
+ * (`lowerExpr` from `./expressions`, `lowerBlock`/`lowerStatements` from
+ * `./statements`, `lowerType` from `./types`) and `programErrType` from `./index`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -30,13 +32,10 @@ import type {
 import { UnsupportedError } from "../errors";
 import type { HirCatchArm, HirExpr, HirStmt, RustType } from "../hir";
 import { UNIT } from "./constants";
-import {
-  lowerBlock,
-  lowerExpr,
-  lowerStatements,
-  lowerType,
-  programErrType,
-} from "./index";
+import { lowerExpr } from "./expressions";
+import { programErrType } from "./index";
+import { lowerBlock, lowerStatements } from "./statements";
+import { lowerType } from "./types";
 import { isAstNode } from "./utils";
 
 // ── Fallibility (throw / Result propagation) ─────────────────────────────────

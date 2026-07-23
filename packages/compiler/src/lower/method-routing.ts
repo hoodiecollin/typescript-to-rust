@@ -16,7 +16,8 @@ import type {
 } from "../ast";
 import { UnsupportedError } from "../errors";
 import type { HirArg, HirExpr, RustType } from "../hir";
-import { lowerExpr, receiverTypeOf, STRING_METHOD_DEFERRED } from "./index";
+import { lowerExpr } from "./expressions";
+import { receiverTypeOf, STRING_METHOD_DEFERRED } from "./statements";
 
 /**
  * Route a *quirk-heavy* library method to the `tslib` fidelity crate (series
