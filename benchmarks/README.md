@@ -61,8 +61,10 @@ The workloads are written in the **strict TTR dialect**, which shapes them:
 - **Index loops** (`arr[i]`) must use a unit step and a `usize`-typed bound
   (`.length`) or an integer literal, or the emitted index (`usize`) and the loop
   bound (`f64`) mismatch. That is why `sieve` bounds on `sieve.length`.
-- `.length` and other `usize`-returning calls don't auto-coerce into `f64`
-  arithmetic — counts are accumulated via a `for…of` counter instead.
+- `.length` in an `f64` context is cast `(… as f64)` (series 111); in a `usize` slot
+  (index, range bound) it stays a bare `usize`. Other `usize`-returning calls still
+  don't auto-coerce. (The corpus keeps its `for…of` counters — they predate 111 and
+  stay byte-identical.)
 - `charCodeAt` is a deferred UTF-16 residual; `strbuild` scans with `split`/`indexOf`.
 - A `Map` mutated by a `&String` key hits an ownership residual, so `histogram`
   uses a numeric key.

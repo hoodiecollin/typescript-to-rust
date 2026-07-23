@@ -769,9 +769,13 @@ Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
   `char`s**, not UTF-16 code units — correct for all BMP text, diverging from JS
   only for astral (non-BMP) chars (the same documented `char`-vs-UTF-16 edge as
   string ordering). `.length` lowers to `.chars().count()`.
-- **Residual:** `.length` (a `usize`) in an `f64`-mixing binary (`s.length - 1`,
-  `i < s.length` with an `f64` counter) is a pre-existing numeric-pass gap shared
-  with array `.len()`; the clean uses are Display print and index position.
+- **`.length` in an `f64` context** (a `number` binding, `return`, arithmetic, an
+  argument) is cast `(… as f64)` — series 111 (`docs/work/111-length-f64/`) lifted the
+  former restriction that counts had to go through a `for…of` counter. A `.length` in a
+  **usize** slot (an array index, a range bound, a comparison against a usize counter)
+  stays a bare `usize` `.len()`/`.chars().count()`; only the f64 consumers are cast. The
+  cast is lossless in practice (a length past 2⁵³ is unrepresentable), the same accepted-
+  `i64` posture as the numeric divergence table below.
 
 | Trigger | Kind | Message shape |
 |---------|------|---------------|
