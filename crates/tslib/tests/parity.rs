@@ -74,3 +74,32 @@ fn pad_end_matches_js() {
     assert_eq!(string::pad_end("abc", 2.0, "*"), "abc");
     assert_eq!(string::pad_end("7", 5.0, "ab"), "7abab");
 }
+
+// index_of / last_index_of — series 107 / #92 rewrote these through str::find /
+// str::rfind (allocation-free); these lock the JS-parity semantics byte-for-byte,
+// including the char-index (not byte/UTF-16) divergence the rewrite must preserve.
+#[test]
+fn index_of_matches_js() {
+    // basic hit / miss
+    assert_eq!(string::index_of("hello world", "world", 0.0), 6.0);
+    assert_eq!(string::index_of("hello", "xyz", 0.0), -1.0);
+    assert_eq!(string::index_of("abcabc", "bc", 0.0), 1.0); // first occurrence
+    // `from` starts the search; JS clamps negative/NaN to 0, over-length to len
+    assert_eq!(string::index_of("abcabc", "bc", 2.0), 4.0); // skip the first
+    assert_eq!(string::index_of("abcabc", "bc", -5.0), 1.0); // negative → 0
+    assert_eq!(string::index_of("abcabc", "abc", 10.0), -1.0); // past end → -1
+    assert_eq!(string::index_of("abc", "", 1.0), 1.0); // empty needle → min(from,len)
+    assert_eq!(string::index_of("abc", "", 9.0), 3.0); // empty needle clamps to len
+    assert_eq!(string::index_of("abc", "abcd", 0.0), -1.0); // needle longer than hay
+    // char-index divergence: the index is by *char*, not byte (é is 2 bytes)
+    assert_eq!(string::index_of("éxyz", "xyz", 0.0), 1.0); // char index 1, not byte 2
+    assert_eq!(string::index_of("aéb", "b", 0.0), 2.0); // char index 2, not byte 3
+}
+
+#[test]
+fn last_index_of_matches_js() {
+    assert_eq!(string::last_index_of("abcabc", "bc"), 4.0); // last occurrence
+    assert_eq!(string::last_index_of("hello", "xyz"), -1.0);
+    assert_eq!(string::last_index_of("abc", ""), 3.0); // empty needle → len
+    assert_eq!(string::last_index_of("aébéc", "é"), 3.0); // char index 3, not byte 4
+}
