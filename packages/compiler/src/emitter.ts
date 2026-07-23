@@ -2281,6 +2281,14 @@ function emitExpr(expr: HirExpr): string {
       return `bumpalo::vec![in &${rid(expr.arena)}; ${expr.elements.map(emitExpr).join(", ")}]`;
     case "bumpString":
       return `bumpalo::collections::String::from_str_in(${JSON.stringify(expr.value)}, &${rid(expr.arena)})`;
+    case "plugin":
+      // Fail-loud guard (epic #95): a `"plugin"` node must be replaced with core
+      // HIR by the `refinePlugins` pass before emit. Reaching here means expansion
+      // did not run — a compiler bug — so we refuse rather than emit anything. This
+      // case adds nothing to totality: it asserts, it never emits plugin logic.
+      throw new UnsupportedError({
+        type: `unexpanded plugin node from '${expr.owner}' reached the emitter (refinePlugins did not run — compiler bug)`,
+      });
   }
 }
 

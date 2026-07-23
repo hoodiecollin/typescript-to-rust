@@ -818,7 +818,20 @@ export type HirExpr =
    * `*counter.lock().unwrap()` (`unary "*"` over a `lockAccess`). Only ever
    * produced by the task-escape pass over a `Arc<Mutex<T>>`-wrapped binding.
    */
-  | { kind: "lockAccess"; expr: HirExpr };
+  | { kind: "lockAccess"; expr: HirExpr }
+  /**
+   * The single opaque plugin node (epic #95, series 110). A plugin recognizes its
+   * owned (specifier-anchored) valid-TS shape and routes it here during lowering;
+   * `owner` is the reserved import specifier, `payload` is the plugin's own opaque
+   * data. The `refinePlugins` pass (innermost in the refine chain) replaces every
+   * such node with **core HIR** produced by the owning plugin's `expand(payload)`
+   * *before* any other pass runs, so downstream passes and the emitter only ever
+   * see ordinary core HIR. The HIR union stays **closed** — this is one shared
+   * variant, not an open extension point. The emitter's `"plugin"` case is a
+   * fail-loud guard: a surviving plugin node means expansion did not run (a
+   * compiler bug), never real plugin logic.
+   */
+  | { kind: "plugin"; owner: string; payload: unknown };
 
 /** One step of a `mapBuild`: spread a whole source, or insert a single entry. */
 export type MapBuildPart =
