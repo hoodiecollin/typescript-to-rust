@@ -78,6 +78,7 @@ import {
   isGeneratorCall,
   isObjectEntriesCall,
   lowerExpr,
+  lowerUpdateAssign,
   resolveGeneratorNext,
   tryForEach,
 } from "./expressions";
@@ -105,7 +106,6 @@ import { lowerThrow, lowerTry, rewriteFieldReads } from "./try-carrier";
 import {
   discriminatedScrutinee,
   lowerType,
-  lowerUpdateAssign,
   readsAnyMemberField,
   readsMemberField,
 } from "./types";
