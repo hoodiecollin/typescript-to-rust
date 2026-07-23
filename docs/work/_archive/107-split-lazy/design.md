@@ -184,5 +184,54 @@ and obeys the existing dialect constraints (unit-step loops, counts via `for…o
 
 ## Results
 
-_(filled in after measurement — must record whether the corpus *and* the differential
-taxonomy hold byte-identical, and the honest per-consumer effect, not just strbuild.)_
+Measured 2026-07-22 (`bun bench`, this machine). Both the differential taxonomy and the
+corpus hold **byte-identical** across node/bun/ttr (correctness gate green on all 9
+workloads; every SL spec compiles + runs identical). The lazy-split pass fires on the real
+workloads — both `strbuild` and `splitscan` emit `for … in s.split("5")` with **no**
+`tslib::string::split` / `Vec<String>`.
+
+### The streaming win is real — `splitscan` (the clean shape)
+
+`splitscan` (split + for-of that **reads** each piece) is a **TTR win in both dimensions**:
+
+| | node | bun | ttr | ttr vs bun / node |
+|---|---|---|---|---|
+| steady-state | 99.9ms | 99.1ms | **60.8ms** | **1.6× / 1.6×** |
+| end-to-end | 204ms | 107ms | **64.3ms** | **1.7× / 3.2×** |
+| peak RSS | 82.3MB | 63.2MB | **1.6MB** | 40× less |
+
+Streaming a borrowed `&str` instead of materializing thousands of one-char heap `String`s
+per round is a genuine, measurable win on a shape where the split *is* the work.
+
+### 2c does **not** flip `strbuild` — and the reason is the honest headline
+
+`strbuild` **stays a loss** (steady 81.4ms vs bun 20.0ms = 0.2×; e2e 83.6ms vs bun 34.5ms
+= 0.4×). 2c shaved it (steady ~99.4 → 81.4ms, e2e ~103 → 83.6ms) by removing the per-round
+`Vec<String>`, but did not move it out of the *loses* column. Isolating strbuild's scan
+loop into two native-binary probes (startup floor 3.4ms) shows **why** — and corrects a
+prior unmeasured claim:
+
+| probe (strbuild scan loop) | e2e min | ≈ compute |
+|---|---|---|
+| split-only (streamed, no `indexOf`) | 18.0ms | ~14.6ms |
+| `indexOf("789")`-only (no split) | 72.8ms | ~69ms |
+| full strbuild | 83.9ms | ~80ms |
+
+The pre-2c note "~99ms is the split scan" was itself **wrong** — it conflated the split
+loop with the `s.indexOf("789")` sitting next to it (line 19: a full ~80KB substring search
+returning −1, ×300). Measured, the split was ~31ms *with* the Vec and is **~14.6ms now**
+streamed; the dominant ~69ms is `indexOf`. So strbuild's real bottleneck is **substring
+search** (`tslib::string::index_of` vs Bun's native `String.prototype.indexOf`), a
+**separate** perf item unrelated to `split`. **This is the "measure the halves before
+claiming a workload is fixed" lesson a fourth time** — the design's own "flips strbuild"
+framing was the unmeasured claim; the `splitscan` corpus (added precisely to isolate the
+streaming win) is what actually proves 2c works.
+
+### Net
+
+- v1 (iteration consumer, non-empty separator) ships sound + byte-identical; the pass fires
+  where expected and stays materialized on every negative (SL-mut / SL-empty / SL-limit /
+  SL-regex / SL-esc).
+- The streaming optimization is validated by `splitscan` (**1.6× / 1.7× win**, 40× RSS).
+- `strbuild` remains a loss, now correctly attributed to `indexOf` substring search — filed
+  as **#92** under #86 (not a `split` regression; 2c improved it ~18ms).
