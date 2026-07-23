@@ -50,6 +50,7 @@ and the reports live under `benchmarks/.build/` (gitignored).
 | `sort` | comparator-callback sort of a pseudo-random array |
 | `strbuild` | string concatenation + `split`/`indexOf` scanning |
 | `splitscan` | `split` + for-of that reads each piece (lazy-split streaming) |
+| `strsearch` | `indexOf` substring search, loop-derived `from` (hoist-proof) |
 | `histogram` | number-keyed `Map` — hashing + insert/update churn |
 
 ### Dialect constraints (why the corpus looks the way it does)
@@ -107,7 +108,7 @@ integer; a fractional source, an upstream `/`, or a single fractional call site 
 modulo `f64` (no truncation). The accepted `i64` divergence (past 2⁵³) is documented in
 `docs/dialect.md`.
 
-**`strbuild`** — the one remaining loss — taught the *same lesson* a second time. Its build
+**`strbuild`** — the last workload to flip — taught the *same lesson* a second time. Its build
 loop `s = s + "abc" + (i % 10)` lowered to `s = format!("{}{}{}", s, …)` — a fresh buffer +
 full copy of the accumulator each iteration, `O(n²)`. **Series 106 (in-place string append,
 #88 sub-task 2a)** fixed exactly that: the self-append rebind now emits
@@ -135,3 +136,19 @@ cost is **substring search** (`tslib::string::index_of` vs Bun's native `indexOf
 separate item, filed as **#92**. 2c did shave strbuild ~18ms (the removed `Vec<String>`).
 All tracked under perf epic **#86**. **Lesson kept, and paid for again:** measure the halves
 before claiming a workload is fixed — `splitscan` is the honest witness for 2c, not `strbuild`.
+
+**Series 108 (#92) closed the `indexOf` gap and flipped `strbuild`.** `tslib::string::index_of`
+opened by collecting the *whole* haystack into a `Vec<char>` on every call, then hand-scanning
+char windows — for strbuild's 300 × `s.indexOf("789")` over ~80KB that is the ~69ms. The
+rewrite routes the search through Rust's native `str::find` (memchr, allocation-free) and
+converts the byte offset back to a char index (byte-identical, char-vs-UTF-16 divergence
+preserved). With it, **`strbuild` moves to a win**: e2e **83.6ms → 21.3ms (1.6× vs Bun)**,
+steady **99.4ms → 17.7ms (1.1× vs Bun)**, RSS 1.6MB. But the dedicated, *hoist-proof*
+`strsearch` workload keeps the story honest: raw substring search is **still a loss vs Bun**
+(e2e 0.6×, steady 0.3×; a win only vs Node), because JSC's `indexOf` out-searches `str::find`
+on a short needle whose first byte recurs often. So #92 killed the *allocation* pathology (that
+is what flipped `strbuild`) — the raw-throughput gap vs JSC is a separate, lower-priority
+residual (a `memchr::memmem` follow-up), not the bug it set out to fix. **First draft of
+`strsearch` was worthless** (a fixed `from` let Bun's JIT hoist the invariant search out of
+the loop — 387µs vs TTR's real 30.8ms); deriving `from` from the loop counter is what makes it
+measure search, not hoisting.
