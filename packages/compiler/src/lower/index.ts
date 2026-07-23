@@ -105,6 +105,7 @@ import { refineStrAppend } from "../str-append";
 import { refineStrings } from "../strings";
 import { refineIterFusion } from "../iter-fusion";
 import { refineSplitLazy } from "../split-lazy";
+import { refinePlugins } from "../plugins";
 import {
   createCrateTypeOracle,
   createTypeOracle,
@@ -605,7 +606,7 @@ export function lower(
             refineArena(
               refineRc(
                 refineStrAppend(
-                  refineStrings(refineNumerics(refineBitwise(module))),
+                  refineStrings(refineNumerics(refineBitwise(refinePlugins(module)))),
                 ),
                 {
                   rcScopes: analysis.rcScopes,
