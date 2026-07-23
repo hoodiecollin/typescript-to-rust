@@ -137,30 +137,47 @@ pub fn str_at(s: &str, index: f64) -> Option<String> {
 /// occurrence of `needle` at or after `from`, or `-1`. JS clamps a negative
 /// `from` to `0` (it is **not** counted from the end, unlike `slice`). An empty
 /// `needle` matches at `min(from, len)`. Char-indexed (divergence documented).
+///
+/// Substring search runs through `str::find` (memchr/two-way, no per-call
+/// allocation) instead of collecting the whole haystack into a `Vec<char>` and
+/// scanning char windows. Because both `s` and `needle` are valid UTF-8, a byte
+/// match is a char match at a char boundary, so the result is byte-identical to
+/// the char-window scan; the byte offset is converted back to a **char** index
+/// (`s[..b].chars().count()`) to preserve the documented UTF-16-vs-char divergence.
 pub fn index_of(s: &str, needle: &str, from: f64) -> f64 {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
     let f = from.trunc();
-    let start = if f.is_nan() || f < 0.0 {
-        0
-    } else if (f as usize) > len {
-        len
-    } else {
-        f as usize
-    };
+    // Char index at which the search starts (JS clamps negative/NaN to 0).
+    let start_char = if f.is_nan() || f < 0.0 { 0 } else { f as usize };
     if needle.is_empty() {
-        return start as f64;
+        // Empty needle matches at min(start, len) — clamp to the char length.
+        return start_char.min(s.chars().count()) as f64;
     }
-    let nchars: Vec<char> = needle.chars().collect();
-    if nchars.len() > len {
-        return -1.0;
+    // Byte offset of char `start_char`; `None` ⇒ start is at/past the end, where a
+    // non-empty needle cannot match (JS returns -1).
+    let byte_start = match char_to_byte(s, start_char) {
+        Some(b) => b,
+        None => return -1.0,
+    };
+    match s[byte_start..].find(needle) {
+        Some(rel) => s[..byte_start + rel].chars().count() as f64,
+        None => -1.0,
     }
-    for i in start..=(len - nchars.len()) {
-        if chars[i..i + nchars.len()] == nchars[..] {
-            return i as f64;
+}
+
+/// Byte offset of char index `n` in `s`. Returns `Some(s.len())` when `n` equals
+/// the char length (the valid one-past-the-end position), and `None` when `n` is
+/// strictly past the end. `n == 0` short-circuits to `Some(0)`, so the common
+/// `from = 0` search never walks the string.
+fn char_to_byte(s: &str, n: usize) -> Option<usize> {
+    let mut count = 0;
+    for (b, _) in s.char_indices() {
+        if count == n {
+            return Some(b);
         }
+        count += 1;
     }
-    -1.0
+    // n == char count ⇒ one-past-the-end (byte len); n > count ⇒ past the end.
+    if n == count { Some(s.len()) } else { None }
 }
 
 /// `String.prototype.lastIndexOf(needle)` — the char index of the last
@@ -168,21 +185,15 @@ pub fn index_of(s: &str, needle: &str, from: f64) -> f64 {
 /// Char-indexed (divergence documented). The 2-arg `fromIndex` form is a
 /// fail-loud residual in the dialect (never reaches here).
 pub fn last_index_of(s: &str, needle: &str) -> f64 {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
     if needle.is_empty() {
-        return len as f64;
+        return s.chars().count() as f64;
     }
-    let nchars: Vec<char> = needle.chars().collect();
-    if nchars.len() > len {
-        return -1.0;
+    // `str::rfind` gives the byte offset of the last match (allocation-free);
+    // convert to a char index to preserve the documented char-vs-UTF-16 divergence.
+    match s.rfind(needle) {
+        Some(b) => s[..b].chars().count() as f64,
+        None => -1.0,
     }
-    for i in (0..=(len - nchars.len())).rev() {
-        if chars[i..i + nchars.len()] == nchars[..] {
-            return i as f64;
-        }
-    }
-    -1.0
 }
 
 /// `String.prototype.split(sep, limit)` for a non-empty separator — like `split`
