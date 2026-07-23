@@ -14,11 +14,11 @@ import {
   SCRIPT_SCOPE,
   analyzeModule,
   isErrorSubclass,
-} from "./analysis";
-import { refineArena } from "./arena";
-import { isTypePartialEq } from "./derives";
-import type { SourceModule } from "./crate";
-import type { StdShimName } from "./std-shim";
+} from "../analysis";
+import { refineArena } from "../arena";
+import { isTypePartialEq } from "../derives";
+import type { SourceModule } from "../crate";
+import type { StdShimName } from "../std-shim";
 import type {
   ArrayExpression,
   ArrowFunctionExpression,
@@ -59,9 +59,9 @@ import type {
   VariableDeclaration,
   VariableDeclarator,
   WhileStatement,
-} from "./ast";
-import { DialectError, UnsupportedError } from "./errors";
-import { translateRegex, translateReplacement } from "./regex-translate";
+} from "../ast";
+import { DialectError, UnsupportedError } from "../errors";
+import { translateRegex, translateReplacement } from "../regex-translate";
 import type {
   Borrow,
   ElemMode,
@@ -88,23 +88,23 @@ import type {
   RustType,
   SelfRecv,
   Vis,
-} from "./hir";
-import { refineBitwise } from "./bitwise";
-import { refineNumerics } from "./numeric";
-import { refineOwnership } from "./ownership";
-import { refineTaskEscape } from "./task-escape";
-import { refineRc } from "./rc";
-import { computeAutoRc } from "./alias-escape";
-import { refineStrAppend } from "./str-append";
-import { refineStrings } from "./strings";
-import { refineIterFusion } from "./iter-fusion";
-import { refineSplitLazy } from "./split-lazy";
+} from "../hir";
+import { refineBitwise } from "../bitwise";
+import { refineNumerics } from "../numeric";
+import { refineOwnership } from "../ownership";
+import { refineTaskEscape } from "../task-escape";
+import { refineRc } from "../rc";
+import { computeAutoRc } from "../alias-escape";
+import { refineStrAppend } from "../str-append";
+import { refineStrings } from "../strings";
+import { refineIterFusion } from "../iter-fusion";
+import { refineSplitLazy } from "../split-lazy";
 import {
   createCrateTypeOracle,
   createTypeOracle,
   type OracleFile,
-} from "./type-oracle";
-import { validate } from "./validate";
+} from "../type-oracle";
+import { validate } from "../validate";
 import {
   anonDiscUnionName,
   anonNamedUnionName,
@@ -130,7 +130,7 @@ import {
   type PrimitiveUnion,
   type PropSig,
   sanitizeVariantIdent,
-} from "./unions";
+} from "../unions";
 
 // Compat re-export for test/external importers that still say `from "./lower"`
 // (and the emitter's own re-export). Both classes live in ./errors; the src
