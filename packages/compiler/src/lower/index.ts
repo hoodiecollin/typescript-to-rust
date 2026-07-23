@@ -79,8 +79,8 @@ import {
   collectStructFields,
   lowerStatements,
   lowerTyped,
-  receiverTypeOf,
 } from "./statements";
+import { receiverTypeOf } from "./typing";
 import { collectUnions } from "./unions";
 import type {
   HirErrorEnum,

@@ -6,11 +6,12 @@
  * dynamic-field bookkeeping).
  *
  * Extracted from the `lower.ts` monolith (series 109, Phase 1) verbatim — no logic
- * change; the byte-identical corpus gate proves it. Shared statement-level lowerers
- * and typing predicates it leans on (`lowerStatements`, `lowerTyped`,
- * `receiverTypeOf`, `optionExprType`, …) come from `./statements`; `lowerType`/
- * `lowerCond` from `./types`; the orchestrator-owned helpers (`collectionOf`/
- * `wrapKey`/`tryHashMapInsert`) from `./index`.
+ * change; the byte-identical corpus gate proves it. The typing predicates it leans
+ * on (`receiverTypeOf`, `optionExprType`, `isStringConcat`, `flattenConcat`,
+ * `JS_OP_TRAIT`, …) come from `./typing`; the statement lowerers (`lowerStatements`,
+ * `lowerTyped`, `checkReadonlyAssign`) from `./statements`; `lowerType`/`lowerCond`
+ * from `./types`; the orchestrator-owned helpers (`collectionOf`/`wrapKey`/
+ * `tryHashMapInsert`) from `./index`.
  */
 
 import type { ModuleAnalysis } from "../analysis";
@@ -55,20 +56,18 @@ import {
   tryMapSetMethod,
   wrapKey,
 } from "./index";
+import { checkReadonlyAssign, lowerStatements, lowerTyped } from "./statements";
 import {
-  checkReadonlyAssign,
   flattenConcat,
   isStringConcat,
   JS_OP_TRAIT,
-  lowerStatements,
-  lowerTyped,
   needsTruthy,
   optionExprType,
   paramTypeOfOperand,
   receiverTypeOf,
   registerOpBound,
   structTypeOfOperand,
-} from "./statements";
+} from "./typing";
 import { lowerCond, lowerMapKeyType, lowerType } from "./types";
 import {
   lowerNumberStatic,

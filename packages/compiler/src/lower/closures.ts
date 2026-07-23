@@ -20,7 +20,7 @@ import { UnsupportedError } from "../errors";
 import type { ElemMode, HirExpr, HirParam, HirStmt, RustType } from "../hir";
 import { CB_GLOBALS } from "./constants";
 import { classifyElementUse, lowerExpr } from "./expressions";
-import { truthyCond } from "./statements";
+import { truthyCond } from "./typing";
 import { isAstNode, isCopyRustType, sameRustType } from "./utils";
 
 // ── Callback lifting (series 048) ─────────────────────────────────────────────

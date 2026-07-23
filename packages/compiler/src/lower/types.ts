@@ -7,7 +7,7 @@
  * Extracted from the `lower.ts` monolith (series 109, Phase 1) verbatim — no logic
  * change; the byte-identical corpus gate proves it. `lowerType` is the type hub
  * (imported by 8 siblings); the shared lowerers it leans on come from the sibling
- * hubs (`lowerExpr` from `./expressions`, `truthyCond` from `./statements`) and the
+ * hubs (`lowerExpr` from `./expressions`, `truthyCond` from `./typing`) and the
  * orchestrator-owned `structKeyName`/`retargetStructKey` from `./index`.
  */
 
@@ -30,7 +30,7 @@ import type {
 import { EMPTY_TYPE_PARAMS, UNIT } from "./constants";
 import { lowerExpr } from "./expressions";
 import { retargetStructKey, structKeyName } from "./index";
-import { truthyCond } from "./statements";
+import { truthyCond } from "./typing";
 import {
   coerceScalarToUnion,
   inferScalarInner,
