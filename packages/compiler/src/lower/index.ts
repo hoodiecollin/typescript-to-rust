@@ -112,13 +112,6 @@ import {
 } from "../type-oracle";
 import { validate } from "../validate";
 
-// Compat re-export for test/external importers that still say `from "./lower"`
-// (and the emitter's own re-export). Both classes live in ./errors; the src
-// siblings (numeric/bitwise/emitter) import them from there directly, so this is
-// no longer a cycle — just a convenience surface. Migrating the remaining
-// importers to ./errors and dropping this is a Phase-2 cleanup candidate.
-export { DialectError, UnsupportedError };
-
 /**
  * A `<T, U extends I>` type-parameter declaration on a class/method/fn (series
  * 081) — the oxc `TSTypeParameterDeclaration` shape we read: each param's name and

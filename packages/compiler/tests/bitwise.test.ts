@@ -16,7 +16,8 @@ import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import { emit } from "../src/emitter";
 import { runRust } from "../src/harness";
-import { UnsupportedError, lower } from "../src/lower";
+import { lower } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 import { defineDifferential } from "./_support/differential";
 
 function compile(src: string): string {

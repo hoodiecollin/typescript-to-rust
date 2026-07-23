@@ -13,7 +13,7 @@
 
 import { expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
-import { UnsupportedError } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 
 const BOX = `class Box<T> {
   v: T;

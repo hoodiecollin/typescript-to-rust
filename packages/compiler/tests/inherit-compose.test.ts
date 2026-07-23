@@ -9,7 +9,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { UnsupportedError } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 import { compile, defineDifferential } from "./_support/differential";
 
 const ANIMAL = `class Animal {

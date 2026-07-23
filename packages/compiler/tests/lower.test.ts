@@ -9,7 +9,8 @@ import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import type { HirExpr, HirFn, HirModule, HirStmt } from "../src/hir";
-import { UnsupportedError, lower } from "../src/lower";
+import { lower } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 
 function hir(src: string): HirModule {
   return lower(parseSync("t.ts", src).program as unknown as Program);

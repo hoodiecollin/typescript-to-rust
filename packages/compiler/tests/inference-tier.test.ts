@@ -17,7 +17,7 @@ import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import { emit } from "../src/emitter";
-import { DialectError } from "../src/lower";
+import { DialectError } from "../src/errors";
 import { compile, defineDifferential } from "./_support/differential";
 
 function compileNoSource(src: string): string {

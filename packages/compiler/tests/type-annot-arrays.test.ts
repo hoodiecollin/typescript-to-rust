@@ -11,7 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
-import { UnsupportedError } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 
 defineDifferential("type-annot-arrays", [
   {

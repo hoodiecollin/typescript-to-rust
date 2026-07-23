@@ -15,7 +15,7 @@
 import { describe, expect, test } from "bun:test";
 import { compile, defineDifferential } from "./_support/differential";
 import { DialectError } from "../src/errors";
-import { UnsupportedError } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 
 const IMPORT = `import { parseJsonValue, fromJsonValue, toJsonValue, stringifyJson, JsonValue } from "@ttr/std";\n`;
 const P = `import { parseJsonValue } from "@ttr/std";\n`;

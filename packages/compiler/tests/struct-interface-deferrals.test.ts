@@ -9,7 +9,7 @@
  */
 
 import { expect, test } from "bun:test";
-import { DialectError } from "../src/lower";
+import { DialectError } from "../src/errors";
 import { compile, defineDifferential } from "./_support/differential";
 
 defineDifferential("struct-interface-deferrals", [

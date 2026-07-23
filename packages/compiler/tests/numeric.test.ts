@@ -14,7 +14,8 @@ import { describe, expect, test } from "bun:test";
 import { parseSync } from "oxc-parser";
 import type { Program } from "../src/ast";
 import type { HirExpr, HirModule, HirStmt } from "../src/hir";
-import { UnsupportedError, lower } from "../src/lower";
+import { lower } from "../src/lower";
+import { UnsupportedError } from "../src/errors";
 import { refineNumerics } from "../src/numeric";
 
 function refined(src: string): HirModule {
