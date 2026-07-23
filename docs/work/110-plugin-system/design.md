@@ -149,9 +149,50 @@ into it without loosening it:
 
 ## Dependencies / status
 
-- **Blocked on:** series 109 Phase 1 (clean `lower/` folder-module; hook lands in
-  `lower/method-routing.ts`).
+- **Blocked on:** ~~series 109 Phase 1~~ — **satisfied** (the `lower/` folder-module
+  landed on `main`). Epic #95.
 - **Touches (in-tree, once):** `hir.ts` (+`"plugin"` variant), `emitter.ts` (+fail-loud
   case), `lower/index.ts` (+`refinePlugins` at chain front), a plugin registry
   generalizing `std-shim.ts`, and the oracle dep-warming path.
-- Issue TBD (epic).
+
+## Shipped (series 110, epic #95)
+
+Specs: `specs.md` (PLUG1–PLUG17). Ground rule held: **byte-identical** existing
+corpus, emitter totality preserved (the `"plugin"` case only asserts).
+
+- **`plugins.ts`** — the `Plugin` contract type, the specifier-keyed registry,
+  `registerPlugin` (fail-loud on an incomplete four-part contract),
+  `collectPluginBindings` (the generic analog of `collectStdShimBindings`, skipping
+  the special-cased `@ttr/std` lane), `recognizePluginCall` (routes an owned call
+  to the opaque node), `isPluginCallInit` (the by-construction binding exemption),
+  and `refinePlugins` (a comprehensive post-order HIR walker that recurses into each
+  expansion so nested plugin calls resolve; an unwalked position degrades safely to
+  the emitter's fail-loud guard).
+- **Seam wiring** — `{ kind: "plugin", owner, payload }` in `hir.ts`; the fail-loud
+  `case "plugin"` in `emitter.ts`; `refinePlugins` innermost in the `lower/index.ts`
+  refine chain; `analysis.plugins` collected alongside `stdShim`; the `lowerCall`
+  routing seam (after the std-shim lane); and `validate.ts`'s import guard
+  generalized to consult the **registry** (`checkModuleImport`) — the plugin's
+  accept-set contribution is its owned specifier + export names, so no new MODELED
+  *node type* is needed for a call-shaped plugin.
+- **Reference plugin — `@ttr/plugin-leftpad`** — `leftPad(s, width, fill)` (JS
+  `padStart` fidelity), the TS oracle half at `packages/plugin-leftpad`, the Rust
+  half at `crates/ttr-plugin-leftpad` (`left_pad`, with `#[test]`s). `expand()`
+  emits a core-HIR `ttr_plugin_leftpad::left_pad` call; the crate is declared in
+  `rust-oracle/Cargo.toml` (mirroring the plugin's `crate.manifest`) so
+  `ensureDepsWarm` pre-warms it. Its arity guard is the negative reject corpus case.
+- **`@ttr/std` (task 10)** — registered as the canonical first plugin **for
+  recognition** (its specifier + exports resolve through the same registry the
+  validator consults, generalizing decision §2). Its **lowering stays special-cased**
+  (`SPECIAL_LOWERED`): the fallibility fixpoint, the `fsAsync`/`http` namespaces, and
+  the `JsonValue`/`Writer`/`HttpResponse` type intrinsics are not a pure
+  expand-to-HIR-call, so it is deliberately **not** migrated onto the generic
+  `recognize`/`expand` seam. Its `recognize`/`expand` fail loud if ever invoked.
+
+### v1 residuals (documented, not deferred silently)
+
+- A plugin result composes in every expression position and binds directly
+  (`const x = leftPad(…)`, by-construction). A plugin result nested inside a
+  *container literal* binding (`const a = [leftPad(…)]`) still needs an annotation —
+  generalizing per-intrinsic return-type inference through containers is a follow-up,
+  not required by the seam.
