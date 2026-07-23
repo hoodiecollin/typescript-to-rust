@@ -139,11 +139,12 @@ oracle, and any intentional byte drift must be reviewed as such.
   them first means dragging half the file along or leaving dangling imports. Leaves-first
   keeps every intermediate commit self-consistent and byte-clean.
 
-## Progress (Phase 1, as of 2026-07-23)
+## Progress (Phase 1, as of 2026-07-23) — core extraction COMPLETE
 
-`lower.ts` (16,465) → `lower/index.ts`, now **9,017 LOC**; **~7,450 lines / 45%
-extracted** across **13 sibling modules**, every commit byte-identical +
-typecheck-clean:
+`lower.ts` (16,465) → `lower/index.ts`, now **2,379 LOC of pure orchestration**
+(directives + items + `lower()`/`lowerCrate()`); the whole AST→HIR lowering body
+lives in **16 byte-identical sibling modules**, every commit byte-identical +
+typecheck-clean + zero unused-import residue (`tsc --noUnusedLocals`).
 
 - **Infra:** `bun run lower:snapshot` / `lower:verify` (62-entry corpus, 1,324 lines
   of emitted Rust pinned); error-import cycles broken (`numeric`/`bitwise`/`emitter`
@@ -155,35 +156,38 @@ typecheck-clean:
   `method-routing.ts` (primitive method dispatch + string/number catalog — future
   plugin-hook home), `io-shim.ts` (std-I/O + @ttr/std + JSON/RNG), `collections.ts`
   (Map/Set/Date/new + Object statics).
-- **Cluster modules (this session):** `generators.ts` (~730 — state machine +
-  straight-line fast path), `try-carrier.ts` (~1030 — throw / custom-error / try-catch
-  `?`-carrier), `classes.ts` (~1150 — class/interface/enum family + trait synthesis),
+- **Cluster modules:** `generators.ts` (~730 — state machine + straight-line fast
+  path), `try-carrier.ts` (~1030 — throw / custom-error / try-catch `?`-carrier),
+  `classes.ts` (~1150 — class/interface/enum family + trait synthesis),
   `closures.ts` (~530 — callback lifting), `arrows.ts` (~770 — pure AST→AST arrow
   normalization).
+- **Dispatch hubs (leaf→hub, last):** `types.ts` (717 — `lowerType` hub + Map/Set
+  key policy + template/update-assign/untyped-ternary), `expressions.ts` (2,416 —
+  `lowerExpr` + `lowerCall` + `lowerMember` + inference/generator-resolution
+  helpers), `statements.ts` (3,727 — `lowerStatement` hub + statement family +
+  `lowerVarDecl` + typed-literal path + class-field planning + shared
+  expression-typing predicates). Extracted in that order so each cut was
+  byte-clean; all three cross-recurse via `./index` (safe — every reference is a
+  call-time function, the same cyclic-safe pattern the leaf modules use).
 
-The module set diverged from the proposed leaf list where natural clusters were
-cleaner (added `async`/`io-shim`/`collections`/`arrows`; `date`/`object-literals`/
-`var-decl` folded or still pending). The extraction protocol that worked: cut the
-contiguous cluster verbatim → export only the externally-referenced entry points
-back → export index-side helpers the cluster still calls → repoint sibling imports
-→ prune now-dead imports → gate on `typecheck` + `lower:verify` (byte-identical).
-Shared leaf helpers are exported from `index.ts` on demand
-(lowerExpr/lowerType/lowerTyped/lowerCall/lowerStatement/lowerBlock/…).
-
-**Remaining — the dispatch hubs and their tightly-coupled lowerers, per the
-"hubs last" order:** the `Statements` section (the `lowerStatement` hub +
-`lowerVarDecl` and the rest of the statement lowerers), the `Expressions` section
-(`lowerExpr` hub + expression lowerers), `lowerCall` (the most entangled hub), and
-`lowerType` — which behaves like a hub (37 in-file uses + imported by 8 siblings),
-so it moves with the hub pass, not before it. Also small cohesive sub-clusters
-still inside index (template-string lowering, update-assign, struct-key/hash-eq
-type helpers) that can extract independently if desired. Extracting a hub means
-either moving its whole statement/expression family together or exporting a large
-surface; that is the judgement-heavy tail, left as the next decision point.
+The hub decision (the judgement-heavy tail) resolved to **the 3-way section split**
+(`statements`/`expressions`/`types`), *not* one big `dispatch.ts` — the epic's goal
+is to kill the monolith, and one 6.6k-LOC file only relocates it. The ~27-name
+cross-section weave that made the split look heavy is bounded and cyclic-safe, so it
+was a non-issue. The extraction protocol that worked: cut the contiguous section
+verbatim → add `export` to the externally-referenced entry points → **`index.ts`
+re-exports the shared lowering surface** so the ~13 siblings never change their
+`from "./index"` imports (index stays a real orchestrator + re-export hub, not a
+barrel) → source cross-hub lowerers directly from `./expressions`/`./types` →
+prune dead imports via `tsc --noUnusedLocals` → gate on `typecheck` +
+`lower:verify` (byte-identical).
 
 ## Scope / status
 
 - **Phase 1 (blocking):** #93 — extraction to `lower/`, byte-identical gate.
-  ~45% done (above); all clean leaf/cluster modules extracted, dispatch hubs remain.
-  Closing this unblocks series 110.
-- **Phase 2 (non-blocking):** #94 — per-module cleanup, behavioral gate.
+  **Core extraction complete** — the monolith is fully dissolved into 16 sibling
+  modules; `index.ts` is orchestration-only. Closing this unblocks series 110.
+- **Phase 2 (non-blocking):** #94 — per-module cleanup, behavioral gate. Natural
+  first targets: repoint siblings off the `./index` re-export hub onto owning
+  modules, and re-home the parked lowerers (template/update-assign live in
+  `types.ts` today for byte-cleanliness, not cohesion).
