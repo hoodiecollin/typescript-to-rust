@@ -67,6 +67,23 @@ import {
   ERR_STRING,
   UNIT,
 } from "./constants";
+import {
+  addSeen,
+  blockBody,
+  capitalizeAscii,
+  exprStmt,
+  isAstNode,
+  isCopyRustType,
+  isNullishExpr,
+  isScalarType,
+  peelNonNull,
+  refExpr,
+  resultType,
+  rustStrLit,
+  sameRustType,
+  setEq,
+  shortHash,
+} from "./utils";
 import { translateRegex, translateReplacement } from "../regex-translate";
 import type {
   Borrow,
@@ -157,10 +174,6 @@ interface TSTypeParamDecl {
   }[];
 }
 
-/** Wrap an ok-type in `Result<ok, err>`. */
-function resultType(ok: RustType, err: RustType): RustType {
-  return { kind: "result", ok, err };
-}
 
 /**
  * The program-wide error type: the synthesized `AppError` enum when any custom
@@ -201,17 +214,6 @@ function synthesizeErrorEnum(analysis: ModuleAnalysis): HirErrorEnum | null {
  * Lower a whole program to HIR.
  * @throws {UnsupportedError} on any construct outside the implemented dialect.
  */
-/** A Copy scalar payload (#70) needs no `Rc` wrapper around a value default. */
-function isScalarType(t: RustType): boolean {
-  return (
-    t.kind === "f64" ||
-    t.kind === "i64" ||
-    t.kind === "i128" ||
-    t.kind === "usize" ||
-    t.kind === "bool"
-  );
-}
-
 export function lower(
   program: Program,
   source?: string,
@@ -710,17 +712,6 @@ export function lower(
  * a `pub(crate) use self::<name> as __default_export;` alias (named fn/class), and
  * a default import binds it via `use crate::<mod>::__default_export as <local>;`.
  */
-/** A short deterministic FNV-1a hash (base-36) — used to give each module's value
- *  default a unique item name (#70), aliased back to `__default_export`. */
-function shortHash(s: string): string {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0).toString(36);
-}
-
 /**
  * What a crate's value-`export default`s (#70) need threaded from `lowerCrate` into
  * `lower`: the synthesized lazy-static item names to build, the consumer import
@@ -3337,18 +3328,6 @@ function buildGeneratorStateMachine(
   };
 }
 
-/** `{ type: "ExpressionStatement", expression: e }` — wrap an expr as a stmt. */
-function exprStmt(e: Expression): Statement {
-  return { type: "ExpressionStatement", expression: e } as unknown as Statement;
-}
-
-/** A statement's contained statement list (`{ … }` body, or a single statement). */
-function blockBody(s: Statement): Statement[] {
-  return s.type === "BlockStatement"
-    ? (s as BlockStatement).body
-    : [s];
-}
-
 /** Does this subtree contain a `yield` (not descending into nested functions)? */
 function containsYield(node: unknown): boolean {
   if (!node || typeof node !== "object") return false;
@@ -3497,18 +3476,6 @@ function rewriteFieldRefs<T>(node: T, fields: Set<string>): T {
     return out as unknown as T;
   }
   return node;
-}
-
-/** Set equality (same size + every member of `a` in `b`). */
-function setEq(a: Set<string>, b: Set<string>): boolean {
-  if (a.size !== b.size) return false;
-  for (const v of a) if (!b.has(v)) return false;
-  return true;
-}
-
-/** Uppercase the first ASCII letter (`range` → `Range`) for a struct name. */
-function capitalizeAscii(s: string): string {
-  return s.length === 0 ? s : (s[0] as string).toUpperCase() + s.slice(1);
 }
 
 // ── Fallibility (throw / Result propagation) ─────────────────────────────────
@@ -5713,10 +5680,6 @@ function collectionOf(
   return t && (t.kind === "hashmap" || t.kind === "set") ? t : null;
 }
 
-/** `&expr` — an explicit shared borrow at a call site (series 061). */
-function refExpr(expr: HirExpr): HirExpr {
-  return { kind: "ref", mut: false, expr };
-}
 
 /**
  * Wrap a `Map` key / `Set` element for its Rust key type: a scalar `number` key
@@ -6440,13 +6403,6 @@ function lowerAlternate(
   return lowerBlock(alt, analysis, scope);
 }
 
-function isAstNode(x: unknown): x is { type: string; [k: string]: unknown } {
-  return (
-    typeof x === "object" &&
-    x !== null &&
-    typeof (x as { type?: unknown }).type === "string"
-  );
-}
 
 /**
  * Desugar a C-style `for (init; test; update) body` into a scoped `while`:
@@ -10331,17 +10287,6 @@ function lowerLiteral(lit: Literal): HirExpr {
   throw new UnsupportedError({ type: `literal ${typeof v}` });
 }
 
-/**
- * Is this expression the JS `undefined` (an identifier) or `null` (a literal)?
- * Both are the absent optional (`None`) in the dialect's nullability model
- * (series 042).
- */
-function isNullishExpr(expr: Expression): boolean {
-  if (expr.type === "Identifier") return (expr as Identifier).name === "undefined";
-  if (expr.type === "Literal") return (expr as Literal).value === null;
-  return false;
-}
-
 function isConsoleLog(callee: Expression): boolean {
   if (callee.type !== "MemberExpression") return false;
   const m = callee as MemberExpression;
@@ -12022,29 +11967,6 @@ function isCaptureContainerType(ty: RustType): boolean {
 }
 
 /**
- * Structural `RustType` equality over the callback-body typer's surface (series
- * 085) — the flatMap array-uniformity check. Compares scalar kinds directly and
- * recurses into `vec` element types; other kinds compare by `kind` only (the
- * bounded typer produces just scalars and `vec`s here).
- */
-function sameRustType(a: RustType, b: RustType): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === "vec" && b.kind === "vec") return sameRustType(a.elem, b.elem);
-  return true;
-}
-
-/** Is a `RustType` a `Copy` scalar (forwardable by value into a lifted fn)? */
-function isCopyRustType(ty: RustType): boolean {
-  return (
-    ty.kind === "f64" ||
-    ty.kind === "usize" ||
-    ty.kind === "i64" ||
-    ty.kind === "bool" ||
-    ty.kind === "fnPtr"
-  );
-}
-
-/**
  * The bounded expression typer (series 048): types a lifted callback body over
  * the numeric surface — arithmetic → `f64`, comparison/logical → `bool`, `!` →
  * `bool`, `-x` → the operand type, a literal by its kind, an identifier by `ctx`
@@ -12778,20 +12700,6 @@ function tryTslibMethod(
 
 // ── RegExp dispatch (series 101, epic #56) ────────────────────────────────────
 
-/** A Rust string literal for an already-translated regex pattern / replacement. */
-function rustStrLit(s: string): string {
-  return (
-    '"' +
-    s
-      .replace(/\\/g, "\\\\")
-      .replace(/"/g, '\\"')
-      .replace(/\n/g, "\\n")
-      .replace(/\r/g, "\\r")
-      .replace(/\t/g, "\\t") +
-    '"'
-  );
-}
-
 /**
  * The `{pattern, flags}` of a **statically-known** regex value — a `/pat/flags`
  * literal, or `new RegExp("lit"[, "flags"])` with a string-literal pattern. `null`
@@ -12943,13 +12851,6 @@ function isRegexInit(e: Expression | null, analysis: ModuleAnalysis): boolean {
     }
   }
   return false;
-}
-
-/** Peel one non-null assertion (`x!` → `x`); identity otherwise. */
-function peelNonNull(e: Expression): Expression {
-  return e.type === "TSNonNullExpression"
-    ? (e as unknown as { expression: Expression }).expression
-    : e;
 }
 
 /** The bound name if `e` (through an optional `!`) is a first-match `matchBindings`
@@ -15369,11 +15270,6 @@ function hasBuriedF64(
     default:
       return false;
   }
-}
-
-/** A `seen` set marked non-empty (so a reached `f64` counts as "buried"). */
-function addSeen(seen: Set<string>, tag: string): Set<string> {
-  return new Set(seen).add(`${tag}#${seen.size}`);
 }
 
 /**
