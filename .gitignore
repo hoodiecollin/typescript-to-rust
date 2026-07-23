@@ -14,3 +14,6 @@ out/
 
 # benchmark build artifacts (generated crates, target, reports)
 benchmarks/.build/
+
+# series-109 lower.ts modularization byte-identical baseline (local only)
+packages/compiler/.lower-baseline.txt

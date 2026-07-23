@@ -2,7 +2,9 @@
   "name": "typescript-to-rust",
   "version": "0.0.0",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "ttr": "bun run packages/compiler/index.ts",
     "bench": "bun run benchmarks/harness/bench.ts",
@@ -14,7 +16,9 @@
     "rust:test": "cargo test",
     "check": "bun run typecheck && bun run rust:test && bun run test",
     "lint": "biome check .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "lower:snapshot": "bun run packages/compiler/scripts/lower-snapshot.ts snapshot",
+    "lower:verify": "bun run packages/compiler/scripts/lower-snapshot.ts verify"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.8.3",
