@@ -110,12 +110,15 @@ console.log(r[0]);`),
   ).toThrow(UnsupportedError);
 });
 
-test("FL2 (fail-loud) non-Copy element in reduce", () => {
+// Graduated by series 115 (#96): `reduce` over a non-Copy element type now borrows
+// the element (like map/filter), so this compiles instead of failing loud. Was FL2.
+// Cargo-backed differential coverage lives in `noncopy-adapters.test.ts` (NC1–NC3).
+test("reduce over a non-Copy element compiles (graduated, series 115)", () => {
   expect(() =>
     compile(`const strs: Array<string> = ["a", "b"];
 const r: string = strs.reduce((a, s) => a, "");
 console.log(r);`),
-  ).toThrow(UnsupportedError);
+  ).not.toThrow();
 });
 
 test("FL3 (fail-loud) unclassifiable element flow (reassigned element)", () => {
