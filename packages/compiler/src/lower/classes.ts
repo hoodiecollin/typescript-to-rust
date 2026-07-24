@@ -169,10 +169,13 @@ export function lowerInterface(
 }
 
 /**
- * Lower `enum E { A, B = 1 }` to a `HirEnum` (a C-like Rust enum). Variants must
- * be plain identifiers; an initializer, if present, must be an integer literal
- * (an explicit discriminant). `const enum` (compile-time inlining) and
- * string-valued members are rejected — each a later slice.
+ * Lower `enum E { A, B = 1 }` (numeric, series 025a) or `enum E { A = "a" }`
+ * (string, series 114) to a `HirEnum` (a C-like Rust enum). Variants must be plain
+ * identifiers. A **numeric** member's initializer is an integer discriminant; a
+ * **string** member carries its source literal as `display`, and `emitEnum`
+ * synthesizes an `impl Display`. The two kinds cannot be mixed in one enum
+ * (heterogeneous), and `const enum`/computed members stay rejected — each a
+ * separate slice.
  */
 export function lowerEnum(decl: TSEnumDeclaration): HirEnum {
   if (decl.const) {
@@ -180,30 +183,59 @@ export function lowerEnum(decl: TSEnumDeclaration): HirEnum {
       type: "`const enum` (compile-time inlining)",
     });
   }
+  // Classify the enum by its initializers up front so a heterogeneous
+  // numeric+string mix fails loud with a clear message (rather than the second
+  // kind hitting the first kind's per-member rejection).
+  let seenNumeric = false;
+  let seenString = false;
+  for (const m of decl.body.members) {
+    const init = m.initializer;
+    if (init?.type === "Literal") {
+      const v = (init as Literal).value;
+      if (typeof v === "number") seenNumeric = true;
+      else if (typeof v === "string") seenString = true;
+    }
+  }
+  if (seenNumeric && seenString) {
+    throw new UnsupportedError({
+      type: "heterogeneous (mixed numeric + string) enum member initializers",
+    });
+  }
   const variants = decl.body.members.map((m) => {
     if (m.computed || m.id.type !== "Identifier") {
       throw new UnsupportedError({ type: "computed enum member" });
     }
     let disc: number | null = null;
+    let display: string | null = null;
     if (m.initializer) {
       const init = m.initializer;
-      if (
+      if (init.type === "Literal" && typeof (init as Literal).value === "string") {
+        // String enum member (series 114) — the source literal is the Display text.
+        display = (init as Literal).value as string;
+      } else if (
         init.type !== "Literal" ||
         typeof (init as Literal).value !== "number"
       ) {
         throw new UnsupportedError({
-          type: "enum member initializer must be an integer literal (string enums unsupported)",
+          type: "enum member initializer must be an integer or string literal",
         });
+      } else {
+        const v = (init as Literal).value as number;
+        if (!Number.isInteger(v)) {
+          throw new UnsupportedError({
+            type: "enum member with a fractional discriminant",
+          });
+        }
+        disc = v;
       }
-      const v = (init as Literal).value as number;
-      if (!Number.isInteger(v)) {
-        throw new UnsupportedError({
-          type: "enum member with a fractional discriminant",
-        });
-      }
-      disc = v;
+    } else if (seenString) {
+      // A bare member in an otherwise-string enum has no source string. TS assigns
+      // it the *ordinal* as a number — a heterogeneous shape we don't model.
+      throw new UnsupportedError({
+        type: "string enum member without an explicit string initializer",
+      });
     }
-    return { name: m.id.name, disc };
+    return { name: m.id.name, disc, display };
   });
   return { kind: "enum", name: decl.id.name, variants };
 }
