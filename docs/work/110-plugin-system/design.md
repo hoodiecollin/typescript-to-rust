@@ -195,4 +195,4 @@ corpus, emitter totality preserved (the `"plugin"` case only asserts).
   (`const x = leftPad(…)`, by-construction). A plugin result nested inside a
   *container literal* binding (`const a = [leftPad(…)]`) still needs an annotation —
   generalizing per-intrinsic return-type inference through containers is a follow-up,
-  not required by the seam.
+  not required by the seam. Tracked in **#97** (`deferral-graduation`).
