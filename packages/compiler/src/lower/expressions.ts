@@ -85,6 +85,7 @@ import {
 import { coerceLiteralToUnion, unionTypeOfOperand } from "./unions";
 import {
   isAstNode,
+  isCopyRustType,
   isNullishExpr,
   peelNonNull,
   refExpr,
@@ -1325,6 +1326,7 @@ export function lowerCall(
         elem: lifted.paramNames[1] as string,
         forwarded: lifted.forwarded,
         init,
+        elemMode: lifted.elemMode,
       };
     }
     // `sort` → `tslib` (040): default (0 args) is a lexicographic string compare;
@@ -1524,6 +1526,25 @@ export function elementTypeOf(objExpr: Expression, analysis: ModuleAnalysis): Ru
   // subsumed by Tier-1 (bindingTypes), byte-for-byte unchanged.
   const rt = receiverTypeOf(objExpr, analysis);
   if (rt && rt.kind === "vec") return rt.elem;
+  // A `.split(sep)` on a String yields `Vec<String>` (series 048/108); resolve its
+  // element (`String`, a non-Copy) so a chained adapter `s.split(sep).map/filter/
+  // reduce/forEach` can lift its callback (series 115). Kept here in `elementTypeOf`
+  // — the adapter-lift entry — rather than broadening `receiverTypeOf`, whose wider
+  // surface includes the 112 lazy-`split` count/index path.
+  if (
+    objExpr.type === "CallExpression" &&
+    (objExpr as CallExpression).callee.type === "MemberExpression"
+  ) {
+    const cm = (objExpr as CallExpression).callee as MemberExpression;
+    if (
+      !cm.computed &&
+      cm.property.type === "Identifier" &&
+      (cm.property as Identifier).name === "split" &&
+      receiverTypeOf(cm.object as Expression, analysis)?.kind === "String"
+    ) {
+      return { kind: "String" };
+    }
+  }
   if (objExpr.type === "Identifier") {
     throw new UnsupportedError({
       type: `cannot lift callback: receiver '${(objExpr as Identifier).name}' is not a known array`,
@@ -1784,7 +1805,20 @@ export function tryForEach(
     name: "iter",
     args: [],
   };
-  return [{ kind: "forIn", pat: `&${param}`, iter, body }];
+  // Element binding pattern (series 057/115): `.iter()` yields `&T`. A **Copy**
+  // element destructures out by value (`for &p in …`); a **non-Copy** element
+  // (`string[]`/`object[]`) can't move an unsized/owned value through `&p`, so it
+  // binds the borrow directly (`for p in …`, `p: &T`). We consult the element type
+  // when resolvable; an unresolved receiver keeps the shipped `&p` (Copy) default.
+  let copyPattern = true;
+  try {
+    copyPattern = isCopyRustType(elementTypeOf(m.object, analysis));
+  } catch {
+    // Receiver element type not statically known — keep the Copy-assuming `&p`.
+  }
+  return [
+    { kind: "forIn", pat: copyPattern ? `&${param}` : param, iter, body },
+  ];
 }
 
 /** Is `e` a direct call to a declared generator (`g()`) — an `impl Iterator`

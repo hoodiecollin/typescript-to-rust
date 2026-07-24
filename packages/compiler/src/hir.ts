@@ -45,7 +45,7 @@ export type RustType =
   | { kind: "str" }
   | { kind: "bool" }
   | { kind: "unit" }
-  | { kind: "vec"; elem: RustType }
+  | { kind: "vec"; elem: RustType; deque?: boolean }
   /**
    * `Option<inner>` — the dialect's nullability (series 042): `T | undefined`,
    * `T | null`, and optional properties/params all map here. `undefined` and
@@ -346,6 +346,15 @@ export type HirExpr =
    * practice (a length past 2⁵³ is unrepresentable), the same accepted-`i64` posture.
    */
   | { kind: "len"; object: HirExpr; chars?: boolean; f64?: boolean }
+  /**
+   * `a.push(x)` / `a.unshift(x)` **used as a value** (series 116) — JS returns the
+   * new length. Emits `{ <recv>.<pushMethod>(<arg>); <recv>.len() as f64 }`, so the
+   * mutation happens and the block yields the new length. `pushMethod` is `push`
+   * (back, default) or `push_front` (unshift); `refineDeque` retargets a `push` on a
+   * front-mutated `VecDeque` binding to `push_back`. Statement-position push/unshift
+   * lower to a bare method instead (no wasted length), via `tryArrayMutStatement`.
+   */
+  | { kind: "arrayMutLen"; receiver: HirExpr; arg: HirExpr; pushMethod: string }
   /** array literal → `vec![...]`. */
   | { kind: "array"; elements: HirExpr[] }
   /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */
@@ -755,6 +764,12 @@ export type HirExpr =
       elem: string;
       forwarded: HirExpr[];
       init: HirExpr;
+      /**
+       * How the element is passed to the shim (series 115): `copy` derefs `*elem`
+       * out of the `.iter()` borrow (the shipped scalar path); a non-Copy element
+       * `borrow`s (`elem`, a `&T`) or `clone`s (`elem.clone()`).
+       */
+      elemMode: ElemMode;
       /** Fused (series 104): how the receiver is consumed — see `IterRecv`. */
       recvIter?: IterRecv;
     }
@@ -1508,7 +1523,14 @@ export interface HirEnum {
   name: string;
   /** Rust visibility (series 050); absent ⇒ private. */
   vis?: Vis;
-  variants: { name: string; disc: number | null }[];
+  /**
+   * `disc` is the numeric discriminant (numeric enums, series 025a). `display` is
+   * the source string value (string enums, series 114) — when any variant carries a
+   * `display` the enum is a **string enum** and `emitEnum` synthesizes an `impl
+   * Display` round-tripping each variant to its literal. The two are mutually
+   * exclusive per enum (a heterogeneous enum fails loud in `lowerEnum`).
+   */
+  variants: { name: string; disc: number | null; display?: string | null }[];
 }
 
 /**

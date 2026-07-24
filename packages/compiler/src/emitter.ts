@@ -175,6 +175,9 @@ function stdImports(items: HirItem[], main: HirStmt[]): string[] {
   // `Set<T>` → `IndexSet` (series 061), same insertion-order fidelity as `IndexMap`.
   if (usesKind(scan, "set") || usesKind(scan, "setNew"))
     imports.push("use indexmap::IndexSet;");
+  // A front-mutated array (series 116) is a `VecDeque<T>` (the `deque` flag on a
+  // `vec` type, set by `refineDeque`) — needs the std import.
+  if (usesDeque(scan)) imports.push("use std::collections::VecDeque;");
   // Scalar-`f64` map keys / set elements wrap in `OrderedFloat` (series 061); a
   // synthesized f64-bearing struct-key newtype (series 074) wraps its `f64` leaves
   // in `OrderedFloat` at hash/eq time, so it needs the import too.
@@ -398,6 +401,17 @@ function usesKind(node: unknown, kind: string): boolean {
   if (node !== null && typeof node === "object") {
     if ((node as { kind?: string }).kind === kind) return true;
     return Object.values(node).some((n) => usesKind(n, kind));
+  }
+  return false;
+}
+
+/** Whether any `vec` type in the tree is a `VecDeque` (series 116, `refineDeque`). */
+function usesDeque(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(usesDeque);
+  if (node !== null && typeof node === "object") {
+    const n = node as { kind?: string; deque?: boolean };
+    if (n.kind === "vec" && n.deque === true) return true;
+    return Object.values(node).some(usesDeque);
   }
   return false;
 }
@@ -677,11 +691,53 @@ function emitFnSig(fn: HirFn): string {
 }
 
 /**
- * A C-like `enum` → `#[derive(Clone, Copy, PartialEq)]\nenum Name { A, B = 1, … }`.
- * The derives make the value copyable and comparable (a `switch` guard needs
- * `PartialEq`); an explicit `disc` renders as `= <n>`.
+ * The `match self { … }` arms of an `impl Display` for a fieldless / newtype enum,
+ * shared by string enums (series 114) and 093 literal unions. A **newtype** variant
+ * forwards to its inner `Display`; a **fieldless** variant round-trips to its source
+ * literal (`display`), rendered as a Rust string literal via `JSON.stringify` so
+ * `{`/`"`/`\` survive.
+ */
+function emitDisplayArms(
+  enumName: string,
+  variants: { name: string; newtype?: RustType; display?: string | null }[],
+): string {
+  return variants
+    .map((v) =>
+      indent(
+        indent(
+          v.newtype
+            ? `${rid(enumName)}::${rid(v.name)}(inner) => write!(f, "{}", inner),`
+            : `${rid(enumName)}::${rid(v.name)} => write!(f, "{}", ${JSON.stringify(v.display ?? "")}),`,
+        ),
+      ),
+    )
+    .join("\n");
+}
+
+/** Wrap Display arms in an `impl std::fmt::Display for <enum>` block. */
+function emitDisplayImpl(enumName: string, arms: string): string {
+  return [
+    `impl std::fmt::Display for ${rid(enumName)} {`,
+    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {`,
+    `${INDENT}${INDENT}match self {`,
+    arms,
+    `${INDENT}${INDENT}}`,
+    `${INDENT}}`,
+    `}`,
+  ].join("\n");
+}
+
+/**
+ * A C-like `enum`. **Numeric** (series 025a) →
+ * `#[derive(Clone, Copy, PartialEq)]\nenum Name { A, B = 1, … }` (an explicit `disc`
+ * renders as `= <n>`). **String** (series 114, any variant carries a `display`) →
+ * fieldless `#[derive(Clone, Copy, Debug, PartialEq)]` + an `impl Display`
+ * round-tripping each variant to its source literal (via the shared arm generator).
+ * A fieldless enum is `Copy` regardless of what `Display` prints, so the derives
+ * match the numeric case.
  */
 function emitEnum(e: HirEnum): string {
+  const isStringEnum = e.variants.some((v) => v.display != null);
   const variants = e.variants
     .map((v) =>
       indent(
@@ -689,7 +745,11 @@ function emitEnum(e: HirEnum): string {
       ),
     )
     .join("\n");
-  return `#[derive(Clone, Copy, PartialEq)]\n${visKw(e.vis)}enum ${rid(e.name)} {\n${variants}\n}`;
+  if (!isStringEnum) {
+    return `#[derive(Clone, Copy, PartialEq)]\n${visKw(e.vis)}enum ${rid(e.name)} {\n${variants}\n}`;
+  }
+  const decl = `#[derive(Clone, Copy, Debug, PartialEq)]\n${visKw(e.vis)}enum ${rid(e.name)} {\n${variants}\n}`;
+  return `${decl}\n\n${emitDisplayImpl(e.name, emitDisplayArms(e.name, e.variants))}`;
 }
 
 /**
@@ -752,31 +812,11 @@ function emitUnionEnum(e: HirUnionEnum): string {
     .join("\n");
   const decl = `#[derive(${e.derives.join(", ")})]\n${visKw(e.vis)}enum ${rid(e.name)} {\n${variants}\n}`;
   if (!e.displayImpl) return decl;
-  const arms = e.variants
-    .map((v) =>
-      indent(
-        indent(
-          // A **newtype** variant (primitive/mixed union F, series 093/094): bind
-          // the inner and render it via `Display` — `Str(s)`/`Num(n)`/`Bool(b)` all
-          // print as JS `String(v)` does. A **fieldless** variant (literal union
-          // A/B) round-trips to its source literal.
-          v.newtype
-            ? `${rid(e.name)}::${rid(v.name)}(inner) => write!(f, "{}", inner),`
-            : `${rid(e.name)}::${rid(v.name)} => write!(f, "{}", ${JSON.stringify(v.display ?? "")}),`,
-        ),
-      ),
-    )
-    .join("\n");
-  const display = [
-    `impl std::fmt::Display for ${rid(e.name)} {`,
-    `${INDENT}fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {`,
-    `${INDENT}${INDENT}match self {`,
-    arms,
-    `${INDENT}${INDENT}}`,
-    `${INDENT}}`,
-    `}`,
-  ].join("\n");
-  return `${decl}\n\n${display}`;
+  // A newtype variant (primitive/mixed union F, series 093/094) forwards to its
+  // inner `Display`; a fieldless variant (literal union A/B) round-trips to its
+  // source literal — the shared arm generator handles both (also used by string
+  // enums, series 114).
+  return `${decl}\n\n${emitDisplayImpl(e.name, emitDisplayArms(e.name, e.variants))}`;
 }
 
 /** A `class` → its `struct` definition, an `impl` block, and (if any) `Drop`. */
@@ -2077,6 +2117,14 @@ function emitExpr(expr: HirExpr): string {
       // `usize` where the numeric pass proved a usize slot (index / range bound).
       return expr.f64 ? `(${call} as f64)` : call;
     }
+    case "arrayMutLen": {
+      // `a.push(x)`/`a.unshift(x)` as a value (series 116): mutate, then yield the
+      // new length. The receiver is emitted twice (it is a place — an ident/field —
+      // so no double side effect); `pushMethod` was resolved to `push_front` for
+      // `unshift` and retargeted to `push_back` by `refineDeque` for a `VecDeque`.
+      const r = emitReceiver(expr.receiver);
+      return `{ ${r}.${expr.pushMethod}(${emitExpr(expr.arg)}); ${r}.len() as f64 }`;
+    }
     case "field":
       return `${emitReceiver(expr.object)}.${rid(expr.name)}`;
     case "index":
@@ -2264,9 +2312,11 @@ function emitExpr(expr: HirExpr): string {
     case "iterAll":
       return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.all(|${rid(expr.elemParam)}| ${expr.cbName}(${expr.recvIter ? rid(expr.elemParam) : elemSingle(expr.elemMode, expr.elemParam)}${emitForwarded(expr.forwarded)}))`;
     case "iterReduce":
-      // `fold` receives `Item` by value: `&T` off `.iter()` (`*b`), owned `T` when
-      // fused over an iterator (bare `b`).
-      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, ${expr.recvIter ? rid(expr.elem) : `*${rid(expr.elem)}`}${emitForwarded(expr.forwarded)}))`;
+      // `fold`'s closure param binds `&T` off `.iter()`: a Copy element derefs
+      // (`*elem`), a non-Copy element forwards the borrow (`elem`) or clones a
+      // consumed one (`elem.clone()`) — `elemSingle`, series 057/115. Fused over an
+      // owned iterator (`recvIter`) the element is already owned `T` (bare `elem`).
+      return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, ${expr.recvIter ? rid(expr.elem) : elemSingle(expr.elemMode, expr.elem)}${emitForwarded(expr.forwarded)}))`;
     case "iterSortDefault":
       return `tslib::array::sort_default(&mut ${emitExpr(expr.receiver)})`;
     case "iterSortBy":
@@ -2382,7 +2432,11 @@ function emitType(ty: RustType): string {
     case "unit":
       return "()";
     case "vec":
-      return `Vec<${emitType(ty.elem)}>`;
+      // A front-mutated array (series 116) emits `VecDeque<T>` for O(1) `shift`/
+      // `unshift` (`pop_front`/`push_front`); `refineDeque` sets the `deque` flag.
+      return ty.deque
+        ? `VecDeque<${emitType(ty.elem)}>`
+        : `Vec<${emitType(ty.elem)}>`;
     case "option":
       return `Option<${emitType(ty.inner)}>`;
     case "hashmap":

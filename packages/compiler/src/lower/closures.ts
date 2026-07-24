@@ -274,7 +274,19 @@ export function typeCbBody(e: HirExpr, ctx: Map<string, RustType>): RustType {
       return t;
     }
     case "binary": {
-      if (["+", "-", "*", "/", "%"].includes(e.op)) return { kind: "f64" };
+      // `+` is string concat when a provably-String operand is present (a string
+      // literal or an ident the ctx types `String`) — so a String-accumulator
+      // `reduce` (`(acc, p) => acc + p`) types `String`, series 115. Only *certain*
+      // String operands promote; a numeric `+` with an operand `typeCbBody` can't
+      // type (e.g. `acc + p.length`, a `len` node) stays `f64` as before.
+      if (e.op === "+") {
+        const stringish = (x: HirExpr): boolean =>
+          x.kind === "string" ||
+          (x.kind === "ident" && ctx.get(x.name)?.kind === "String");
+        if (stringish(e.left) || stringish(e.right)) return { kind: "String" };
+        return { kind: "f64" };
+      }
+      if (["-", "*", "/", "%"].includes(e.op)) return { kind: "f64" };
       if (
         ["<", ">", "<=", ">=", "===", "!==", "==", "!=", "&&", "||"].includes(
           e.op,
@@ -361,21 +373,27 @@ export function liftCallback(
   const paramSet = new Set(params);
   const freeNames = freeVarsOf(bodyExpr, paramSet, analysis);
 
-  // Element passing (series 057): a Copy element forwards by value (`copy`); a
+  // Element passing (series 057/115): a Copy element forwards by value (`copy`); a
   // non-Copy element is classified read-only (`borrow`, `&T`) vs consumed (`clone`,
-  // owned `T`) from a local walk of the one body. `reduce`/`sort` (arity 2) don't
-  // yet borrow their element — a non-Copy element there stays fail-loud.
+  // owned `T`) from a local walk of the one body. The **element** param is the sole
+  // param of an arity-1 adapter (map/filter/find/some/every) or the *second* param
+  // of `reduce` (the first is the owned accumulator). `sort` (arity 2, both params
+  // are elements) is not wired for non-Copy — it stays fail-loud.
   let elemMode: ElemMode = "copy";
   if (!isCopyRustType(elemType)) {
-    if (arity !== 1) {
+    let elemParamIdx: number | null = null;
+    if (arity === 1) elemParamIdx = 0;
+    else if (method === "reduce" && arity === 2) elemParamIdx = 1;
+    if (elemParamIdx === null) {
       throw new UnsupportedError({
-        type: `'.${method}' over a non-Copy element type — element borrowing is only wired for map/filter/find/some/every (fail-loud residual, series 057)`,
+        type: `'.${method}' over a non-Copy element type — element borrowing is wired for map/filter/find/some/every/reduce (fail-loud residual, series 057/115)`,
       });
     }
-    const use = classifyElementUse(bodyExpr, params[0] as string);
+    const elemParamName = params[elemParamIdx] as string;
+    const use = classifyElementUse(bodyExpr, elemParamName);
     if (use === "unresolved") {
       throw new UnsupportedError({
-        type: `cannot classify the callback's element parameter '${params[0]}' as read-only or consumed — no silent clone (fail-loud, series 057)`,
+        type: `cannot classify the callback's element parameter '${elemParamName}' as read-only or consumed — no silent clone (fail-loud, series 057)`,
       });
     }
     elemMode = use === "consume" ? "clone" : "borrow";
@@ -395,9 +413,12 @@ export function liftCallback(
   let ownParams: HirParam[];
   if (arity === 2) {
     const firstTy = accType ?? elemType;
+    // `reduce`'s 2nd param (the element) borrows under `elemMode` (`&T` for a
+    // non-Copy read-only element, series 115); `sort`'s elements stay `copy` so
+    // `elemParamTy` is just `elemType`. The typer `ctx` always uses the value type.
     ownParams = [
       { name: params[0] as string, ty: firstTy },
-      { name: params[1] as string, ty: elemType },
+      { name: params[1] as string, ty: elemParamTy },
     ];
     ctx.set(params[0] as string, firstTy);
     ctx.set(params[1] as string, elemType);
