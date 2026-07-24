@@ -195,4 +195,7 @@ corpus, emitter totality preserved (the `"plugin"` case only asserts).
   (`const x = leftPad(…)`, by-construction). A plugin result nested inside a
   *container literal* binding (`const a = [leftPad(…)]`) still needs an annotation —
   generalizing per-intrinsic return-type inference through containers is a follow-up,
-  not required by the seam. Tracked in **#97** (`deferral-graduation`).
+  not required by the seam. **GRADUATED in series 113 (#97)**: the type oracle now
+  resolves registered plugin specifiers, so an array-literal binding of plugin calls
+  infers `Vec<String>` (incl. nested `Vec<Vec<String>>`). See
+  `docs/work/113-plugin-infer-through-containers/`.
