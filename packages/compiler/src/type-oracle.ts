@@ -30,6 +30,7 @@ import { basename, dirname, join, posix } from "node:path";
 import type * as TS from "typescript";
 import { DialectError } from "./errors";
 import type { RustType } from "./hir";
+import { typeResolvablePluginSpecifiers } from "./plugins";
 
 const require = createRequire(import.meta.url);
 const ts: typeof TS = require("typescript");
@@ -149,6 +150,34 @@ function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
   }));
   const byKey = new Map(normed.map((f) => [f.key, f]));
 
+  // ── series 113 (#97): resolve registered plugin specifiers ────────────────
+  //
+  // A pure expand-to-HIR plugin's call return type is faithfully modeled by its
+  // on-disk TS oracle package (the same source the differential harness runs
+  // under Bun). Resolve each such specifier to that entry so `leftPad(…)` types
+  // as `string` and a binding *through* a container literal infers with no
+  // container-specific logic. `@ttr/std` is excluded (`SPECIAL_LOWERED`) — see
+  // `typeResolvablePluginSpecifiers`. Degrades gracefully: if a plugin's TS
+  // package isn't resolvable in this context the specifier is skipped, and the
+  // caller keeps its existing fail-loud "without a type annotation" throw.
+  const pluginEntry = new Map<string, string>(); // specifier → canon on-disk key
+  const pluginDisk = new Map<string, string>(); // canon key → absolute on-disk path
+  for (const spec of typeResolvablePluginSpecifiers()) {
+    try {
+      const abs = require.resolve(spec);
+      const key = canon(abs);
+      pluginEntry.set(spec, key);
+      pluginDisk.set(key, abs);
+    } catch {
+      // not installed / not resolvable here — leave the specifier unresolved.
+    }
+  }
+  /** The on-disk text for a resolved plugin entry key, or undefined. */
+  const pluginText = (key: string): string | undefined => {
+    const abs = pluginDisk.get(key);
+    return abs ? readFileSync(abs, "utf8") : undefined;
+  };
+
   // Offset windows (sorted by base): a global span whose `start` falls in
   // `[base, base+len]` belongs to that file; its file-local span subtracts `base`.
   const windows = normed
@@ -170,7 +199,14 @@ function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
     containingFile: string,
   ): (TS.ResolvedModule | undefined)[] =>
     names.map((name) => {
-      if (!name.startsWith(".")) return undefined;
+      if (!name.startsWith(".")) {
+        // A registered plugin specifier (series 113) resolves to its on-disk TS
+        // oracle entry; any other bare/lib specifier stays unresolved (left to
+        // tsc's lib resolution, or harmlessly unresolved — such bindings are
+        // separately exempt from the annotation gate).
+        const entry = pluginEntry.get(name);
+        return entry ? { resolvedFileName: entry } : undefined;
+      }
       const dir = posix.dirname(canon(containingFile));
       const base = canon(posix.join(dir, name));
       for (const cand of [`${base}.ts`, posix.join(base, "index.ts"), base]) {
@@ -189,16 +225,37 @@ function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
     return m;
   };
 
+  /** A resolved plugin entry as a `SourceFile`, read from disk and cached per
+   *  program (each program owns its SourceFiles), or undefined if `f` is not a
+   *  resolved plugin entry (series 113). */
+  const pluginSf = (
+    f: string,
+    target: TS.ScriptTarget | TS.CreateSourceFileOptions,
+    cache: Map<string, TS.SourceFile>,
+  ): TS.SourceFile | undefined => {
+    const key = canon(f);
+    if (!pluginDisk.has(key)) return undefined;
+    const cached = cache.get(key);
+    if (cached) return cached;
+    const text = pluginText(key);
+    if (text === undefined) return undefined;
+    const sf = ts.createSourceFile(key, text, target, true);
+    cache.set(key, sf);
+    return sf;
+  };
+
   // ── noLib tier (fast, explicit annotations) ───────────────────────────────
   const sfs = crateSfs(ts.ScriptTarget.Latest);
+  const noLibPluginCache = new Map<string, TS.SourceFile>();
   const host: TS.CompilerHost = {
-    getSourceFile: (f) => sfs.get(canon(f)),
+    getSourceFile: (f) =>
+      sfs.get(canon(f)) ?? pluginSf(f, ts.ScriptTarget.Latest, noLibPluginCache),
     getDefaultLibFileName: () => "lib.d.ts",
     writeFile: () => {},
     getCurrentDirectory: () => "",
     getDirectories: () => [],
-    fileExists: (f) => sfs.has(canon(f)),
-    readFile: (f) => byKey.get(canon(f))?.source,
+    fileExists: (f) => sfs.has(canon(f)) || pluginDisk.has(canon(f)),
+    readFile: (f) => byKey.get(canon(f))?.source ?? pluginText(canon(f)),
     getCanonicalFileName: (f) => canon(f),
     useCaseSensitiveFileNames: () => true,
     getNewLine: () => "\n",
@@ -340,6 +397,8 @@ function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
       getSourceFile: (f, langVersion) => {
         const crate = libSfs.get(canon(f));
         if (crate) return crate;
+        const plugin = pluginSf(f, langVersion, cache);
+        if (plugin) return plugin;
         const cached = cache.get(f);
         if (cached) return cached;
         const full = libPath(f);
@@ -353,9 +412,11 @@ function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
       writeFile: () => {},
       getCurrentDirectory: () => "",
       getDirectories: () => [],
-      fileExists: (f) => libSfs.has(canon(f)) || libPath(f) !== undefined,
+      fileExists: (f) =>
+        libSfs.has(canon(f)) || pluginDisk.has(canon(f)) || libPath(f) !== undefined,
       readFile: (f) =>
         byKey.get(canon(f))?.source ??
+        pluginText(canon(f)) ??
         (libPath(f) ? readFileSync(libPath(f)!, "utf8") : undefined),
       getCanonicalFileName: (f) => canon(f),
       useCaseSensitiveFileNames: () => true,

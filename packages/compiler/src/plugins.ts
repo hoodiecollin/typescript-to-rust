@@ -146,6 +146,19 @@ export function pluginCrateManifests(): string[] {
 const SPECIAL_LOWERED = new Set<string>([STD_SHIM_SPECIFIER]);
 
 /**
+ * The specifiers whose call **return types** are faithfully modeled by their TS
+ * oracle package, so the type oracle may resolve the specifier to infer a binding
+ * *through* a container literal (series 113, #97): `const a = [leftPad(…)]` infers
+ * `Vec<String>` with no container-specific logic. Excludes `SPECIAL_LOWERED`
+ * (`@ttr/std`): its rich, partly-fallible surface must **not** auto-infer, or a
+ * currently-fail-loud shape could slip past the binding-annotation gate — its
+ * lowering (and thus its type story) stays special-cased.
+ */
+export function typeResolvablePluginSpecifiers(): string[] {
+  return [...REGISTRY.keys()].filter((s) => !SPECIAL_LOWERED.has(s));
+}
+
+/**
  * Scan a program's top-level imports and bind each local alias to its owning
  * plugin + exported name — the generic analog of `collectStdShimBindings`.
  * Recognition is by the reserved specifier only. Specifiers whose lowering is
