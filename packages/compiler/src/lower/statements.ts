@@ -81,6 +81,7 @@ import {
   resolveGeneratorNext,
   tryForEach,
 } from "./expressions";
+import { tryArrayMutStatement } from "./method-routing";
 import { collectionOf, retargetStructKey, structKeyName } from "./index";
 import type { TSTypeParamDecl } from "./index";
 import {
@@ -165,6 +166,10 @@ export function lowerStatement(
       // `xs.forEach(p => …)` lowers to a `for` loop (a statement), not an expr.
       const forEach = tryForEach(e, analysis, scope);
       if (forEach) return forEach;
+      // Statement-position `a.push(x)` / `a.unshift(x)` (series 116) — a bare mutation
+      // (the JS return length is discarded), not the length-yielding value block.
+      const arrMut = tryArrayMutStatement(e, analysis);
+      if (arrMut) return arrMut;
       // A statement-position `x++;` (series 096) — including the async/generator
       // batch for-update, which re-wraps the update as an `ExpressionStatement` —
       // lowers to a bare `x += 1` (no block-temp), supporting field/index targets.

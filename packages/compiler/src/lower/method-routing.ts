@@ -15,7 +15,7 @@ import type {
   MemberExpression,
 } from "../ast";
 import { UnsupportedError } from "../errors";
-import type { HirArg, HirExpr, RustType } from "../hir";
+import type { HirArg, HirExpr, HirStmt, RustType } from "../hir";
 import { lowerExpr } from "./expressions";
 import { receiverTypeOf, STRING_METHOD_DEFERRED } from "./typing";
 
@@ -193,7 +193,87 @@ export function arrayTailMethod(
     }
     return call;
   }
+  // `a.push(x)` / `a.unshift(x)` **used as a value** (series 116) — JS returns the
+  // new length, so lower to the length-yielding block (`arrayMutLen`). Statement
+  // position is intercepted earlier (`tryArrayMutStatement`) to a bare mutation, so
+  // reaching here means the return value is consumed. `pushMethod` holds the JS name
+  // (`push`/`unshift`); `refineDeque` retargets it (`push`→`push_back`,
+  // `unshift`→`push_front`) for a front-mutated `VecDeque` binding.
+  if (
+    (methodName === "push" || methodName === "unshift") &&
+    args.length === 1 &&
+    args[0]
+  ) {
+    return {
+      kind: "arrayMutLen",
+      receiver: lowerExpr(m.object, analysis),
+      arg: lowerExpr(args[0], analysis),
+      pushMethod: methodName,
+    };
+  }
+  // `a.splice(start, deleteCount, ...items)` (series 116) → a tslib helper that
+  // removes + inserts and **returns the removed `Vec<T>`** (JS's return value). The
+  // receiver is borrowed `&mut`; the variadic inserts collect into a `Vec<T>` (empty
+  // for a pure remove). `a.splice(start)` (delete-to-end) passes `f64::INFINITY`,
+  // which the helper clamps to `len - start`. A front-mutated (`VecDeque`) receiver
+  // is retargeted to `deque_splice` by `refineDeque`.
+  if (methodName === "splice" && args.length >= 1 && args[0]) {
+    const start: HirArg = { borrow: "owned", expr: lowerExpr(args[0], analysis) };
+    const deleteCount: HirArg =
+      args.length >= 2 && args[1]
+        ? { borrow: "owned", expr: lowerExpr(args[1], analysis) }
+        : { borrow: "owned", expr: { kind: "raw", text: "f64::INFINITY" } };
+    const items: HirExpr[] = args
+      .slice(2)
+      .map((a) => lowerExpr(a as Expression, analysis));
+    return {
+      kind: "call",
+      callee: "tslib::array::splice",
+      args: [
+        { borrow: "refMut", expr: lowerExpr(m.object, analysis) },
+        start,
+        deleteCount,
+        { borrow: "owned", expr: { kind: "array", elements: items } },
+      ],
+    };
+  }
   return null;
+}
+
+/**
+ * Statement-position `a.push(x)` / `a.unshift(x)` (series 116) → a **bare** mutation
+ * (the JS return length is discarded), so it does not lower to the length-yielding
+ * `arrayMutLen` block. Mirrors `tryForEach`: called from the `ExpressionStatement`
+ * handler before generic expression lowering. The emitted method keeps its JS name
+ * (`push`/`unshift`); `refineDeque` retargets it (`push`→`push_back`,
+ * `unshift`→`push_front`) for a front-mutated `VecDeque` binding. `null` when `e` is
+ * not a built-in push/unshift on an array receiver.
+ */
+export function tryArrayMutStatement(
+  e: Expression,
+  analysis: ModuleAnalysis,
+): HirStmt[] | null {
+  if (e.type !== "CallExpression") return null;
+  const call = e as CallExpression;
+  if (call.callee.type !== "MemberExpression") return null;
+  const m = call.callee as MemberExpression;
+  if (m.computed || m.property.type !== "Identifier") return null;
+  const name = (m.property as Identifier).name;
+  if (name !== "push" && name !== "unshift") return null;
+  if (analysis.methodNames.has(name)) return null; // a user-declared method
+  if (receiverTypeOf(m.object, analysis)?.kind !== "vec") return null;
+  if (call.arguments.length !== 1 || !call.arguments[0]) return null;
+  return [
+    {
+      kind: "expr",
+      expr: {
+        kind: "method",
+        receiver: lowerExpr(m.object, analysis),
+        name,
+        args: [lowerExpr(call.arguments[0] as Expression, analysis)],
+      },
+    },
+  ];
 }
 
 /**

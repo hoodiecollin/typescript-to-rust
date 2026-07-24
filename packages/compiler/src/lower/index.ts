@@ -105,6 +105,7 @@ import { refineStrAppend } from "../str-append";
 import { refineStrings } from "../strings";
 import { refineIterFusion } from "../iter-fusion";
 import { refineSplitLazy } from "../split-lazy";
+import { refineDeque } from "../deque";
 import { refinePlugins } from "../plugins";
 import {
   createCrateTypeOracle,
@@ -597,7 +598,8 @@ export function lower(
   // use map/filter/reduce chains. `refineSplitLazy` (series 107, #88/2c) wraps it,
   // rewriting a non-retaining `split` consumer to stream `str::split` (no `Vec`) on the
   // fully-settled `forIn` shapes.
-  const result = refineSplitLazy(
+  const result = refineDeque(
+    refineSplitLazy(
     refineIterFusion(
     fixKeyBorrows(
       fixStringScrutinees(
@@ -620,6 +622,7 @@ export function lower(
           ),
         ),
       ),
+    ),
     ),
     ),
   );
