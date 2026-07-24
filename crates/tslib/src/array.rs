@@ -1,5 +1,7 @@
 //! `Array.prototype` methods whose JS semantics diverge from the obvious Rust.
 
+use std::collections::VecDeque;
+
 /// `Array.prototype.at` — index with JS's negative-from-the-end semantics.
 ///
 /// `xs.at(i)`: for `i >= 0` returns `xs[i]`; for `i < 0` returns
@@ -101,4 +103,58 @@ pub fn flat<T: Clone>(xss: &[Vec<T>]) -> Vec<T> {
         out.extend_from_slice(inner);
     }
     out
+}
+
+/// `Array.prototype.splice(start, deleteCount, ...items)` (series 116) — remove
+/// `deleteCount` elements at `start`, insert `items` in their place, and **return
+/// the removed elements** as a new `Vec` (JS's return value). `start` uses JS
+/// clamping + negative-from-the-end semantics; `deleteCount` clamps to
+/// `[0, len - start]`. The hairy `drain`+`insert` index math lives here (one tested
+/// fn) rather than in the emitter. `items` is passed owned (the variadic inserts
+/// collected into a `Vec`); an insert-only splice passes an empty `Vec`.
+pub fn splice<T: Clone>(xs: &mut Vec<T>, start: f64, delete_count: f64, items: Vec<T>) -> Vec<T> {
+    let len = xs.len();
+    let s = slice_index(start, len);
+    let max_del = len - s;
+    let d = if delete_count < 0.0 {
+        0
+    } else {
+        (delete_count.trunc() as usize).min(max_del)
+    };
+    xs.splice(s..s + d, items).collect()
+}
+
+/// Vec↔VecDeque interop (series 116) — the shared bridge used wherever a
+/// front-mutated `VecDeque` array meets a `Vec`-shaped op (`sort`/`join`/`concat`/
+/// `flat`/a `&[T]` slice) or a `&Vec<T>` boundary, so a `VecDeque` stays first-class
+/// instead of carving a hole. `as_slice_mut` sorts/mutates in place (no realloc);
+/// `to_vec` borrows a fresh contiguous copy; `from_vec` seeds a deque literal.
+pub fn deque_as_slice_mut<T>(d: &mut VecDeque<T>) -> &mut [T] {
+    d.make_contiguous()
+}
+
+/// A fresh contiguous `Vec` copy of a `VecDeque` (for a `&Vec<T>`/`&[T]` boundary).
+pub fn deque_to_vec<T: Clone>(d: &VecDeque<T>) -> Vec<T> {
+    d.iter().cloned().collect()
+}
+
+/// Seed a `VecDeque` from an array literal's `Vec` (the construction site of a
+/// front-mutated array — `VecDeque::from` is O(1) but centralized here for clarity).
+pub fn deque_from_vec<T>(v: Vec<T>) -> VecDeque<T> {
+    VecDeque::from(v)
+}
+
+/// `Array.prototype.splice` over a front-mutated `VecDeque` (series 116) — `VecDeque`
+/// has no `splice`, so take the buffer, splice as a `Vec`, and restore. Returns the
+/// removed elements like the `Vec` form.
+pub fn deque_splice<T: Clone>(
+    d: &mut VecDeque<T>,
+    start: f64,
+    delete_count: f64,
+    items: Vec<T>,
+) -> Vec<T> {
+    let mut v: Vec<T> = std::mem::take(d).into();
+    let removed = splice(&mut v, start, delete_count, items);
+    *d = VecDeque::from(v);
+    removed
 }
