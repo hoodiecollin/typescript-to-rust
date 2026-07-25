@@ -26,7 +26,7 @@ pub fn at<T: Copy>(xs: &[T], index: f64) -> T {
 /// `[1, 2, 10]`. Confined here because Rust's `Vec::sort` needs `Ord` (which
 /// `f64` lacks) and would sort numerically anyway; sorting by `.to_string()`
 /// reproduces the JS lexicographic order exactly (`10.0.to_string() == "10"`).
-pub fn sort_default<T: ToString>(xs: &mut Vec<T>) {
+pub fn sort_default<T: ToString>(xs: &mut [T]) {
     xs.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
 }
 
@@ -34,7 +34,7 @@ pub fn sort_default<T: ToString>(xs: &mut Vec<T>) {
 /// return is mapped to an `Ordering` by its **sign** (`< 0` → the first element
 /// sorts earlier, `> 0` later, `0`/`NaN` → keep order), matching the JS contract.
 /// The comparator receives owned (Copy) elements, mirroring `(a, b) => …`.
-pub fn sort_by<T: Copy, F: Fn(T, T) -> f64>(xs: &mut Vec<T>, cmp: F) {
+pub fn sort_by<T: Copy, F: Fn(T, T) -> f64>(xs: &mut [T], cmp: F) {
     xs.sort_by(|a, b| {
         cmp(*a, *b)
             .partial_cmp(&0.0)
