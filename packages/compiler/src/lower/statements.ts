@@ -98,6 +98,7 @@ import {
 import { isPluginCallInit } from "../plugins";
 import {
   lowerDiscriminatedSwitch,
+  recognizeMixedIfLadder,
   recognizeInIfLadder,
   recognizeTypeofIfLadder,
   recognizeTypeofSwitch,
@@ -228,6 +229,12 @@ function lowerIf(
   analysis: ModuleAnalysis,
   scope: string,
 ): HirStmt {
+  // Mixed literal+object union `if`-ladder (series 118 / #82, G): `if (s === "loading")
+  // … else if (s.kind === "done") …` → a single-level `match s` over unit + struct
+  // variants. Runs before the discriminated recognizer (a mixed union's `s.kind ===`
+  // rung would otherwise be mis-read as a plain discriminated ladder, missing literals).
+  const mixedLadder = recognizeMixedIfLadder(stmt, analysis, scope);
+  if (mixedLadder) return mixedLadder;
   // Discriminated-union `if`-ladder (series 093, 1b): `if (sh.kind === "circle") …
   // else if (sh.kind === "square") …` → a variant `match sh`. Runs first.
   const ladder = recognizeUnionIfLadder(stmt, analysis, scope);

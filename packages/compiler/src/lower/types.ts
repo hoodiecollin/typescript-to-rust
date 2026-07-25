@@ -39,12 +39,15 @@ import {
 } from "./unions";
 import {
   anonDiscUnionName,
+  anonMixedUnionName,
+  anonNamedNonDiscUnionName,
   anonNamedUnionName,
   anonNonDiscUnionName,
   anonPrimUnionName,
   anonUnionName,
   classifyDiscriminatedUnion,
   classifyLiteralUnion,
+  classifyMixedLiteralObjectUnion,
   classifyNonDiscriminatedUnion,
   classifyPrimitiveUnion,
   namedRef,
@@ -182,6 +185,7 @@ export function retargetItemTypes(item: HirItem, structKeys: Set<string>): void 
 function isTypeHashEq(
   ty: RustType,
   structFields: Map<string, { name: string; ty: RustType }[]>,
+  unionEnums: Map<string, HirUnionEnum>,
   seen: Set<string> = new Set(),
 ): boolean {
   switch (ty.kind) {
@@ -193,15 +197,27 @@ function isTypeHashEq(
     case "orderedFloat":
       return true;
     case "vec":
-      return isTypeHashEq(ty.elem, structFields, seen);
+      return isTypeHashEq(ty.elem, structFields, unionEnums, seen);
     case "option":
-      return isTypeHashEq(ty.inner, structFields, seen);
+      return isTypeHashEq(ty.inner, structFields, unionEnums, seen);
     case "struct": {
       if (seen.has(ty.name)) return true;
+      const next = new Set(seen).add(ty.name);
+      // A **union** enum (series 118 / #82): eligible iff every variant payload —
+      // each newtype inner and each struct-variant field — is Hash+Eq. A fieldless
+      // literal-union variant is trivially eligible; an f64 payload (a `number`
+      // field, a primitive union's `Num`) is not.
+      const union = unionEnums.get(ty.name);
+      if (union) {
+        return union.variants.every(
+          (v) =>
+            (!v.newtype || isTypeHashEq(v.newtype, structFields, unionEnums, next)) &&
+            v.fields.every((f) => isTypeHashEq(f.ty, structFields, unionEnums, next)),
+        );
+      }
       const fields = structFields.get(ty.name);
       if (!fields) return false;
-      const next = new Set(seen).add(ty.name);
-      return fields.every((f) => isTypeHashEq(f.ty, structFields, next));
+      return fields.every((f) => isTypeHashEq(f.ty, structFields, unionEnums, next));
     }
     default:
       return false; // f64, fnPtr, … are not Hash+Eq
@@ -230,7 +246,23 @@ export function collectHashEqStructs(analysis: ModuleAnalysis): {
   const structKey = new Set<string>();
   const consider = (ty: RustType): void => {
     if (ty.kind !== "struct") return;
-    if (isTypeHashEq(ty, analysis.structFields)) {
+    // A **union** enum used as a key / element (series 118 / #82): eligible iff
+    // every variant payload is Hash+Eq → mutate its `derives` to add `Hash`,`Eq`
+    // (idempotent; `PartialEq` is already present so `Eq` is sound). The emitter
+    // just joins `derives`, so no emitter change. An f64 payload → fail-loud.
+    const union = analysis.unionEnums.get(ty.name);
+    if (union) {
+      if (isTypeHashEq(ty, analysis.structFields, analysis.unionEnums)) {
+        for (const d of ["Hash", "Eq"]) {
+          if (!union.derives.includes(d)) union.derives.push(d);
+        }
+        return;
+      }
+      throw new UnsupportedError({
+        type: `union '${ty.name}' used as a Map key / Set element has a variant payload that is not Hash+Eq (e.g. an f64/number field)`,
+      });
+    }
+    if (isTypeHashEq(ty, analysis.structFields, analysis.unionEnums)) {
       hashEq.add(ty.name);
       return;
     }
@@ -311,7 +343,19 @@ export function discriminatedScrutinee(
   const t = analysis.bindingTypes.get(objName);
   if (t?.kind !== "struct") return null;
   const info = analysis.unionEnums.get(t.name);
-  if (!info || info.discField !== (m.property as Identifier).name) return null;
+  // Not a union, or a non-discriminated union (E/F — narrowed by `in`/`typeof`
+  // elsewhere): this isn't a discriminated-`switch` scrutinee. Fall back.
+  if (!info || !info.discField) return null;
+  const prop = (m.property as Identifier).name;
+  // A discriminated union accessed on a **non-discriminant** field before it is
+  // narrowed (`sh.r` on a `Shape` union) — you can only read the discriminant on
+  // the un-narrowed value (series 118 / #82, graduating 093 §9's UN-FL4). Silently
+  // falling back emits invalid Rust (`shape.r`); fail loud with the fix instead.
+  if (info.discField !== prop) {
+    throw new UnsupportedError({
+      type: `narrow on the discriminant '${info.discField}' of union '${info.name}', not '${prop}'`,
+    });
+  }
   return { objName, info };
 }
 
@@ -562,12 +606,34 @@ export function lowerType(
           return hasNullish ? { kind: "option", inner } : inner;
         }
       }
+      // Named-struct non-discriminated union (f, series 118 / #82): `Foo | Bar`, two
+      // named structs with no shared discriminant. The anon name hashes the sorted
+      // interface-name set (a `nnd:` prefix, distinct from D's `nom:`); gate on
+      // registration via `structs` (an indistinguishable pair stays unregistered).
+      if (namedNames.every((n): n is string => n !== null)) {
+        const nm = anonNamedNonDiscUnionName(namedNames);
+        if (structs.has(nm)) {
+          const inner: RustType = { kind: "struct", name: nm };
+          return hasNullish ? { kind: "option", inner } : inner;
+        }
+      }
       // Non-discriminated object union (E): `{a} | {b}`. Fully determined by the
       // type node (all inline objects, no discriminant), so no `structs` gate.
       const nondisc = classifyNonDiscriminatedUnion(real);
       if (nondisc) {
         const inner: RustType = { kind: "struct", name: anonNonDiscUnionName(nondisc) };
         return hasNullish ? { kind: "option", inner } : inner;
+      }
+      // Mixed literal + object union (G, series 118 / #82): `"loading" | {kind:"done"}`.
+      // The anon name hashes the literal + object member set; gate on registration via
+      // `structs` (an object part without a discriminant stays unregistered → loud).
+      const mixed = classifyMixedLiteralObjectUnion(real);
+      if (mixed) {
+        const nm = anonMixedUnionName(mixed);
+        if (structs.has(nm)) {
+          const inner: RustType = { kind: "struct", name: nm };
+          return hasNullish ? { kind: "option", inner } : inner;
+        }
       }
       if (hasNullish && real.length === 1 && real[0]) {
         return { kind: "option", inner: lowerType(real[0], structs, typeParams) };

@@ -593,6 +593,138 @@ export function recognizeTypeofIfLadder(
   return { kind: "match", disc: { kind: "ident", name: objName }, arms };
 }
 
+/** The mixed literal+object union (`narrow:"mixed"`) an identifier binding refers to, else null. */
+function mixedUnionBinding(
+  name: string,
+  analysis: ModuleAnalysis,
+): HirUnionEnum | null {
+  const t = analysis.bindingTypes.get(name);
+  if (t?.kind !== "struct") return null;
+  const info = analysis.unionEnums.get(t.name);
+  return info && info.narrow === "mixed" ? info : null;
+}
+
+/**
+ * A single rung of a mixed-union `if`-ladder (series 118 / #82, G): either
+ * `x === "loading"` (value-equality on the union binding → its unit/literal variant
+ * by `display`) or `x.kind === "done"` (field-equality on the object discriminant →
+ * its struct variant by `discValue`). Returns the object name, enum, and selected
+ * variant, else null.
+ */
+function mixedRungTest(
+  test: Expression,
+  analysis: ModuleAnalysis,
+): { objName: string; info: HirUnionEnum; variant: HirUnionEnum["variants"][number] } | null {
+  if (test.type !== "BinaryExpression") return null;
+  const b = test as { operator: string; left: Expression; right: Expression };
+  if (b.operator !== "===" && b.operator !== "==") return null;
+  // Field-equality `x.kind === "done"` → the object struct variant by `discValue`.
+  const member =
+    b.left.type === "MemberExpression"
+      ? b.left
+      : b.right.type === "MemberExpression"
+        ? b.right
+        : null;
+  const memberLit = member === b.left ? b.right : b.left;
+  if (member && memberLit.type === "Literal") {
+    const m = member as unknown as {
+      computed?: boolean;
+      object: Expression;
+      property: Expression;
+    };
+    if (
+      !m.computed &&
+      m.object.type === "Identifier" &&
+      m.property.type === "Identifier"
+    ) {
+      const objName = (m.object as Identifier).name;
+      const info = mixedUnionBinding(objName, analysis);
+      if (info && info.discField === (m.property as Identifier).name) {
+        const val = String((memberLit as Literal).value);
+        const variant = info.variants.find((vt) => vt.discValue === val);
+        if (variant) return { objName, info, variant };
+      }
+    }
+  }
+  // Value-equality `x === "loading"` → the literal unit variant by `display`.
+  const id =
+    b.left.type === "Identifier"
+      ? b.left
+      : b.right.type === "Identifier"
+        ? b.right
+        : null;
+  const idLit = id === b.left ? b.right : b.left;
+  if (id && idLit.type === "Literal") {
+    const objName = (id as Identifier).name;
+    const info = mixedUnionBinding(objName, analysis);
+    if (info) {
+      const val = String((idLit as Literal).value);
+      const variant = info.variants.find(
+        (vt) => !vt.newtype && vt.fields.length === 0 && vt.display === val,
+      );
+      if (variant) return { objName, info, variant };
+    }
+  }
+  return null;
+}
+
+/**
+ * Recognize a mixed literal+object union `if`-ladder (series 118 / #82, G) → a
+ * single-level variant `match x`. Each rung is a `mixedRungTest` (value-equality on
+ * a literal, or field-equality on the object discriminant); a trailing `else`
+ * covering the one remaining variant binds it (reusing `buildDiscArm`, which handles
+ * both a unit literal variant and an object struct variant). Null when not that shape.
+ */
+export function recognizeMixedIfLadder(
+  stmt: IfStatement,
+  analysis: ModuleAnalysis,
+  scope: string,
+): HirStmt | null {
+  const first = mixedRungTest(stmt.test, analysis);
+  if (!first) return null;
+  const { objName, info } = first;
+  const arms: HirMatchArm[] = [];
+  const covered = new Set<string>();
+  let node: Statement | null = stmt;
+  let defaultBody: HirStmt[] | null = null;
+  while (node && node.type === "IfStatement") {
+    const iff = node as IfStatement;
+    const t = mixedRungTest(iff.test, analysis);
+    if (!t || t.objName !== objName || t.info.name !== info.name) return null;
+    covered.add(t.variant.name);
+    const rawBody =
+      iff.consequent.type === "BlockStatement"
+        ? (iff.consequent as BlockStatement).body
+        : [iff.consequent];
+    arms.push(
+      buildDiscArm(objName, info, t.variant, rawBody, (b) =>
+        lowerStatements(b, analysis, scope),
+      ),
+    );
+    node = iff.alternate;
+  }
+  if (node) {
+    const rawBody =
+      node.type === "BlockStatement" ? (node as BlockStatement).body : [node];
+    const uncovered = info.variants.filter((v) => !covered.has(v.name));
+    if (uncovered.length === 1) {
+      const v = uncovered[0]!;
+      covered.add(v.name);
+      arms.push(
+        buildDiscArm(objName, info, v, rawBody, (b) =>
+          lowerStatements(b, analysis, scope),
+        ),
+      );
+    } else {
+      defaultBody = lowerStatements(rawBody, analysis, scope);
+    }
+  }
+  if (defaultBody) arms.push({ guard: null, body: defaultBody });
+  else if (covered.size < info.variants.length)
+    arms.push({ guard: null, body: [] });
+  return { kind: "match", disc: { kind: "ident", name: objName }, arms };
+}
+
 /** The non-discriminated union (`narrow:"in"`) an identifier binding refers to, else null. */
 function inUnionBinding(
   name: string,
@@ -622,12 +754,24 @@ function inTest(
   return { objName, info, field: (b.left as Literal).value as string };
 }
 
-/** The variant that *uniquely* contains a field (E `in`-narrowing), else null (ambiguous). */
+/** The variant that *uniquely* contains a field (E / f `in`-narrowing), else null
+ *  (ambiguous). An inline-object variant (E) checks its own `fields`; a **newtype**
+ *  variant (f, named-non-disc) resolves the field through its inner struct's fields. */
 function variantByUniqueField(
   info: HirUnionEnum,
   field: string,
+  analysis: ModuleAnalysis,
 ): HirUnionEnum["variants"][number] | null {
-  const vs = info.variants.filter((v) => v.fields.some((f) => f.name === field));
+  const has = (v: HirUnionEnum["variants"][number]): boolean => {
+    if (v.fields.some((f) => f.name === field)) return true;
+    if (v.newtype && v.newtype.kind === "struct") {
+      return !!analysis.structFields
+        .get(v.newtype.name)
+        ?.some((f) => f.name === field);
+    }
+    return false;
+  };
+  const vs = info.variants.filter(has);
   return vs.length === 1 ? vs[0]! : null;
 }
 
@@ -653,7 +797,7 @@ export function recognizeInIfLadder(
     const iff = node as IfStatement;
     const t = inTest(iff.test, analysis);
     if (!t || t.objName !== objName || t.info.name !== info.name) return null;
-    const variant = variantByUniqueField(info, t.field);
+    const variant = variantByUniqueField(info, t.field, analysis);
     if (!variant) return null;
     covered.add(variant.name);
     const rawBody =

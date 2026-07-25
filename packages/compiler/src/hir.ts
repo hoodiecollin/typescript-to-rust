@@ -1588,12 +1588,14 @@ export interface HirUnionEnum {
    */
   discField?: string;
   /**
-   * How a value of this union is narrowed at consumption (series 093, stage 1d/1e):
-   * `"typeof"` for a primitive/mixed union F (`typeof x === "string"`), `"in"` for a
-   * non-discriminated object union E (`"a" in x`). Absent for literal (match on the
-   * value) and discriminated (`discField`) unions.
+   * How a value of this union is narrowed at consumption (series 093, stage 1d/1e;
+   * series 118): `"typeof"` for a primitive/mixed union F (`typeof x === "string"`),
+   * `"in"` for a non-discriminated object union E or a named-non-discriminated union
+   * f (`"a" in x`), `"mixed"` for a mixed literal+object union G (a single-level match
+   * fed by value-equality `x === "lit"` and field-equality `x.kind === "k"` rungs).
+   * Absent for literal (match on the value) and discriminated (`discField`) unions.
    */
-  narrow?: "typeof" | "in";
+  narrow?: "typeof" | "in" | "mixed";
 }
 
 /**
