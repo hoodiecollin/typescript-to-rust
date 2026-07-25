@@ -414,13 +414,13 @@ console.log(pick({ a: 1 }), pick({ b: 2 }), pick({ c: 3 }));`,
 ]);
 
 // ── Fail-loud residual boundary (design §9) ───────────────────────────────────
-test("UN-FL1 recursive union (self-referential field) stays fail-loud → follow-up", () => {
-  // A variant field referencing the union itself isn't registered when its fields
-  // lower, so it fails loud (a follow-up adds pre-registration + `Box`, design §9).
+test("UN-FL1 recursive union (self-referential field) stays fail-loud → #59", () => {
+  // A variant field referencing the union itself needs #59's boxed recursive-value
+  // model; series 118 (#82) tailors the message to point there (was a bare throw).
   const src = `type Tree = { kind: "leaf"; v: number } | { kind: "node"; child: Tree };
 const t: Tree = { kind: "leaf", v: 1 };
 console.log("ok");`;
-  expect(() => compile(src)).toThrow();
+  expect(() => compile(src)).toThrow(/recursive[\s\S]*#59/);
 });
 
 test("UN-FL5 non-union non-trivial type alias (tuple) stays fail-loud", () => {
@@ -430,11 +430,12 @@ console.log(p[0]);`;
   expect(() => compile(src)).toThrow();
 });
 
-test("UN-FL6 mixed literal + object union (G) stays fail-loud with a precise message", () => {
-  // `"loading" | { kind: "done" }` mixes an equality-narrowed literal with a
-  // `.kind`-narrowed object — irregular two-level narrowing, a design §9 residual.
+test("UN-FL6 mixed literal + object union (G) is now supported (graduated by #82)", () => {
+  // Series 118 (#82) graduated G to a single-level mixed enum (unit variants for the
+  // literals + struct variants for the discriminated objects). Differentials live in
+  // `union-residuals.test.ts` (UNR-MIX*); this only pins that it no longer throws.
   const src = `type S = "loading" | { kind: "done"; data: number };
 const s: S = "loading";
 console.log("ok");`;
-  expect(() => compile(src)).toThrow(/mixes literal and object members/);
+  expect(() => compile(src)).not.toThrow();
 });
