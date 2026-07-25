@@ -27,6 +27,7 @@ import type {
   Literal,
   MemberExpression,
   MethodDefinition,
+  ObjectExpression,
   ObjectPattern,
   Program,
   Statement,
@@ -81,7 +82,11 @@ import {
   lowerTyped,
 } from "./statements";
 import { receiverTypeOf } from "./typing";
-import { collectUnions } from "./unions";
+import {
+  coerceLiteralToUnion,
+  coerceObjectToUnion,
+  collectUnions,
+} from "./unions";
 import type {
   HirErrorEnum,
   HirExpr,
@@ -1909,6 +1914,31 @@ export function retargetStructKey(node: unknown, structKeys: Set<string>): void 
  * `has`→`contains`, `delete`→`shift_remove`. A scalar-number key is
  * `OrderedFloat`-wrapped; lookups borrow the key (`&k`).
  */
+/**
+ * Coerce a raw `Map`/`Set` key/element argument into a **union** variant when the
+ * key type is a registered union (series 118 / #82): a string/number literal key →
+ * its unit/literal variant (`"n"` → `Dir::N`), an object-literal key → its struct
+ * variant (`{kind:"a",name:"x"}` → `K::A { name: "x" }`). Returns null when the key
+ * type is not a union or the argument is not a coercible literal/object (the caller
+ * falls back to `wrapKey(lowerExpr(...))`). The produced variant is a fresh owned
+ * value: an insert moves it, a lookup borrows the temporary (`&Dir::N`).
+ */
+function coerceUnionKey(
+  raw: Expression,
+  keyTy: RustType,
+  analysis: ModuleAnalysis,
+): HirExpr | null {
+  if (keyTy.kind !== "struct") return null;
+  const info = analysis.unionEnums.get(keyTy.name);
+  if (!info) return null;
+  const lit = coerceLiteralToUnion(raw, keyTy.name, analysis);
+  if (lit) return lit;
+  if (raw.type === "ObjectExpression") {
+    return coerceObjectToUnion(raw as ObjectExpression, info, analysis);
+  }
+  return null;
+}
+
 export function tryMapSetMethod(
   methodName: string,
   m: MemberExpression,
@@ -1918,16 +1948,32 @@ export function tryMapSetMethod(
   const ty = collectionOf(m.object, analysis);
   if (!ty || (ty.kind !== "hashmap" && ty.kind !== "set")) return null;
   const receiver = lowerExpr(m.object, analysis);
-  const args = call.arguments.map((a) => lowerExpr(a as Expression, analysis));
+  // A union-typed key/element (series 118 / #82): coerce the *raw* first argument to
+  // its variant, bypassing `wrapKey` (which only wraps `OrderedFloat`/structKey). A
+  // union **object-literal** key can't be lowered bare (`lowerExpr` rejects a
+  // struct-shaped object literal without a Record type), so lower arg0 only when it
+  // is NOT a union key; the value arg (`set`) and any others lower normally.
+  const rawArg0 = call.arguments[0] as Expression | undefined;
+  const unionKeyTy = ty.kind === "hashmap" ? ty.key : ty.elem;
+  const unionKey =
+    rawArg0 !== undefined ? coerceUnionKey(rawArg0, unionKeyTy, analysis) : null;
+  const loweredArg0 =
+    rawArg0 !== undefined && !unionKey ? lowerExpr(rawArg0, analysis) : undefined;
+  const valueArg =
+    call.arguments[1] !== undefined
+      ? lowerExpr(call.arguments[1] as Expression, analysis)
+      : undefined;
   if (ty.kind === "hashmap") {
     // `insert` moves the key (the map owns it); `get`/`has`/`delete` build a
     // throwaway `&<Struct>Key` temporary, so an f64-struct key is cloned into it
     // (series 074; see `wrapKey`) — the caller keeps its value.
-    const key = args[0] !== undefined ? wrapKey(args[0], ty.key) : undefined;
+    const key =
+      unionKey ?? (loweredArg0 !== undefined ? wrapKey(loweredArg0, ty.key) : undefined);
     const lookupKey =
-      args[0] !== undefined ? wrapKey(args[0], ty.key, true) : undefined;
-    if (methodName === "set" && args.length === 2 && key && args[1]) {
-      return { kind: "method", receiver, name: "insert", args: [key, args[1]] };
+      unionKey ??
+      (loweredArg0 !== undefined ? wrapKey(loweredArg0, ty.key, true) : undefined);
+    if (methodName === "set" && call.arguments.length === 2 && key && valueArg) {
+      return { kind: "method", receiver, name: "insert", args: [key, valueArg] };
     }
     if (methodName === "get" && lookupKey) {
       return {
@@ -1961,9 +2007,11 @@ export function tryMapSetMethod(
     return null;
   }
   // Set<T>
-  const elem = args[0] !== undefined ? wrapKey(args[0], ty.elem) : undefined;
+  const elem =
+    unionKey ?? (loweredArg0 !== undefined ? wrapKey(loweredArg0, ty.elem) : undefined);
   const lookupElem =
-    args[0] !== undefined ? wrapKey(args[0], ty.elem, true) : undefined;
+    unionKey ??
+    (loweredArg0 !== undefined ? wrapKey(loweredArg0, ty.elem, true) : undefined);
   if (methodName === "add" && elem) {
     return { kind: "method", receiver, name: "insert", args: [elem] };
   }

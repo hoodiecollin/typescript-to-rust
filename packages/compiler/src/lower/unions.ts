@@ -24,13 +24,17 @@ import { UnsupportedError } from "../errors";
 import type { HirExpr, HirUnionEnum, RustType } from "../hir";
 import {
   anonDiscUnionName,
+  anonMixedUnionName,
+  anonNamedNonDiscUnionName,
   anonNamedUnionName,
   anonNonDiscUnionName,
   anonPrimUnionName,
   anonUnionName,
   classifyDiscriminatedUnion,
   classifyLiteralUnion,
+  classifyMixedLiteralObjectUnion,
   classifyNamedDiscriminatedUnion,
+  classifyNamedNonDiscriminatedUnion,
   classifyNonDiscriminatedUnion,
   classifyPrimitiveUnion,
   type DiscriminatedUnion,
@@ -38,8 +42,11 @@ import {
   isMixedLiteralObjectUnion,
   isNullishMember,
   literalVariants,
+  mentionsTypeName,
   type LiteralMember,
+  type MixedUnion,
   type NamedDiscriminatedUnion,
+  type NamedNonDiscriminatedUnion,
   type NonDiscriminatedUnion,
   type PrimMember,
   type PrimitiveUnion,
@@ -78,12 +85,28 @@ export function collectUnions(program: Program, analysis: ModuleAnalysis): void 
     const decl = stmt as unknown as {
       id: { name: string };
       typeAnnotation: TSType;
+      typeParameters?: { params?: unknown[] };
     };
     const rhs = decl.typeAnnotation;
     if (rhs.type === "TSUnionType") {
       const real = (rhs as unknown as { types: TSType[] }).types.filter(
         (m) => !isNullishMember(m),
       );
+      // (b) Generic union (type parameters × unions) — needs #59's generics work.
+      // Detected before the classifier cascade so a bare `T` member doesn't first
+      // trip `lowerType`'s generic "unsupported type" error (series 118 / #82).
+      if ((decl.typeParameters?.params?.length ?? 0) > 0) {
+        throw new UnsupportedError({
+          type: `generic union '${decl.id.name}' (type parameters × unions) is not modeled — tracked in #59`,
+        });
+      }
+      // (a) Recursive / self-referential union — a member (field) references the
+      // alias itself; needs #59's boxed recursive-value model (series 118 / #82).
+      if (real.some((m) => mentionsTypeName(m, decl.id.name))) {
+        throw new UnsupportedError({
+          type: `recursive/self-referential union '${decl.id.name}' needs the boxed recursive-value model — tracked in #59`,
+        });
+      }
       const lits = classifyLiteralUnion(real);
       if (lits) {
         aliasUnionNodes.add(rhs);
@@ -108,18 +131,36 @@ export function collectUnions(program: Program, analysis: ModuleAnalysis): void 
         registerPrimitiveUnion(decl.id.name, prim, analysis);
         continue;
       }
+      const namedNonDisc = classifyNamedNonDiscriminatedUnion(
+        real,
+        resolveInterface,
+      );
+      if (namedNonDisc) {
+        aliasUnionNodes.add(rhs);
+        registerNamedNonDiscriminatedUnion(decl.id.name, namedNonDisc, analysis);
+        continue;
+      }
       const nondisc = classifyNonDiscriminatedUnion(real);
       if (nondisc) {
         aliasUnionNodes.add(rhs);
         registerNonDiscriminatedUnion(decl.id.name, nondisc, analysis);
         continue;
       }
-      // Mixed literal + object members (G, `"loading" | { kind: "done" }`) —
-      // irregular two-level narrowing, a documented residual (design §9). Precise
-      // fail-loud beats a downstream "unresolved type" error.
+      // Mixed literal + object members (G, `"loading" | { kind: "done" }`) — a
+      // single-level mixed enum (series 118 / #82, graduating 093 §9's UN-FL6): unit
+      // variants for the literals + struct variants for the (discriminated) objects.
+      const mixed = classifyMixedLiteralObjectUnion(real);
+      if (mixed) {
+        aliasUnionNodes.add(rhs);
+        registerMixedUnion(decl.id.name, mixed, analysis);
+        continue;
+      }
+      // A mixed literal+object union whose object part has **no** shared discriminant
+      // (`"x" | { a: number }`) stays fail-loud — narrowing can't select the object
+      // variant without a `.kind`-style field.
       if (isMixedLiteralObjectUnion(real)) {
         throw new UnsupportedError({
-          type: `union alias '${decl.id.name}' mixes literal and object members (e.g. \`"loading" | { kind: "done" }\`) — not modeled yet (series 093 residual). Give every member a shared discriminant field, or split the object part into its own discriminated-union alias`,
+          type: `union alias '${decl.id.name}' mixes literal and object members but the object part has no shared discriminant — give the object members a shared \`kind\`/\`type\` field (e.g. \`"loading" | { kind: "done"; … }\`)`,
         });
       }
       // Another unmodeled union shape (e.g. two named structs with no discriminant)
@@ -159,9 +200,24 @@ export function collectUnions(program: Program, analysis: ModuleAnalysis): void 
       registerPrimitiveUnion(anonPrimUnionName(prim), prim, analysis);
       return;
     }
+    const namedNonDisc = classifyNamedNonDiscriminatedUnion(real, resolveInterface);
+    if (namedNonDisc) {
+      const nm = anonNamedNonDiscUnionName(
+        namedNonDisc.members.map((m) => m.interfaceName),
+      );
+      registerNamedNonDiscriminatedUnion(nm, namedNonDisc, analysis);
+      return;
+    }
     const nondisc = classifyNonDiscriminatedUnion(real);
-    if (nondisc)
+    if (nondisc) {
       registerNonDiscriminatedUnion(anonNonDiscUnionName(nondisc), nondisc, analysis);
+      return;
+    }
+    // Mixed literal + object union (G, series 118 / #82) — an inline one was
+    // silently skipped before; register it (an object-part-without-discriminant
+    // inline union still falls through to fail-loud at the use site, as before).
+    const mixed = classifyMixedLiteralObjectUnion(real);
+    if (mixed) registerMixedUnion(anonMixedUnionName(mixed), mixed, analysis);
   });
 }
 
@@ -231,6 +287,35 @@ export function registerNamedDiscriminatedUnion(
     displayImpl: false,
     derives: ["Clone", "Debug", "PartialEq"],
     discField: named.discField,
+  });
+  analysis.structs.add(name);
+}
+
+/**
+ * Register (idempotently) a named-struct non-discriminated union → an `in`-narrowed
+ * **newtype**-variant enum (series 118 / #82, case f): `FB::Foo(Foo)` narrowed by
+ * `"field" in x`. D's payload model (nominal inner struct) with E's narrow. Derives
+ * `Clone, Debug, PartialEq`; no `discField`.
+ */
+export function registerNamedNonDiscriminatedUnion(
+  name: string,
+  u: NamedNonDiscriminatedUnion,
+  analysis: ModuleAnalysis,
+): void {
+  if (analysis.unionEnums.has(name)) return;
+  const variants = u.members.map((m) => ({
+    name: m.interfaceName,
+    fields: [],
+    newtype: { kind: "struct", name: m.interfaceName } as RustType,
+    display: null,
+  }));
+  analysis.unionEnums.set(name, {
+    kind: "unionEnum",
+    name,
+    variants,
+    displayImpl: false,
+    derives: ["Clone", "Debug", "PartialEq"],
+    narrow: "in",
   });
   analysis.structs.add(name);
 }
@@ -307,6 +392,49 @@ export function registerNonDiscriminatedUnion(
     displayImpl: false,
     derives: ["Clone", "Debug", "PartialEq"],
     narrow: "in",
+  });
+  analysis.structs.add(name);
+}
+
+/**
+ * Register (idempotently) a mixed literal + object union → a single enum with
+ * **unit** variants for the literals (a `display` for `x === "lit"` matching) and
+ * **struct** variants for the (discriminated) objects (series 118 / #82, case G).
+ * `narrow:"mixed"` + `discField` drive the single-level mixed `match`. Derives
+ * `Clone, Debug, PartialEq` (a struct field → no `Copy`); no `Display`.
+ */
+export function registerMixedUnion(
+  name: string,
+  u: MixedUnion,
+  analysis: ModuleAnalysis,
+): void {
+  if (analysis.unionEnums.has(name)) return;
+  // Unit variants (literals) carry a `display` for equality mapping; the object
+  // struct variants carry a `discValue` for `.kind`/construction selection.
+  const literalVs = literalVariants(u.literals);
+  const seen = new Map<string, number>();
+  const objectVs = u.objects.map((m) => {
+    const base = sanitizeVariantIdent(m.discValue);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return {
+      name: n === 1 ? base : `${base}${n}`,
+      fields: m.fields.map((f) => ({
+        name: f.name,
+        ty: lowerType(f.ann, analysis.structs),
+      })),
+      display: null,
+      discValue: m.discValue,
+    };
+  });
+  analysis.unionEnums.set(name, {
+    kind: "unionEnum",
+    name,
+    variants: [...literalVs, ...objectVs],
+    displayImpl: false,
+    derives: ["Clone", "Debug", "PartialEq"],
+    narrow: "mixed",
+    discField: u.discField,
   });
   analysis.structs.add(name);
 }
@@ -445,14 +573,30 @@ export function coerceObjectToUnion(
     };
   }
 
-  // Non-discriminated (E): match the object's exact field-name set to a variant.
+  // Non-discriminated (E / f): match the object's exact field-name set to a variant.
+  // An inline-object variant (E) matches on its own `fields`; a **newtype** variant
+  // (f, named-non-disc) matches on its inner struct's fields and builds
+  // `FB::Foo(Foo{…})` from the whole object literal.
   if (info.narrow === "in") {
     const keys = [...propByName.keys()].sort();
     const variant = info.variants.find((vt) => {
-      const set = vt.fields.map((f) => f.name).sort();
+      const set = (
+        vt.newtype && vt.newtype.kind === "struct"
+          ? (analysis.structFields.get(vt.newtype.name) ?? []).map((f) => f.name)
+          : vt.fields.map((f) => f.name)
+      ).sort();
       return set.length === keys.length && set.every((n, i) => n === keys[i]);
     });
     if (!variant) return null;
+    if (variant.newtype) {
+      return {
+        kind: "enumVariant",
+        enumName: info.name,
+        variant: variant.name,
+        fields: [],
+        newtype: lowerTyped(obj, variant.newtype, analysis),
+      };
+    }
     return {
       kind: "enumVariant",
       enumName: info.name,

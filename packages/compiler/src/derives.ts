@@ -35,6 +35,19 @@ export function buildStructTable(items: HirItem[]): StructTable {
   for (const item of items) {
     if (item.kind === "struct" || item.kind === "class") {
       table.set(item.name, item.fields);
+    } else if (item.kind === "unionEnum") {
+      // A union enum's cloneability = every variant payload cloneable (series 118 /
+      // #82). Flatten each variant's struct fields + newtype inner into a synthetic
+      // field list so the shared struct-cloneability recursion (`isStructCloneable`)
+      // covers a union used as a Map key / Set element or held as a struct field —
+      // otherwise the ownership pass never sees it as cloneable-movable and skips a
+      // required clone (E0382 on `m.insert(k, …)` then `m.get(&k)`).
+      const fields: { name: string; ty: RustType }[] = [];
+      for (const v of item.variants) {
+        for (const f of v.fields) fields.push({ name: f.name, ty: f.ty });
+        if (v.newtype) fields.push({ name: `__${v.name}`, ty: v.newtype });
+      }
+      table.set(item.name, fields);
     }
   }
   return table;
