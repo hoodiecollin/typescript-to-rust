@@ -2118,12 +2118,16 @@ function emitExpr(expr: HirExpr): string {
       return expr.f64 ? `(${call} as f64)` : call;
     }
     case "arrayMutLen": {
-      // `a.push(x)`/`a.unshift(x)` as a value (series 116): mutate, then yield the
-      // new length. The receiver is emitted twice (it is a place — an ident/field —
-      // so no double side effect); `pushMethod` was resolved to `push_front` for
-      // `unshift` and retargeted to `push_back` by `refineDeque` for a `VecDeque`.
+      // `a.push(x, …)`/`a.unshift(x, …)` as a value (series 116/117): mutate for each
+      // arg, then yield the new length. The receiver is emitted repeatedly (it is a
+      // place — an ident/field — so no double side effect); `pushMethod` was resolved
+      // to `push_front` for `unshift` and retargeted to `push_back` by `refineDeque`
+      // for a `VecDeque` (which also reversed `args` for a multi-arg `push_front`).
       const r = emitReceiver(expr.receiver);
-      return `{ ${r}.${expr.pushMethod}(${emitExpr(expr.arg)}); ${r}.len() as f64 }`;
+      const pushes = expr.args
+        .map((a) => `${r}.${expr.pushMethod}(${emitExpr(a)}); `)
+        .join("");
+      return `{ ${pushes}${r}.len() as f64 }`;
     }
     case "field":
       return `${emitReceiver(expr.object)}.${rid(expr.name)}`;
@@ -2317,10 +2321,21 @@ function emitExpr(expr: HirExpr): string {
       // consumed one (`elem.clone()`) — `elemSingle`, series 057/115. Fused over an
       // owned iterator (`recvIter`) the element is already owned `T` (bare `elem`).
       return `${emitExpr(expr.receiver)}${iterPrefix(expr.recvIter)}.fold(${emitExpr(expr.init)}, |${rid(expr.acc)}, ${rid(expr.elem)}| ${expr.cbName}(${rid(expr.acc)}, ${expr.recvIter ? rid(expr.elem) : elemSingle(expr.elemMode, expr.elem)}${emitForwarded(expr.forwarded)}))`;
-    case "iterSortDefault":
-      return `tslib::array::sort_default(&mut ${emitExpr(expr.receiver)})`;
-    case "iterSortBy":
-      return `tslib::array::sort_by(&mut ${emitExpr(expr.receiver)}, |${rid(expr.a)}, ${rid(expr.b)}| ${expr.cbName}(${rid(expr.a)}, ${rid(expr.b)}${emitForwarded(expr.forwarded)}))`;
+    case "iterSortDefault": {
+      // A front-mutated `VecDeque` receiver sorts through its contiguous slice
+      // (`deque_as_slice_mut` → `make_contiguous`); a plain `Vec` coerces `&mut Vec`
+      // → `&mut [T]` unchanged (series 117).
+      const recv = expr.deque
+        ? `tslib::array::deque_as_slice_mut(&mut ${emitExpr(expr.receiver)})`
+        : `&mut ${emitExpr(expr.receiver)}`;
+      return `tslib::array::sort_default(${recv})`;
+    }
+    case "iterSortBy": {
+      const recv = expr.deque
+        ? `tslib::array::deque_as_slice_mut(&mut ${emitExpr(expr.receiver)})`
+        : `&mut ${emitExpr(expr.receiver)}`;
+      return `tslib::array::sort_by(${recv}, |${rid(expr.a)}, ${rid(expr.b)}| ${expr.cbName}(${rid(expr.a)}, ${rid(expr.b)}${emitForwarded(expr.forwarded)}))`;
+    }
     case "rcNew":
       return `Rc::new(RefCell::new(${emitExpr(expr.inner)}))`;
     case "rcClone":

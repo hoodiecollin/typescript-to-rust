@@ -201,13 +201,13 @@ export function arrayTailMethod(
   // `unshift`→`push_front`) for a front-mutated `VecDeque` binding.
   if (
     (methodName === "push" || methodName === "unshift") &&
-    args.length === 1 &&
-    args[0]
+    args.length >= 1 &&
+    args.every(Boolean)
   ) {
     return {
       kind: "arrayMutLen",
       receiver: lowerExpr(m.object, analysis),
-      arg: lowerExpr(args[0], analysis),
+      args: args.map((a) => lowerExpr(a as Expression, analysis)),
       pushMethod: methodName,
     };
   }
@@ -262,18 +262,22 @@ export function tryArrayMutStatement(
   if (name !== "push" && name !== "unshift") return null;
   if (analysis.methodNames.has(name)) return null; // a user-declared method
   if (receiverTypeOf(m.object, analysis)?.kind !== "vec") return null;
-  if (call.arguments.length !== 1 || !call.arguments[0]) return null;
-  return [
-    {
-      kind: "expr",
-      expr: {
-        kind: "method",
-        receiver: lowerExpr(m.object, analysis),
-        name,
-        args: [lowerExpr(call.arguments[0] as Expression, analysis)],
-      },
+  if (call.arguments.length < 1 || !call.arguments.every(Boolean)) return null;
+  // Multi-arg push/unshift (series 117) → one bare method per value. `unshift(x, y)`
+  // inserts the group at the front preserving order (`[x, y, …orig]`); on a `VecDeque`
+  // `refineDeque` retargets each to `push_front`, so emit the values in **reverse** —
+  // `push_front(y); push_front(x)` lands the front as `[x, y, …]`. `push` keeps order.
+  const values = call.arguments as Expression[];
+  const ordered = name === "unshift" ? [...values].reverse() : values;
+  return ordered.map((v) => ({
+    kind: "expr",
+    expr: {
+      kind: "method",
+      receiver: lowerExpr(m.object, analysis),
+      name,
+      args: [lowerExpr(v, analysis)],
     },
-  ];
+  }));
 }
 
 /**

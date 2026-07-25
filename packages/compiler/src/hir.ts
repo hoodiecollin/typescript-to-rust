@@ -347,14 +347,17 @@ export type HirExpr =
    */
   | { kind: "len"; object: HirExpr; chars?: boolean; f64?: boolean }
   /**
-   * `a.push(x)` / `a.unshift(x)` **used as a value** (series 116) — JS returns the
-   * new length. Emits `{ <recv>.<pushMethod>(<arg>); <recv>.len() as f64 }`, so the
-   * mutation happens and the block yields the new length. `pushMethod` is `push`
-   * (back, default) or `push_front` (unshift); `refineDeque` retargets a `push` on a
-   * front-mutated `VecDeque` binding to `push_back`. Statement-position push/unshift
-   * lower to a bare method instead (no wasted length), via `tryArrayMutStatement`.
+   * `a.push(x, …)` / `a.unshift(x, …)` **used as a value** (series 116/117) — JS
+   * returns the new length. Emits `{ <recv>.<pushMethod>(<arg>); …; <recv>.len() as
+   * f64 }`, so every mutation happens and the block yields the new length. `args`
+   * holds the pushed values in JS order (multi-arg push/unshift, series 117);
+   * `pushMethod` is `push` (back, default) or `push_front` (unshift). `refineDeque`
+   * retargets a `push` on a front-mutated `VecDeque` binding to `push_back`, and for
+   * `push_front` reverses `args` so a multi-arg `unshift(x, y)` lands `[x, y, …]` (JS
+   * order). Statement-position push/unshift lower to bare methods (no wasted length),
+   * via `tryArrayMutStatement`.
    */
-  | { kind: "arrayMutLen"; receiver: HirExpr; arg: HirExpr; pushMethod: string }
+  | { kind: "arrayMutLen"; receiver: HirExpr; args: HirExpr[]; pushMethod: string }
   /** array literal → `vec![...]`. */
   | { kind: "array"; elements: HirExpr[] }
   /** record object literal → `IndexMap::from([(k, v), …])` (or `IndexMap::new()`). */
@@ -776,8 +779,10 @@ export type HirExpr =
   /**
    * `xs.sort()` → `tslib::array::sort_default(&mut xs)` (040). Default JS sort is
    * a lexicographic *string* compare, in place; the fidelity lives in `tslib`.
+   * `deque` (series 117) marks a front-mutated `VecDeque` receiver, whose in-place
+   * sort goes through `tslib::array::deque_as_slice_mut` (`make_contiguous`).
    */
-  | { kind: "iterSortDefault"; receiver: HirExpr }
+  | { kind: "iterSortDefault"; receiver: HirExpr; deque?: boolean }
   /**
    * `xs.sort((a, b) => e)` →
    * `tslib::array::sort_by(&mut xs, |a, b| cbName(a, b, forwarded…))` (series 048).
@@ -791,6 +796,8 @@ export type HirExpr =
       a: string;
       b: string;
       forwarded: HirExpr[];
+      /** A front-mutated `VecDeque` receiver — sort through `deque_as_slice_mut`. */
+      deque?: boolean;
     }
   /**
    * `Rc::new(RefCell::new(inner))` — construct a shared, interior-mutable value
