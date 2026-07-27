@@ -1,7 +1,9 @@
 # compiler
 
-TypeScript (strict dialect) → Rust translator. Run all commands from the **repo
-root**.
+The `ttr` compiler package — parser front-end, emitter, and the cargo-backed
+verification harness. **New here? Start with the [root README](../../README.md)**
+for the project overview, the dialect, and install instructions; this file covers
+the developer-facing internals. Run all commands from the **repo root**.
 
 ## Compile a file
 
