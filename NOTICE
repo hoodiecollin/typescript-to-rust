@@ -1,0 +1,29 @@
+typescript-to-rust
+Copyright 2026 Collin Kokotas
+
+This product is licensed under the terms of either the MIT license or the
+Apache License, Version 2.0, at your option. See LICENSE-MIT and LICENSE-APACHE.
+
+---
+
+Third-party components
+
+This project builds on the following open-source software. Each is distributed
+under its own license (all permissive: MIT and/or Apache-2.0); their copyrights
+remain with their respective authors.
+
+Compiler front-end / tooling (TypeScript side):
+  - oxc / oxc-parser  — the TypeScript/JavaScript parser front-end  (MIT)
+  - Biome             — lint + format tooling                       (MIT OR Apache-2.0)
+
+Runtime crates the emitted Rust may depend on (Rust side, via `tslib`):
+  - serde, serde_json — serialization / JSON fidelity               (MIT OR Apache-2.0)
+  - tokio             — async runtime (fs / io)                     (MIT)
+  - reqwest           — HTTP client (rustls TLS)                    (MIT OR Apache-2.0)
+  - regex             — RegExp fidelity engine                      (MIT OR Apache-2.0)
+  - chrono            — Date/time fidelity                          (MIT OR Apache-2.0)
+  - indexmap          — insertion-order maps (dev/test)             (MIT OR Apache-2.0)
+
+Full license texts for these dependencies are reproduced in their respective
+source distributions (via `cargo`/`bun`). This NOTICE is informational and does
+not modify the terms of the licenses above.
