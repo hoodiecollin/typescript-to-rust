@@ -1,0 +1,71 @@
+---
+title: Installation
+description: >-
+  Install the Rust toolchain prerequisite and get the typescript-to-rust
+  compiler running from source.
+---
+
+ttr is written in TypeScript and runs on Bun, but the value it produces is
+**Rust** — and its correctness oracle is a real Rust toolchain. So a working Rust
+install is a hard prerequisite, not an optional extra.
+
+## Prerequisites
+
+<Callout type="note" title="You need a Rust toolchain">
+ttr shells out to `cargo` and `rustfmt` to compile, run, and format the Rust it
+emits. Without them the `--check`, `--run`, and `--fmt` paths cannot work.
+</Callout>
+
+- **Rust** (stable), via [rustup](https://rustup.rs):
+
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  rustc --version   # confirm the toolchain is on PATH
+  ```
+
+- **Bun** — the runtime the compiler itself runs on:
+
+  ```bash
+  curl -fsSL https://bun.sh/install | bash
+  ```
+
+## From source (available today)
+
+The compiler currently ships as a repository you run directly. Clone it, install
+the workspace dependencies with Bun, and translate a file:
+
+```bash
+git clone https://github.com/hoodiecollin/typescript-to-rust
+cd typescript-to-rust
+bun install
+
+# TS → Rust → compile → run
+bun run ttr packages/compiler/sample.ts --run
+```
+
+The `bun run check` task runs the full suite — TypeScript typecheck, Rust tests,
+and the compiler's differential tests — against your local toolchain.
+
+## Planned install channels
+
+<Callout type="tip" title="Coming with v0.1.0">
+The channels below are the intended distribution surface for the first tagged
+release. They are **not published yet** — use the from-source path above until
+v0.1.0 lands.
+</Callout>
+
+| Channel | What you get | Status |
+|---|---|---|
+| `bunx @ttr/cli <file.ts>` | Run the CLI without cloning the repo | Coming with v0.1.0 |
+| Standalone binary | A single prebuilt executable, no Bun needed | Coming with v0.1.0 |
+| Homebrew (`brew install ttr`) | macOS/Linux package install | Coming with v0.1.0 |
+| crates.io (`tslib`, `ts-primitives`) | The runtime crates the emitted code depends on | Coming with v0.1.0 |
+
+The `@ttr` npm scope hosts the toolchain packages; `tslib` and `ts-primitives`
+are the Rust runtime crates the generated code links against for the rare
+constructs without a clean static mapping.
+
+## Next
+
+Head to the [quickstart](/docs/getting-started/quickstart/) to translate your
+first file and see the before/after.

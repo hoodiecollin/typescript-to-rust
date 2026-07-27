@@ -2,11 +2,16 @@
   "name": "typescript-to-rust",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "apps/*"
   ],
   "scripts": {
     "ttr": "bun run packages/compiler/index.ts",
+    "website": "bun run --filter '@ttr/website' dev",
+    "website:build": "bun run --filter '@ttr/website' build",
+    "website:typecheck": "bun run --filter '@ttr/website' typecheck",
     "bench": "bun run benchmarks/harness/bench.ts",
     "bench:verify": "bun run benchmarks/harness/verify.ts",
     "test": "bun test packages/compiler",

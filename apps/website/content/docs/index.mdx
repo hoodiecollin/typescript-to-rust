@@ -1,0 +1,67 @@
+---
+title: Overview
+description: >-
+  typescript-to-rust (ttr) translates a strict, explicitly-enforced subset of
+  TypeScript into idiomatic Rust with real ownership and borrows.
+---
+
+**typescript-to-rust** — `ttr` for short — is a language-level translator from a
+strict, explicitly-enforced subset of TypeScript into **idiomatic Rust**. The
+generated code uses real ownership: plain `T`, `&T`, `&mut T`, and moves — not
+`Rc<RefCell<T>>` wrapped around everything to imitate a garbage collector.
+
+The compiler is written in TypeScript and runs on [Bun](https://bun.sh). What
+makes the project trustworthy is how correctness is judged: not by comparing the
+output against hand-written golden files, but by running a **real `cargo`
+toolchain** over the emitted Rust and requiring it to compile — and, for complete
+programs, to produce the same output as the original TypeScript.
+
+## What this is
+
+- **A translator for a specified dialect.** ttr accepts a documented subset of
+  TypeScript and emits Rust for it. The accepted surface is enumerated in the
+  [dialect overview](/docs/dialect/overview/).
+- **Idiomatic by design.** The whole reason to target Rust is fast, idiomatic
+  output. ttr runs real escape/mutation analysis to choose ownership soundly —
+  see [how it works](/docs/how-it-works/architecture/).
+- **Verified by compilation.** The emitted Rust must pass `cargo check`, and
+  complete programs must match the TypeScript's runtime behavior under a
+  differential run.
+
+## What this is not
+
+<Callout type="warning" title="Not a “compile any TypeScript” tool">
+TypeScript is intentionally unsound (bivariant parameters, `any` escape hatches)
+and garbage-collected. A *total* mapping onto Rust's affine ownership model does
+not exist. Tractability comes from **restricting the input**, not from heroics in
+the backend.
+</Callout>
+
+Anything outside the accepted dialect is **rejected with a clear error** rather
+than silently mistranslated. "Reject loudly" beats "mistranslate silently": a
+construct the compiler cannot soundly lower stops the build.
+
+## The pipeline at a glance
+
+```text
+.ts source
+  │  parse (oxc-parser → ESTree AST)
+  ▼
+1. Dialect validation   reject anything outside the dialect — fail loud
+2. Symbol table         resolve every identifier to a declaration
+3. Typed HIR            AST → IR carrying resolved types + binding info
+4. Ownership analysis   infer move / &T / &mut T per binding and parameter
+5. Rust emission        HIR → idiomatic Rust
+6. rustfmt              normalize formatting
+  ▼
+.rs output  ──►  oracle: cargo check + cargo run
+```
+
+## Next steps
+
+- [Installation](/docs/getting-started/installation/) — prerequisites and the
+  planned install channels.
+- [Quickstart](/docs/getting-started/quickstart/) — your first translation, with
+  a before/after example.
+- [The dialect](/docs/dialect/overview/) — what the compiler accepts and rejects.
+- [CLI reference](/docs/cli/reference/) — every flag on the `ttr` command.

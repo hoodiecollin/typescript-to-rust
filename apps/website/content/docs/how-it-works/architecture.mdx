@@ -1,0 +1,86 @@
+---
+title: Architecture
+description: >-
+  How ttr works — the oracle-driven approach, the multi-pass ownership model, and
+  the compilation pipeline.
+---
+
+Two ideas carry the project: correctness is judged by **a real Rust toolchain**,
+and the output uses **real ownership** rather than a reference-count wrapper. This
+page summarizes both; the authoritative notes live in
+[`docs/architecture.md`](https://github.com/hoodiecollin/typescript-to-rust/blob/main/docs/architecture.md)
+and [`docs/plan.md`](https://github.com/hoodiecollin/typescript-to-rust/blob/main/docs/plan.md).
+
+## The oracle: compile and run, never string-match
+
+Correctness is decided by a real Rust toolchain, driven from TypeScript so
+failures are structured and programmable rather than opaque pass/fail. There are
+two tiers:
+
+- **Tier 1 — compiles.** Emit Rust and `cargo check` it. Structured JSON
+  diagnostics (error code, message, source span) come back, so a failure can be
+  explained and mapped back to the originating TypeScript.
+- **Tier 2 — behaves.** For complete programs, run the TypeScript (via Bun) and
+  the emitted Rust (via `cargo run`) and assert their stdout matches —
+  differential testing.
+
+<Callout type="tip" title="Why not golden files?">
+String-equality against hand-written `.rs` files was retired: it's brittle to
+formatting, rejects idiomatic-but-different output, and let invalid Rust
+masquerade as passing. Compiling and running is a far stronger oracle.
+</Callout>
+
+## Real ownership — "Option A"
+
+Two memory models were on the table. **Option A** emits plain Rust (`T`, `&T`,
+`&mut T`, moves): fast and idiomatic, at the cost of requiring real
+escape/mutation analysis. **Option B** would wrap everything in `Rc<RefCell<T>>`
+to imitate a garbage collector: trivial to emit, but slow and unidiomatic.
+
+ttr chose **Option A**. The whole point of targeting Rust is idiomatic, fast
+output — Option B would make the project pointless. The consequence is explicit:
+**ownership inference is the central technical problem**, given first-class,
+multi-pass treatment. `Rc<RefCell<T>>` remains available as a *local* fallback
+(via `"use rc"`) for the rare in-dialect shape that genuinely needs shared
+mutability — the exception, not the strategy.
+
+## The pipeline
+
+There is a single IR (the HIR). Lowering is the one semantic gate; the emitter is
+pure and total.
+
+```text
+.ts source
+  │  oxc-parser (parseSync → ESTree AST)
+  ▼
+1. Parse
+2. Dialect validation      reject anything outside the dialect — fail loud
+3. Symbol table & scopes   resolve every identifier to a declaration
+4. Typed HIR               AST → IR carrying resolved types + binding info
+5. Ownership & mutation    the hard pass — per binding/param, infer
+     analysis               move / &T / &mut T from how it is read, mutated,
+                            aliased, returned, and passed to callees
+6. Rust emission           HIR → idiomatic Rust string
+7. rustfmt                 normalize formatting
+  ▼
+.rs output  ──►  oracle: cargo check + cargo run
+```
+
+Two refinement passes run over the HIR after lowering: numeric inference (e.g.
+`number → usize` where array indexing demands it) and string refinement (a
+read-only `&String` parameter narrows to `&str`).
+
+## Notable pieces
+
+- **The verification harness** spawns `cargo` / `rustfmt`, parses
+  `--message-format=json` into typed diagnostics, and serializes access to a
+  persistent oracle crate through a promise queue.
+- **A tsc-backed type oracle** infers un-annotated binding and return types
+  through built-in signatures, then re-validates the inferred type against the
+  modeled Rust surface.
+- **The emitter** is written against a verified ESTree AST subset, not the
+  bundled oxc Rust-native types — the two disagree on literals and member access
+  at runtime, so the compiler declares the subset it actually consumes.
+
+For the full, current pass set, the repository's `packages/compiler/src/` is the
+ground truth.
