@@ -113,6 +113,11 @@ export const landing = {
       affine ownership does not exist. Tractability comes from <Hl>restricting the
       input</Hl>: anything outside the dialect stops the build with a clear error
       instead of being silently mistranslated.
+
+      It is also **early and experimental** — a single-author project under active
+      development. The accepted dialect is deliberately narrow and grows
+      issue-by-issue; expect rough edges and breaking changes. Running from source
+      is the supported path today, with no stability or support guarantees yet.
     `,
   },
 
@@ -161,14 +166,14 @@ export const landing = {
   },
 
   stats: {
-    heading: "Correctness you can trust",
-    body: "The project's guarantees aren't aspirational — they're structural.",
+    heading: "Correctness by construction",
+    body: "These aren't marketing lines — each is a structural property of how ttr is built.",
     cta: "How it works",
     items: [
-      { value: "Option A", label: "idiomatic borrows, not `Rc<RefCell>`" },
+      { value: "`&T` / `&mut T`", label: "idiomatic borrows, not `Rc<RefCell>`" },
       { value: "cargo", label: "compile **and** run oracle" },
       { value: "fail-loud", label: "rejects, never mistranslates" },
-      { value: "@ttr", label: "package scope for the toolchain" },
+      { value: "oxc", label: "real TypeScript parser front-end" },
     ] satisfies StatItem[],
   },
 

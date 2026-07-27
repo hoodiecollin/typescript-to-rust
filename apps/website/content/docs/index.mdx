@@ -16,6 +16,13 @@ output against hand-written golden files, but by running a **real `cargo`
 toolchain** over the emitted Rust and requiring it to compile — and, for complete
 programs, to produce the same output as the original TypeScript.
 
+<Callout type="warning" title="Experimental — early and single-author">
+ttr is under active development. The accepted dialect is deliberately narrow and
+grows issue-by-issue; expect rough edges and breaking changes. Running from source
+is the supported path today — there's no published release yet, and there are no
+stability or support guarantees.
+</Callout>
+
 ## What this is
 
 - **A translator for a specified dialect.** ttr accepts a documented subset of
