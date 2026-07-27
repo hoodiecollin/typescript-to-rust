@@ -88,6 +88,7 @@ import {
   collectUnions,
 } from "./unions";
 import type {
+  Borrow,
   HirErrorEnum,
   HirExpr,
   HirFn,
@@ -603,7 +604,8 @@ export function lower(
   // use map/filter/reduce chains. `refineSplitLazy` (series 107, #88/2c) wraps it,
   // rewriting a non-retaining `split` consumer to stream `str::split` (no `Vec`) on the
   // fully-settled `forIn` shapes.
-  const result = refineDeque(
+  const result = refineTransitiveRefMut(
+    refineDeque(
     refineSplitLazy(
     refineIterFusion(
     fixKeyBorrows(
@@ -627,6 +629,7 @@ export function lower(
           ),
         ),
       ),
+    ),
     ),
     ),
     ),
@@ -1483,6 +1486,87 @@ function fixKeyBorrows(module: HirModule): HirModule {
   }
   doBody([], module.main);
   return module;
+}
+
+/**
+ * Series 119 (issue #102) — reborrow a forwarded `&mut` param instead of double
+ * borrowing it. Part A (`analysis.ts`) already promoted a param forwarded into a
+ * `refMut` position to `refMut` itself, so the enclosing signature is `&mut T`. The
+ * call site, though, still emits `&mut q` from the *callee's* `refMut` param — and
+ * `&mut` on an already-`&mut` binding is `&mut &mut T` (E0308). When the forwarded arg
+ * *is* a `&mut T` param of the enclosing scope, drop the extra borrow: Rust
+ * auto-reborrows `q: &mut T` at a `&mut T` position, so the bare `q` is correct.
+ *
+ * The read-only twin (`&q` on a `&mut T` param → `&&mut T → &T`) already coerces, so
+ * only `refMut` args are touched. A `refMut` arg whose ident is *not* a `&mut` param
+ * (a genuinely owned local needing `&mut q`) is left alone. Runs on the fully-refined
+ * module (after `refineDeque` may have swapped `Vec`→`VecDeque`); it keys on the
+ * borrow form (`&mut`), not the inner type, so it covers the deque forward too.
+ */
+function refineTransitiveRefMut(module: HirModule): HirModule {
+  const doBody = (params: HirParam[], stmts: HirStmt[]): void => {
+    const refMutParams = new Set<string>();
+    for (const p of params) {
+      if (p.ty.kind === "ref" && p.ty.mut) refMutParams.add(p.name);
+    }
+    if (refMutParams.size > 0) walkTransitiveRefMut(stmts as unknown, refMutParams);
+  };
+  for (const item of module.items) {
+    if (item.kind === "fn") doBody(item.params, item.body);
+    else if (item.kind === "class") {
+      if (item.ctor) doBody(item.ctor.params, item.ctor.body);
+      for (const m of item.methods) doBody(m.params, m.body);
+    }
+  }
+  return module;
+}
+
+/** Is `expr` a bare reference to one of the enclosing scope's `&mut` params? */
+function isRefMutParamRef(expr: unknown, refMutParams: Set<string>): boolean {
+  const e = expr as { kind?: string; name?: string; segments?: string[] };
+  if (e?.kind === "ident" && typeof e.name === "string")
+    return refMutParams.has(e.name);
+  if (e?.kind === "path" && Array.isArray(e.segments) && e.segments.length === 1)
+    return refMutParams.has(e.segments[0]!);
+  return false;
+}
+
+/** Recursively drop the double `&mut` on a forwarded `&mut` param (see above). */
+function walkTransitiveRefMut(node: unknown, refMutParams: Set<string>): void {
+  if (!node || typeof node !== "object") return;
+  const n = node as { kind?: string; args?: unknown[] };
+  // Free-fn call: `{kind:"call", args:[HirArg…]}` — a `refMut`-borrowed arg that is a
+  // `&mut` param drops to `owned` (emits the bare ident; the emitter auto-reborrows).
+  if (n.kind === "call" && Array.isArray(n.args)) {
+    for (const arg of n.args as { borrow?: Borrow; expr?: unknown }[]) {
+      if (
+        arg &&
+        arg.borrow === "refMut" &&
+        isRefMutParamRef(arg.expr, refMutParams)
+      ) {
+        arg.borrow = "owned";
+      }
+    }
+  }
+  // Method call: `{kind:"method", args:[HirExpr…]}` — a `{kind:"ref", mut:true}` arg
+  // over a `&mut` param is replaced by its inner expr (the bare ident reborrow).
+  if (n.kind === "method" && Array.isArray(n.args)) {
+    const args = n.args as { kind?: string; mut?: boolean; expr?: HirExpr }[];
+    args.forEach((arg, i) => {
+      if (
+        arg &&
+        arg.kind === "ref" &&
+        arg.mut === true &&
+        isRefMutParamRef(arg.expr, refMutParams)
+      ) {
+        args[i] = arg.expr as unknown as (typeof args)[number];
+      }
+    });
+  }
+  for (const v of Object.values(node as Record<string, unknown>)) {
+    if (Array.isArray(v)) for (const c of v) walkTransitiveRefMut(c, refMutParams);
+    else if (v && typeof v === "object") walkTransitiveRefMut(v, refMutParams);
+  }
 }
 
 /** Recursively unborrow `<lookup>(&k)` → `<lookup>(k)` for a `&str` param `k`. */
