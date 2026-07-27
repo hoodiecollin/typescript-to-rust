@@ -61,6 +61,23 @@ console.log(sum1(a));`,
     expected: "6",
   },
   {
+    name: "VD5b &mut chained boundary: deque forwarded caller→push1→pushFront (2 mut hops, #102/119)",
+    src: `function pushFront(q: number[]): void { q.unshift(0); }
+function push1(q: number[]): void { pushFront(q); }
+const a: number[] = [1, 2, 3];
+a.unshift(9);
+push1(a);
+console.log(a.length, a[0]);`,
+    expected: "5 0",
+    extra: ({ rust }) => {
+      // Transitive refMut promoted the middle hop's param to `&mut`, and the forward
+      // is a bare reborrow (series 119) — not a double `&mut` borrow.
+      expect(rust).toContain("fn push1(q: &mut VecDeque<f64>)");
+      expect(rust).toContain("pushFront(q)");
+      expect(rust).not.toContain("pushFront(&mut q)");
+    },
+  },
+  {
     name: "VD6 &mut param mutation reflects back (why full propagation, not convert-at-boundary)",
     src: `function pushFront(q: number[]): void { q.unshift(0); }
 const a: number[] = [1, 2];

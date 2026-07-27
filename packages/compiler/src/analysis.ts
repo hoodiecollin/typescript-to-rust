@@ -1567,6 +1567,67 @@ export function analyzeModule(program: Program): ModuleAnalysis {
     if (field) consumingCandidates.set(m.name, field);
   }
 
+  // Transitive `refMut` promotion (issue #102). A param `p` classified `ref` that
+  // is forwarded as a **bare identifier** argument into a callee position whose
+  // ownership is `refMut` must itself become `refMut` — else the enclosing signature
+  // (`&Vec`) and the call-site reborrow (`&mut`) disagree and cargo rejects it. This
+  // is the same forward flow `mutableBindings` already does for the `mut`-locals set,
+  // lifted to the param's *own* ownership. Runs **before** `mutableBindings` (which
+  // reads `fns`/`methodParams` for its `mut` marking) so the promoted signatures are
+  // in place. Fixpoint over all param scopes (free fns *and* methods, series 060):
+  // forward chains (`outer→middle→inner`) converge upward. Monotonic (`ref→refMut`
+  // only), bounded by the total param count — always terminates.
+  {
+    const scopes: { params: ParamInfo[]; body: unknown }[] = [];
+    for (const stmt of program.body) {
+      const named = namedFunction(stmt);
+      const info = named ? fns.get(named.name) : undefined;
+      if (named && info) scopes.push({ params: info.params, body: named.fn.body });
+    }
+    for (const m of methods) {
+      const params = methodParams.get(m.name);
+      if (params) scopes.push({ params, body: m.body });
+    }
+    // The callee param list for a direct call — a free fn (`Identifier` callee) or a
+    // method (`MemberExpression` callee, name-keyed like `methodParams`, the
+    // documented same-name-across-classes limit).
+    const calleeParams = (call: AnyNode): ParamInfo[] | undefined => {
+      const callee = call.callee;
+      if (!isNode(callee)) return undefined;
+      if (callee.type === "Identifier")
+        return fns.get(callee.name as string)?.params;
+      if (callee.type === "MemberExpression") {
+        const prop = identName(callee.property);
+        return prop ? methodParams.get(prop) : undefined;
+      }
+      return undefined;
+    };
+    for (;;) {
+      let changed = false;
+      for (const scope of scopes) {
+        walk(scope.body, (n) => {
+          if (n.type !== "CallExpression") return;
+          const cps = calleeParams(n as AnyNode);
+          if (!cps) return;
+          const args = (n as AnyNode).arguments;
+          if (!Array.isArray(args)) return;
+          args.forEach((arg, i) => {
+            const argName = identName(arg); // bare identifier only
+            if (!argName) return;
+            const cp = cps[i];
+            if (!cp || cp.isCopy || cp.ownership !== "refMut") return;
+            const p = scope.params.find((pp) => pp.name === argName);
+            if (p && !p.isCopy && p.ownership === "ref") {
+              p.ownership = "refMut";
+              changed = true;
+            }
+          });
+        });
+      }
+      if (!changed) break;
+    }
+  }
+
   const mut = new Map<string, Set<string>>();
   for (const stmt of program.body) {
     const named = namedFunction(stmt);
