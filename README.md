@@ -6,6 +6,11 @@
 **Translate a strict subset of TypeScript into _idiomatic_ Rust — with real
 ownership, not `Rc<RefCell>`-everything.**
 
+> **Status: experimental.** `ttr` is an early, single-author project under active
+> development. The accepted dialect is deliberately narrow and grows issue-by-issue;
+> expect rough edges and breaking changes. Running from source is the supported path
+> today — there's no published release yet. No stability or support guarantees.
+
 `ttr` is a language-level translator. It reads an explicitly-enforced TypeScript
 dialect and emits Rust that a human would be happy to have written: borrows where
 TypeScript passes by reference, owned values where it hands ownership over, `&self`
