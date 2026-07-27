@@ -13,6 +13,13 @@
 # broken docs nav link fails the build). Path-filtered so compiler-only changes
 # don't redeploy.
 #
+# DISABLED — manual-only. The docs site is intentionally NOT deployed right now
+# (the project is being released as source, not product-ized). This workflow is
+# kept for when deployment is picked back up: it runs ONLY via manual dispatch,
+# so no site goes live and no failing checks appear on push/PR. To re-enable
+# automatic preview/production deploys, restore the `push`/`pull_request` triggers
+# below and create the secrets noted next.
+#
 # TODO(secrets): create these repo/environment secrets before enabling the workflow.
 #   VERCEL_TOKEN      — Vercel access token that can deploy the project.
 #   VERCEL_ORG_ID     — the Vercel team/org id (from `vercel link` → .vercel/project.json).
@@ -20,15 +27,7 @@
 name: Website
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'apps/website/**'
-      - '.github/workflows/website.yml'
-  pull_request:
-    paths:
-      - 'apps/website/**'
-      - '.github/workflows/website.yml'
+  # Manual only — see the note above. Auto-deploy triggers are intentionally removed.
   workflow_dispatch:
 
 # One deploy per ref; a newer push supersedes an in-flight one.
