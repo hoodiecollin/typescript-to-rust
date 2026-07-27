@@ -1,0 +1,118 @@
+# Website deploy — build in GitHub Actions, deploy PREBUILT to Vercel.
+#
+# Vercel serves; it does NOT build. `vercel build` runs `next build` on THIS GH
+# runner (our minutes, not Vercel build minutes) to produce a static export;
+# `vercel deploy --prebuilt` uploads that output without re-running the build.
+#
+#   vercel pull   --environment=<preview|production>   # fetch project settings
+#   vercel build  [--prod]                             # next build here (GH runner)
+#   vercel deploy --prebuilt [--prod]                  # upload the prebuilt output
+#
+# push to main → production; pull_request → preview. The `prebuild` search-index +
+# dead-nav-link check runs automatically as the `next build` lifecycle hook (a
+# broken docs nav link fails the build). Path-filtered so compiler-only changes
+# don't redeploy.
+#
+# DISABLED — manual-only. The docs site is intentionally NOT deployed right now
+# (the project is being released as source, not product-ized). This workflow is
+# kept for when deployment is picked back up: it runs ONLY via manual dispatch,
+# so no site goes live and no failing checks appear on push/PR. To re-enable
+# automatic preview/production deploys, restore the `push`/`pull_request` triggers
+# below and create the secrets noted next.
+#
+# TODO(secrets): create these repo/environment secrets before enabling the workflow.
+#   VERCEL_TOKEN      — Vercel access token that can deploy the project.
+#   VERCEL_ORG_ID     — the Vercel team/org id (from `vercel link` → .vercel/project.json).
+#   VERCEL_PROJECT_ID — the Vercel project id for the website.
+name: Website
+
+on:
+  # Manual only — see the note above. Auto-deploy triggers are intentionally removed.
+  workflow_dispatch:
+
+# One deploy per ref; a newer push supersedes an in-flight one.
+concurrency:
+  group: website-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write # to post the preview URL on PRs
+
+# The Vercel CLI reads these to resolve the project without a committed .vercel/project.json.
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  deploy:
+    name: build & deploy (${{ github.event_name == 'push' && 'production' || 'preview' }})
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: apps/website
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      # Cache ONLY bun's download cache (deps), keyed on the lockfile. We do NOT
+      # cache apps/website/.next/cache — restoring Next's persistent cache across
+      # commits has served stale compiled CSS. The static-export build is fast, so
+      # recompiling fresh every run is the right trade.
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: website-bun-${{ runner.os }}-${{ hashFiles('apps/website/bun.lock') }}
+          restore-keys: |
+            website-bun-${{ runner.os }}-
+
+      # Node/npm are preinstalled on the runner; install the Vercel CLI globally.
+      # `vercel build` still uses bun for the project itself (detects bun.lock).
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Resolve deploy target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "env=production" >> "$GITHUB_OUTPUT"
+            echo "flag=--prod"    >> "$GITHUB_OUTPUT"
+          else
+            echo "env=preview" >> "$GITHUB_OUTPUT"
+            echo "flag="       >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pull Vercel project settings
+        run: vercel pull --yes --environment=${{ steps.target.outputs.env }} --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      # `next build` runs here — including the `prebuild` search-index + dead-nav-link check.
+      - name: Build (on the GH runner)
+        run: vercel build ${{ steps.target.outputs.flag }} --token="$VERCEL_TOKEN"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      - name: Deploy prebuilt output
+        id: deploy
+        run: |
+          url=$(vercel deploy --prebuilt ${{ steps.target.outputs.flag }} --token="$VERCEL_TOKEN")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Website deployed (${{ steps.target.outputs.env }})"
+            echo ""
+            echo "$url"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+
+      # Surface the preview URL on the PR so it's one click to review.
+      - name: Comment preview URL on PR
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          gh pr comment "$PR" --body "Website preview: ${{ steps.deploy.outputs.url }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}

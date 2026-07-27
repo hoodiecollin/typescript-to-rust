@@ -1,0 +1,76 @@
+---
+title: CLI reference
+description: >-
+  The ttr command — every flag, plus how single-file and multi-file crate
+  emission work.
+---
+
+The CLI compiles a strict-dialect TypeScript entry file to Rust. From the
+repository, it's wired to the `ttr` script:
+
+```bash
+bun run ttr <file.ts> [--fmt] [-o <path>] [--emit] [--check|--run]
+```
+
+With no flags it prints the raw emitted Rust to stdout — faithful to exactly what
+the emitter produced, which is useful for debugging.
+
+## Flags
+
+| Flag | Effect |
+|---|---|
+| _(none)_ | Print the emitted Rust to stdout (raw, unformatted). |
+| `--fmt` | Run the output through `rustfmt` before printing / writing / verifying. |
+| `-o <path>` | Write the `.rs` to a path. For a crate, `<path>` is a directory. |
+| `--emit` | Write the output next to the source (`<stem>.rs`, or `<stem>.crate/`). |
+| `--check` | Additionally `cargo check` the emitted output. |
+| `--run` | Additionally compile, run, and print the program's stdout. |
+
+<Callout type="note" title="Formatting is applied uniformly">
+`--fmt` touches every path — stdout, any file written, and what `--check` /
+`--run` compiles — so what you inspect is exactly what got verified. Output is
+raw by default; add `--fmt` for `rustfmt`-normalized Rust.
+</Callout>
+
+## Single file vs. multi-file crate
+
+The shape of the emit depends on the entry file's imports:
+
+- **A lone entry** (no `./`-relative imports) emits **one `.rs` file**. Top-level
+  script statements are wrapped in a generated `fn main()`.
+- **An entry that imports `./`-relative modules** is followed transitively and
+  emits a **crate** — one `.rs` per module.
+
+<Callout type="warning" title="Bare and package imports are refused">
+Only `./`-relative imports are followed. A bare or package import (e.g.
+`import x from "some-pkg"`) is rejected fail-loud — ttr translates your dialect
+code, not the npm ecosystem.
+</Callout>
+
+### Where output lands
+
+| Emit mode | Single file | Crate |
+|---|---|---|
+| `-o <path>` | writes the `.rs` to `<path>` | writes the tree under directory `<path>` |
+| `--emit` | writes `<stem>.rs` beside the source | writes `<stem>.crate/` beside the source |
+| stdout | prints the `.rs` | prints each file under a `// === path ===` header |
+
+## Examples
+
+```bash
+# Print idiomatic, formatted Rust for a single file
+bun run ttr app.ts --fmt
+
+# Emit a .rs next to the source and type-check it
+bun run ttr app.ts --emit --check
+
+# Compile and run, printing the program's stdout
+bun run ttr app.ts --run
+
+# Write a multi-file crate to ./out
+bun run ttr main.ts -o ./out
+```
+
+Both `--check` and `--run` invoke a real Rust toolchain — the same oracle that
+decides whether a translation is correct. See
+[how it works](/docs/how-it-works/architecture/) for the harness design.

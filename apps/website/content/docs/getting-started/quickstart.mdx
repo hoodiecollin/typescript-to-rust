@@ -1,0 +1,89 @@
+---
+title: Quickstart
+description: >-
+  Translate your first file — a before/after walkthrough from strict-dialect
+  TypeScript to idiomatic, cargo-verified Rust.
+---
+
+This walkthrough takes a small, ordinary TypeScript file and turns it into
+idiomatic Rust with one command. It assumes you've followed
+[installation](/docs/getting-started/installation/) and have Rust and Bun on your
+PATH.
+
+## 1. Write strict-dialect TypeScript
+
+Create `points.ts`. Note the explicit parameter types — the one hard requirement
+the [dialect](/docs/dialect/overview/) always enforces:
+
+```typescript
+interface Point {
+  x: number;
+  y: number;
+}
+
+function scale(points: Point[], factor: number): Point[] {
+  return points.map((p) => ({ x: p.x * factor, y: p.y * factor }));
+}
+
+const unit: Point[] = [{ x: 1, y: 1 }];
+console.log(scale(unit, 3));
+```
+
+## 2. Run the translator
+
+Point `ttr` at the file. With no flags it prints the emitted Rust to stdout; add
+`--run` to compile and execute it through `cargo` and print the program's output:
+
+```bash
+bun run ttr points.ts --run
+```
+
+## 3. Read the Rust
+
+The emitted crate is idiomatic Rust — the read-only slice comes in as `&[Point]`,
+a fresh `Vec<Point>` goes out, and there's no reference-count wrapper in sight:
+
+```rust
+#[derive(Clone, Debug)]
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+fn scale(points: &[Point], factor: f64) -> Vec<Point> {
+    points
+        .iter()
+        .map(|p| Point { x: p.x * factor, y: p.y * factor })
+        .collect()
+}
+
+fn main() {
+    let unit: Vec<Point> = vec![Point { x: 1.0, y: 1.0 }];
+    println!("{:?}", scale(&unit, 3.0));
+}
+```
+
+<Callout type="note" title="Why f64?">
+`number` maps to `f64` by default. The numeric-inference pass refines a value to
+`usize` where array indexing demands it, or to `i64` for a provably-integer hot
+loop — but ordinary numbers stay `f64` so behavior matches JavaScript.
+</Callout>
+
+## What just happened
+
+Under the hood the file was parsed, validated against the dialect, lowered to a
+typed HIR, run through ownership analysis (which chose `&[Point]` over an owned
+`Vec<Point>` because `scale` only reads its argument), emitted as Rust, formatted
+with `rustfmt`, and then **compiled and run by `cargo`** — the oracle that decides
+whether the translation is correct.
+
+## Try the flags
+
+- `--fmt` — run the output through `rustfmt` before printing.
+- `-o out.rs` — write the `.rs` to a path (a crate writes a directory).
+- `--emit` — write the output next to the source file.
+- `--check` — additionally `cargo check` the output.
+- `--run` — compile, run, and print stdout.
+
+See the [CLI reference](/docs/cli/reference/) for the full details, including how
+multi-file crates are emitted.

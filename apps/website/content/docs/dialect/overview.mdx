@@ -1,0 +1,91 @@
+---
+title: The dialect
+description: >-
+  An introduction to the accepted TypeScript subset — the two kinds of
+  rejection, the positive rules, and where the gates live.
+---
+
+The translator accepts a **strict subset** of TypeScript and rejects everything
+outside it. This page is an orientation; the authoritative, exhaustive catalog of
+every fail-loud case lives in
+[`docs/dialect.md`](https://github.com/hoodiecollin/typescript-to-rust/blob/main/docs/dialect.md)
+in the repository.
+
+<Callout type="warning" title="Reject loudly beats mistranslate silently">
+Every construct the compiler cannot soundly lower stops the build with an error
+rather than emitting wrong Rust. If your input was rejected, the exact message is
+the stable anchor — search the catalog for it.
+</Callout>
+
+## Two kinds of rejection
+
+Every rejection is one of two kinds:
+
+- **Forbidden** — *fix your input.* The construct is outside the accepted dialect
+  and will never be translated as written: `any`, `unknown`, decorators,
+  `declare`, and Proxy/Reflect metaprogramming. Change the code.
+- **Not yet** — *in the dialect, but not built.* The construct is intended to
+  work eventually but the compiler doesn't lower it today. It may graduate in a
+  later release. Rewrite into a supported shape for now.
+
+The distinction is a real type split in the compiler (`DialectError` vs
+`UnsupportedError`).
+
+## The positive rules
+
+A few requirements define the shape of acceptable input:
+
+- **Explicit type annotations on every function parameter.** An un-annotated
+  parameter is implicit `any`, which is forbidden — so this is a hard rule.
+  Bindings and return types may be left un-annotated: a tsc-backed type oracle
+  infers them through built-in signatures (`.map`, `.find`, template literals,
+  `Object.entries`, …) and either maps the result to a modeled Rust type or keeps
+  the fail-loud error.
+- **Statically-known, closed object shapes** via `interface`, `type`, or `class`.
+  Object literals must conform to a declared shape.
+- **No shared mutable aliasing that escapes what ownership analysis can prove
+  sound.** Two live mutable references to the same object generally can't be
+  expressed in idiomatic Rust — this is the "Option A" tax. The `"use rc"`
+  directive is the local escape hatch when it's genuinely needed.
+
+## Where rejection happens
+
+There are three gates in the pipeline, but only the first two reject:
+
+1. **Validator** — a whole-tree walk run first. It enforces a default-deny
+   allowlist (any AST node type not modeled is rejected), the forbidden types
+   (`any`/`unknown`), and the permanent flags (decorators, `declare`).
+2. **Lowering** — the single semantic gate. Anything syntactically modeled but
+   not soundly lowerable *in a given shape* is rejected here.
+3. **Emitter** — pure and total by design. It carries one defensive invariant
+   guard, not a feature boundary.
+
+## What maps to what
+
+A sampling of the type mapping (the full table lives in the repo docs):
+
+| TypeScript | Rust |
+|---|---|
+| `number` | `f64` (`usize` for indices, `i64` for provable integers) |
+| `string` | `String`, or `&str` for read-only params |
+| `boolean` | `bool` |
+| `T[]` / `Array<T>` | `Vec<T>` (ownership pass picks `&`/`&mut`) |
+| `Record<string, T>` | `HashMap<String, T>` |
+| `interface` / object | `struct` |
+| `class` | `struct` + `impl` |
+| `throw` / `try` | `Result<T, E>` + `?` |
+| `async` / `await` | `async fn` / `.await` |
+
+<Callout type="note" title="Deliberate semantic divergences">
+A short, closed list of constructs are accepted but given a runtime meaning that
+intentionally differs from TypeScript — for example, object `===` is *structural*
+equality by default (matching what idiomatic Rust derives), not identity. Each
+divergence is documented and pinned by a fixture. See the full catalog for the
+complete list.
+</Callout>
+
+## Read the full catalog
+
+The complete, message-by-message list of every forbidden and not-yet case is
+maintained in the repository's
+[dialect catalog](https://github.com/hoodiecollin/typescript-to-rust/blob/main/docs/dialect.md).

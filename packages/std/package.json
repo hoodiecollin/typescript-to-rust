@@ -2,6 +2,7 @@
   "name": "@ttr/std",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT OR Apache-2.0",
   "type": "module",
   "module": "index.ts",
   "types": "index.ts",
