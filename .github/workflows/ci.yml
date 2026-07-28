@@ -1,0 +1,63 @@
+# Fast PR gate — lint, typecheck, and the Rust unit tests. Runs on every PR and
+# on pushes to main. Deliberately does NOT run the cargo-backed oracle suite
+# (`bun run test`), which compiles+runs a real Rust crate per fixture and takes
+# ~20-40 min on a cold runner — that lives in `oracle.yml` and runs pre-release.
+#
+# All three checks together are ~15s of actual work warm; the runner cost is
+# mostly one-time cold caching (cargo deps + bun install), amortized by the caches
+# below. Standard GitHub-hosted runners are free for public repos.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint · typecheck · cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      # bun has no built-in install cache; key it on the lockfile.
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      # rustfmt: the compiler shells out to it to normalize emitted Rust.
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Caches ~/.cargo + ./target keyed on Cargo.lock — turns the cold cargo
+      # build into a warm one on subsequent runs.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint (biome)
+        run: bun run lint
+
+      - name: Typecheck (tsc)
+        run: bun run typecheck
+
+      - name: Rust unit tests (cargo test)
+        run: bun run rust:test
