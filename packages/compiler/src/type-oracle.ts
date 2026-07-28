@@ -1,8 +1,8 @@
 /**
  * TypeOracle (series 082) — a TypeScript-checker-backed type-resolution layer
  * coupled to the oxc front end. Graduates spike #44 (see
- * `docs/work/082-type-oracle/design.md` and the spike under
- * `docs/work/044-type-layer-spike/`).
+ * `docs/work/_archive/082-type-oracle/design.md`; the exploratory
+ * `044-type-layer-spike` code has since been pruned — see git history).
  *
  * The front end is `oxc-parser` (syntax only, no checker), so the transpiler
  * hand-rolls its type layer (`bindingTypes`, `structFields`, `collectionOf`, …).
@@ -312,7 +312,7 @@ function buildOracle(files: OracleFile[], structs: Set<string>): TypeOracle {
    * then the resolved reference view (present once a lib tier lands). */
   function argsOf(t: TS.Type): readonly TS.Type[] {
     const alias = t.aliasTypeArguments;
-    if (alias && alias.length) return alias;
+    if (alias?.length) return alias;
     const ref = checker.getTypeArguments(t as TS.TypeReference);
     return ref ?? [];
   }

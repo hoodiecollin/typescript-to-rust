@@ -180,8 +180,8 @@ export default function Home() {
             </Button>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {landing.stats.items.map((s, i) => (
-              <div key={i} className="rounded-xl border border-border/60 bg-background/40 p-5">
+            {landing.stats.items.map((s) => (
+              <div key={s.label} className="rounded-xl border border-border/60 bg-background/40 p-5">
                 <Markdown
                   as="div"
                   inline

@@ -34,7 +34,7 @@ const contentComponents: MDXComponents = {
  */
 const inlineComponents: MDXComponents = {
   ...contentComponents,
-  p: ({ children }) => <Fragment>{children}</Fragment>,
+  p: ({ children }) => children,
 };
 
 /**

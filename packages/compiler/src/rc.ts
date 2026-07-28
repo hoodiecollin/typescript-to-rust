@@ -421,10 +421,7 @@ function rcBody(
         ) {
           throw new UnsupportedError({
             type:
-              `re-entrant mutation of a shared \`Rc<RefCell>\` container '${e.receiver.name}' — ` +
-              `a mutating call whose argument reads the same cell (\`.borrow_mut()\` held ` +
-              `across a \`.borrow()\`) would panic at runtime; split the read out into a ` +
-              `local before the write (series 086 / 062 re-entrant fail-loud residual)`,
+              `re-entrant mutation of a shared \`Rc<RefCell>\` container '${e.receiver.name}' — a mutating call whose argument reads the same cell (\`.borrow_mut()\` held across a \`.borrow()\`) would panic at runtime; split the read out into a local before the write (series 086 / 062 re-entrant fail-loud residual)`,
           });
         }
         const recv = rewrite(e.receiver, ownerFieldMut);

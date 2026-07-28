@@ -36,14 +36,12 @@ export function capitalizeAscii(s: string): string {
 /** Render a JS string as a Rust double-quoted string literal (escaped). */
 export function rustStrLit(s: string): string {
   return (
-    '"' +
-    s
+    `"${s
       .replace(/\\/g, "\\\\")
       .replace(/"/g, '\\"')
       .replace(/\n/g, "\\n")
       .replace(/\r/g, "\\r")
-      .replace(/\t/g, "\\t") +
-    '"'
+      .replace(/\t/g, "\\t")}"`
   );
 }
 

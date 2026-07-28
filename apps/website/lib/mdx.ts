@@ -42,7 +42,7 @@ function fileForSlug(slug: string[]): string | null {
     slug.length === 0
       ? [path.join(DOCS_DIR, "index.mdx")]
       : [
-          path.join(DOCS_DIR, ...slug) + ".mdx",
+          `${path.join(DOCS_DIR, ...slug)}.mdx`,
           path.join(DOCS_DIR, ...slug, "index.mdx"),
         ];
   return candidates.find((p) => fs.existsSync(p)) ?? null;

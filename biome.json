@@ -8,6 +8,9 @@
       "**/target/**",
       "**/rust-oracle/**",
       "**/node_modules/**",
+      "**/.next/**",
+      "**/out/**",
+      "**/dist/**",
       "packages/compiler/tests/fixtures/**",
       "benchmarks/corpus/**",
       "benchmarks/.build/**",
@@ -20,7 +23,8 @@
     "rules": {
       "recommended": true,
       "style": {
-        "noUnusedTemplateLiteral": "off"
+        "noUnusedTemplateLiteral": "off",
+        "noNonNullAssertion": "off"
       }
     }
   },

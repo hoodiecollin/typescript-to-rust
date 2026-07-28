@@ -290,7 +290,7 @@ export function tryArrayMutStatement(
 export function flatDepthArg(arg: Expression | undefined): number | null {
   if (arg === undefined) return 1;
   if (arg.type === "Identifier" && (arg as Identifier).name === "Infinity") {
-    return Infinity;
+    return Number.POSITIVE_INFINITY;
   }
   if (arg.type !== "Literal") return null;
   const v = (arg as Literal).value;

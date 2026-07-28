@@ -118,13 +118,7 @@ export function printE2E(report: E2EReport): void {
     )}   ttr ${fmtMs(startup.ttr.msMin)}`,
   );
   console.log(
-    "\n" +
-      "workload".padEnd(12) +
-      "node".padStart(10) +
-      "bun".padStart(10) +
-      "ttr".padStart(10) +
-      "ttr speedup".padStart(16) +
-      "  (vs bun / vs node)",
+    `\n${"workload".padEnd(12)}${"node".padStart(10)}${"bun".padStart(10)}${"ttr".padStart(10)}${"ttr speedup".padStart(16)}  (vs bun / vs node)`,
   );
   console.log("-".repeat(74));
   for (const w of workloads) {

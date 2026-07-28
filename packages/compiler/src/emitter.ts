@@ -654,7 +654,7 @@ function emitGenerator(g: HirGenerator): string {
  * data-free, so no default ever touches a field the impl might not have.
  */
 function emitTrait(t: HirTrait): string {
-  const methods = t.methods.map((f) => indent(emitFnSig(f) + ";"));
+  const methods = t.methods.map((f) => indent(`${emitFnSig(f)};`));
   const accessors = t.accessors.map((a) =>
     indent(`fn ${rid(a.field)}(&self) -> &${emitType(a.ty)};`),
   );

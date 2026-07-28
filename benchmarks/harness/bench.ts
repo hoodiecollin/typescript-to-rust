@@ -67,12 +67,11 @@ function printSteadyState(rows: SteadyRow[]): void {
   );
   console.log("=".repeat(74));
   console.log(
-    "workload".padEnd(12) +
+    `${"workload".padEnd(12) +
       "node".padStart(10) +
       "bun".padStart(10) +
       "ttr".padStart(10) +
-      "ttr speedup".padStart(18) +
-      "  (vs bun / vs node)",
+      "ttr speedup".padStart(18)}  (vs bun / vs node)`,
   );
   console.log("-".repeat(74));
   for (const r of rows) {
@@ -135,11 +134,11 @@ function toMarkdown(e2e: E2EReport, steady: SteadyRow[]): string {
       `| ${w.name} | ${mb(w.measurements.node.rssBytes)} | ${mb(w.measurements.bun.rssBytes)} | ${mb(w.measurements.ttr.rssBytes)} | ${(w.binaryBytes / 1024).toFixed(0)}KB |`,
     );
   }
-  return l.join("\n") + "\n";
+  return `${l.join("\n")}\n`;
 }
 
 async function main(): Promise<void> {
-  console.log("① correctness cross-check\n" + "-".repeat(40));
+  console.log(`① correctness cross-check\n${"-".repeat(40)}`);
   const verify = await verifyAll();
   if (verify.some((v) => !v.ok)) {
     console.error(
@@ -148,10 +147,10 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  console.log("\n② end-to-end wall-clock + memory\n" + "-".repeat(40));
+  console.log(`\n② end-to-end wall-clock + memory\n${"-".repeat(40)}`);
   const e2e = await runE2E();
 
-  console.log("\n③ steady-state hot loop\n" + "-".repeat(40));
+  console.log(`\n③ steady-state hot loop\n${"-".repeat(40)}`);
   const [nodeJs, bunJs, crit] = await Promise.all([
     steadyStateJs("node"),
     steadyStateJs("bun"),

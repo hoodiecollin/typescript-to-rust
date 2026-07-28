@@ -1686,7 +1686,7 @@ function computeIntegralitySeeds(module: HirModule): Map<HirStmt[], Set<string>>
       params,
       usize: computeUsizeNames(flattenStmts(body)),
       callKey,
-      isCb: callKey !== null && callKey.startsWith("__cb_"),
+      isCb: callKey?.startsWith("__cb_") ?? false,
     };
     units.push(u);
     if (callKey) byCallKey.set(callKey, u);

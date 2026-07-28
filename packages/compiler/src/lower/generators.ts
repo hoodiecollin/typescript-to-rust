@@ -325,6 +325,7 @@ function buildGeneratorStateMachine(
         bat(cur).term = {
           kind: "branch",
           cond: iff.test,
+          // biome-ignore lint/suspicious/noThenProperty: `then`/`else` are CFG branch-target block indices, not a thenable
           then: thenEntry,
           else: hasElse ? (elseEntry as number) : cont,
         };
@@ -360,7 +361,8 @@ function buildGeneratorStateMachine(
         const cont = newBlock();
         bat(cur).term = { kind: "goto", target: test };
         bat(test).term = f.test
-          ? { kind: "branch", cond: f.test, then: bodyB, else: cont }
+          ? // biome-ignore lint/suspicious/noThenProperty: `then`/`else` are CFG branch-target block indices, not a thenable
+            { kind: "branch", cond: f.test, then: bodyB, else: cont }
           : { kind: "goto", target: bodyB };
         loopStack.push({ brk: cont, cont: update });
         const bodyExit = buildSeq(blockBody(f.body), bodyB);
@@ -384,6 +386,7 @@ function buildGeneratorStateMachine(
         bat(test).term = {
           kind: "branch",
           cond: w.test,
+          // biome-ignore lint/suspicious/noThenProperty: `then`/`else` are CFG branch-target block indices, not a thenable
           then: bodyB,
           else: cont,
         };
@@ -746,7 +749,7 @@ function buildGeneratorStateMachine(
   return {
     kind: "generator",
     name,
-    structName: capitalizeAscii(name) + "Gen",
+    structName: `${capitalizeAscii(name)}Gen`,
     item,
     retTy,
     exposesStep: analysis.steppedGenerators.has(name),
