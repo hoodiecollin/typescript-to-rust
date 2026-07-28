@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 250" width="260" height="250" fill="none">
+  
+  <g transform="translate(70 14)">
+    <rect x="20" y="26" width="13" height="68" rx="6.5" fill="currentColor"></rect>
+    <rect x="20" y="33" width="40" height="13" rx="6.5" fill="currentColor"></rect>
+    <rect x="20" y="74" width="40" height="13" rx="6.5" fill="currentColor"></rect>
+    <rect x="87" y="26" width="13" height="68" rx="6.5" fill="currentColor"></rect>
+    <rect x="60" y="53.5" width="40" height="13" rx="6.5" fill="currentColor"></rect>
+  </g>
+  <text x="130" y="196" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="58" font-weight="700" letter-spacing="-2" fill="currentColor">ttr</text>
+  <text x="130" y="224" text-anchor="middle" font-family="JetBrains Mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12.5" letter-spacing="2.4" fill="currentColor">typescript-to-rust</text>
+</svg>
