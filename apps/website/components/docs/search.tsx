@@ -21,6 +21,7 @@ export function SearchTrigger() {
   const [, setOpen] = useAtom(searchOpenAtom);
   return (
     <button
+      type="button"
       onClick={() => setOpen(true)}
       className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted"
     >

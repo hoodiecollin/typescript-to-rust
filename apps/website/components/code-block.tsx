@@ -33,6 +33,7 @@ export async function CodeBlock({
       ) : null}
       <div
         className="overflow-x-auto p-4 text-[13px] leading-relaxed [&_pre]:!bg-transparent [&_pre]:!m-0"
+        // biome-ignore lint/security/noDangerouslySetInnerHtml: renders Shiki-highlighted HTML generated at build time from our own source — trusted
         dangerouslySetInnerHTML={{ __html: html }}
       />
     </div>

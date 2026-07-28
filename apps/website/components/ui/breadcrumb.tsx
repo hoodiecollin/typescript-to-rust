@@ -1,4 +1,4 @@
-import * as React from "react"
+import type * as React from "react"
 import { Slot } from "radix-ui"
 
 import { cn } from "@/lib/utils"
@@ -58,6 +58,7 @@ function BreadcrumbLink({
 
 function BreadcrumbPage({ className, ...props }: React.ComponentProps<"span">) {
   return (
+    // biome-ignore lint/a11y/useFocusableInteractive: shadcn current-page indicator — role="link"+aria-disabled is a non-interactive styling hook, not a focusable control
     <span
       data-slot="breadcrumb-page"
       role="link"

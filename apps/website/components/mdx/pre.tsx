@@ -27,6 +27,7 @@ export function Pre({ className, children, ...props }: React.ComponentProps<"pre
   return (
     <div className="group relative my-4">
       <button
+        type="button"
         onClick={copy}
         aria-label="Copy code"
         className="absolute right-2.5 top-2.5 z-10 inline-flex size-7 items-center justify-center rounded-md border border-border/60 bg-background/70 text-muted-foreground opacity-0 backdrop-blur transition-opacity hover:text-foreground group-hover:opacity-100"
