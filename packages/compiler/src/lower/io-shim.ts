@@ -260,11 +260,14 @@ export function assertModeledParseTarget(ty: RustType, analysis: ModuleAnalysis)
     case "bool":
       return;
     case "vec":
-      return assertModeledParseTarget(ty.elem, analysis);
+      assertModeledParseTarget(ty.elem, analysis);
+      return;
     case "option":
-      return assertModeledParseTarget(ty.inner, analysis);
+      assertModeledParseTarget(ty.inner, analysis);
+      return;
     case "hashmap":
-      return assertModeledParseTarget(ty.value, analysis);
+      assertModeledParseTarget(ty.value, analysis);
+      return;
     case "jsonValue":
       // A dynamic value is serde-deserializable (`serde_json::Value`), so it is a
       // legal `from_value`/`parseJson` target (series 090).

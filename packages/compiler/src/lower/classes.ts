@@ -910,7 +910,8 @@ export function synthesizeInterfaceTraits(
     });
     for (const s of structByName.values()) {
       if (s.name === base || interfaceExtendsBase(s.name, base, analysis)) {
-        (s.implTraits ??= []).push({ trait: traitName, getters });
+        s.implTraits ??= [];
+        s.implTraits.push({ trait: traitName, getters });
       }
     }
   }

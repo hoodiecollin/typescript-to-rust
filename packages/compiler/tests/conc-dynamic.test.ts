@@ -148,8 +148,7 @@ await run();`;
 }
 await run();`;
     const tsSrc =
-      `const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));\n` +
-      src;
+      `const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));\n${src}`;
     const rust = compile(src);
     const rr = await runRust(rust);
     expect(rr.ok).toBe(true);

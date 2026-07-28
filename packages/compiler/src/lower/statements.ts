@@ -1008,6 +1008,7 @@ function isObviousLiteralInit(expr: Expression): boolean {
     if (els.length === 0) return false;
     if (!els.every(isScalarLiteral)) return false;
     const first = typeof (els[0] as Literal).value;
+    // biome-ignore lint/suspicious/useValidTypeof: `first` is itself a typeof result; this asserts element-type homogeneity
     return els.every((e) => typeof (e as Literal).value === first);
   }
   return false;
@@ -1513,7 +1514,7 @@ export function lowerVarDecl(
     if ((d.id as { type: string }).type !== "Identifier") {
       throw new UnsupportedError({ type: "destructuring binding" });
     }
-    let ty = d.id.typeAnnotation
+    const ty = d.id.typeAnnotation
       ? lowerType(d.id.typeAnnotation.typeAnnotation, analysis.structs)
       : null;
     // f64-bearing struct key (series 074): a `Map<Point,V>`/`Set<Point>` binding
@@ -2082,7 +2083,8 @@ function synthesizeInterfaceLiteral(
   const dataFields = analysis.structFields.get(iface) ?? [];
   const dataByName = new Map(dataFields.map((f) => [f.name, f.ty]));
 
-  const structName = `${iface}__lit${(analysis.litCounter += 1)}`;
+  analysis.litCounter += 1;
+  const structName = `${iface}__lit${analysis.litCounter}`;
   const fields: { name: string; ty: RustType }[] = [];
   const litFields: { name: string; value: HirExpr }[] = [];
   const litMethods: { sig: HirFn; field: string }[] = [];
@@ -2409,7 +2411,7 @@ export function planClassFields(
     // A declared type (may already be `Option` via `?`/`T | undefined`), or the
     // literal type inferred from the initializer (`x = 5` → `f64`) via the shared
     // numeric literal pass (`inferInitType`) — never a parallel path.
-    let declared: RustType | null = f.typeAnnotation
+    const declared: RustType | null = f.typeAnnotation
       ? fieldRustType(
           f.typeAnnotation.typeAnnotation,
           f.optional === true,
@@ -2483,7 +2485,6 @@ export function collectStructFields(
           if (existing >= 0)
             fields[existing] = { name: m.key.name, ty, omitIfNone };
           else fields.push({ name: m.key.name, ty, omitIfNone });
-          continue;
         }
       }
       map.set(decl.id.name, fields);

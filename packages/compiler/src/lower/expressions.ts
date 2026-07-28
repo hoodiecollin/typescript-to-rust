@@ -1665,7 +1665,7 @@ export function collectBindingTypes(
   // descends into a generic class/method/fn (series 081).
   const visit = (node: unknown, scopeParams: Set<string>): void => {
     if (Array.isArray(node)) {
-      node.forEach((n) => visit(n, scopeParams));
+      for (const n of node) visit(n, scopeParams);
       return;
     }
     if (!isAstNode(node)) return;

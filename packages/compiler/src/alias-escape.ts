@@ -607,9 +607,7 @@ export function computeAutoRc(
         if (info && !isTypeCloneable(info.field, structs)) {
           throw new UnsupportedError({
             type:
-              `consuming method '${e.name}' on a ${liveAfter ? "reused" : "borrowed/field"} ` +
-              `receiver whose moved-out field is not \`Clone\` (cannot move out of a ` +
-              `shared/borrowed receiver — series 086 fail-loud residual)`,
+              `consuming method '${e.name}' on a ${liveAfter ? "reused" : "borrowed/field"} receiver whose moved-out field is not \`Clone\` (cannot move out of a shared/borrowed receiver — series 086 fail-loud residual)`,
           });
         }
       }

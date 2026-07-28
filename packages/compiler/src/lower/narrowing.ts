@@ -96,7 +96,7 @@ export function lowerDiscriminatedSwitch(
     const tests = [...pending, c.test];
     pending = [];
     const variants = tests.map(variantOf);
-    variants.forEach((v) => covered.add(v.name));
+    for (const v of variants) covered.add(v.name);
     if (variants.length === 1) {
       arms.push(
         buildDiscArm(objName, info, variants[0]!, c.consequent, (b) =>
@@ -488,7 +488,7 @@ export function recognizeTypeofSwitch(
     const tests = [...pending, testStr];
     pending = [];
     const variants = tests.map(variantOf);
-    variants.forEach((v) => covered.add(v.name));
+    for (const v of variants) covered.add(v.name);
     if (variants.length === 1) {
       arms.push(
         buildScalarArm(

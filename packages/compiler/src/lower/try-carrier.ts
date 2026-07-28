@@ -667,8 +667,8 @@ function rewriteCarrierStmt(s: HirStmt, opts: CarrierOpts): HirStmt {
       // carrier needs the outer `Err` variant too.
       if (s.hasErr) esc.hasCarrierErr = true;
       if (!insideLoop) {
-        s.breakTargets.forEach((t) => addTarget(esc.breakTargets, t));
-        s.continueTargets.forEach((t) => addTarget(esc.continueTargets, t));
+        for (const t of s.breakTargets) addTarget(esc.breakTargets, t);
+        for (const t of s.continueTargets) addTarget(esc.continueTargets, t);
       }
       // The nested `finally` runs natively and may itself escape — carrier-encode it.
       return {

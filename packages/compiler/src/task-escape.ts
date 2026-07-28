@@ -301,15 +301,15 @@ function assertNoNestedBindingSpawns(body: HirStmt[]): void {
     for (const s of stmts) {
       switch (s.kind) {
         case "if":
-          s.conseq.forEach((c) => scanStmt(c));
-          if (s.alt) s.alt.forEach((c) => scanStmt(c));
+          for (const c of s.conseq) scanStmt(c);
+          if (s.alt) for (const c of s.alt) scanStmt(c);
           break;
         case "while":
         case "block":
         case "forIn":
         case "forInReborrow":
         case "forRange":
-          s.body.forEach((c) => scanStmt(c));
+          for (const c of s.body) scanStmt(c);
           break;
         default:
           break;
