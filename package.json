@@ -19,8 +19,8 @@
     "typecheck": "tsc -p packages/compiler/tsconfig.json --noEmit && tsc -p benchmarks/tsconfig.json --noEmit",
     "rust:check": "cargo check",
     "rust:test": "cargo test",
-    "check": "bun run typecheck && bun run rust:test && bun run test",
-    "lint": "biome check .",
+    "check": "bun run lint && bun run typecheck && bun run rust:test && bun run test",
+    "lint": "biome lint .",
     "format": "biome format --write .",
     "lower:snapshot": "bun run packages/compiler/scripts/lower-snapshot.ts snapshot",
     "lower:verify": "bun run packages/compiler/scripts/lower-snapshot.ts verify"
