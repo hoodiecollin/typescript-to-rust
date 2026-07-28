@@ -29,8 +29,9 @@ set `color` on the parent and they follow.
 
 ## A note on the lockups
 
-The `-horizontal-*` and `-stacked-*` wordmarks are live `<text>` (JetBrains
-Mono), so they stay editable; they fall back to the system monospace anywhere
-the font isn't installed. For pixel-identical rendering in font-less contexts,
-outline the text (Figma: *Outline stroke* / *Flatten*, or `svgo` + a
-text-to-path pass). The icon marks are pure geometry and need no conversion.
+The `-horizontal-*` and `-stacked-*` wordmarks are **outlined** — the JetBrains
+Mono `ttr` (700) and `typescript-to-rust` (400) text has been converted to
+`<path>` geometry, so every lockup renders identically on any device without the
+font installed. To re-typeset (change the wording or tracking), edit the original
+live-`<text>` versions from git history and re-outline. The icon marks are pure
+geometry and were always font-free.
