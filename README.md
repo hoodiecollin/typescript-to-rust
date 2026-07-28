@@ -1,7 +1,14 @@
-# typescript-to-rust <sub>·&nbsp;`ttr`</sub>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/ttr/ttr-horizontal-dark.svg">
+    <img alt="ttr — typescript-to-rust" src="brand/ttr/ttr-horizontal-light.svg" width="420">
+  </picture>
+</p>
 
-![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
-![Status: pre-release (v0.1.0)](https://img.shields.io/badge/status-pre--release-orange)
+<p align="center">
+  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
+  <img alt="Status: pre-release (v0.1.0)" src="https://img.shields.io/badge/status-pre--release-orange">
+</p>
 
 **Translate a strict subset of TypeScript into _idiomatic_ Rust — with real
 ownership, not `Rc<RefCell>`-everything.**
