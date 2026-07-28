@@ -2,38 +2,23 @@ import type { SVGProps } from "react";
 import { cn } from "@/lib/utils";
 
 /**
- * typescript-to-rust logomark — a TypeScript-blue rounded tile transforming
- * (arrow) into a rust-orange tile: the whole project in one glyph. Colors are
- * fixed brand values (not `currentColor`) so the mark reads on any surface.
- *   TS blue   #3178c6
- *   rust      #d1502a
+ * typescript-to-rust logomark — two interlocking combs: a cyan TypeScript side
+ * (two teeth) meshing tooth-for-tooth with a rust Rust side (one tooth in the
+ * gap). Official brand geometry (see `/brand`); colors are fixed brand values
+ * (not `currentColor`) so the mark reads on any surface.
+ *   TS cyan   #14b8c6
+ *   Rust      #d2542a
  */
 export function TtrMark(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 120 120" fill="none" aria-hidden="true" {...props}>
-      {/* TS source tile */}
-      <rect x="8" y="34" width="40" height="52" rx="10" fill="#3178c6" />
-      <rect x="17" y="52" width="22" height="6.5" rx="1.5" fill="#fff" />
-      <rect x="24.5" y="52" width="6.5" height="26" rx="1.5" fill="#fff" />
-      {/* transform arrow */}
-      <path
-        d="M54 60 h14"
-        stroke="#9ca3af"
-        strokeWidth="5"
-        strokeLinecap="round"
-      />
-      <path
-        d="M64 51 l10 9 -10 9"
-        stroke="#9ca3af"
-        strokeWidth="5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-      {/* Rust output tile — a gear-ish notch nods at the crate ecosystem */}
-      <rect x="80" y="34" width="40" height="52" rx="10" fill="#d1502a" />
-      <circle cx="100" cy="60" r="11" fill="none" stroke="#fff" strokeWidth="4.5" />
-      <circle cx="100" cy="60" r="3.5" fill="#fff" />
+      {/* TypeScript side — cyan comb (stem + two teeth) */}
+      <rect x="20" y="26" width="13" height="68" rx="6.5" fill="#14b8c6" />
+      <rect x="20" y="33" width="40" height="13" rx="6.5" fill="#14b8c6" />
+      <rect x="20" y="74" width="40" height="13" rx="6.5" fill="#14b8c6" />
+      {/* Rust side — rust comb (stem + one tooth in the gap) */}
+      <rect x="87" y="26" width="13" height="68" rx="6.5" fill="#d2542a" />
+      <rect x="60" y="53.5" width="40" height="13" rx="6.5" fill="#d2542a" />
     </svg>
   );
 }
