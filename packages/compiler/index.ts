@@ -22,6 +22,8 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { CrateFile } from "./src/emitter";
 import { compileEntry } from "./src/compile-entry";
+import { FacadeError } from "./src/facade";
+import { runFacade } from "./src/facade-cli";
 import {
   checkRust,
   formatRust,
@@ -32,6 +34,27 @@ import {
 
 const USAGE =
   "usage: bun run index.ts <file.ts> [--fmt] [-o <path>] [--emit] [--check|--run]";
+
+/**
+ * The `ttr facade <crate>` subcommand (series 122) — generate a mirror-plugin
+ * facade from a Rust crate's rustdoc JSON. Dispatched ahead of the default
+ * compile flow so `facade` is a first-class verb, not a flag.
+ */
+async function facadeCommand(argv: string[]): Promise<void> {
+  try {
+    const { dtsPath, tablePath, model } = await runFacade(argv);
+    console.error(`wrote ${resolve(dtsPath)}`);
+    console.error(`wrote ${resolve(tablePath)}`);
+    const omitted =
+      model.rejects.length > 0 ? `, ${model.rejects.length} omitted` : "";
+    console.error(
+      `facade: ${model.types.length} type(s), ${model.methods.length} method(s)${omitted}`,
+    );
+  } catch (err) {
+    console.error(err instanceof FacadeError ? err.message : String(err));
+    process.exit(1);
+  }
+}
 
 /** Derive the sibling `.rs` path for a TypeScript source file. */
 function siblingRustPath(tsFile: string): string {
@@ -50,6 +73,11 @@ function joinCrate(files: CrateFile[]): string {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  if (argv[0] === "facade") {
+    await facadeCommand(argv.slice(1));
+    return;
+  }
 
   let file: string | undefined;
   let fmt = false;
