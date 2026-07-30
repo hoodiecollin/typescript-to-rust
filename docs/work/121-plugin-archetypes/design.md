@@ -244,9 +244,9 @@ maintenance contract we were avoiding never forms.
 - **Builds on:** series 110 (plugin registry, `refinePlugins`, expand-to-HIR
   contract) and the 049 fallibility fixpoint. Touches the series 099/113 type oracle
   for D2.
-- **Status:** design / doctrine. `specs.md` and implementation are **deferred to a
-  greenlight** on the D1–D5 contract deltas — several of which (notably D4's error-type
-  generalization and D1's oracle mode) are plausibly their own series.
+- **Status:** design / doctrine; this is the **umbrella** series. `specs.md` and
+  implementation live in the **per-delta child series** (D1–D5, the generator, the
+  candle plugin), each greenlit and sequenced on its own — see §Decisions.
 - **First client:** the voidloop `candle` mirror plugin.
 
 ## Decisions (locked)
@@ -257,15 +257,21 @@ maintenance contract we were avoiding never forms.
 - **Facade is generated** — via the `ttr facade <crate>` subcommand (see
   §"Facade generation"), never hand-authored. Regeneration against a new crate
   version is the only way the facade changes. (Confirmed.)
+- **Each delta ships as its own series.** D1–D5, the `ttr facade` generator, and the
+  first-client candle plugin are **independent follow-up series**, not one monolithic
+  epic. This tracking series (121, issue #118) is the umbrella; each child gets its
+  own `docs/work/<NNN-slug>/` + issue and is sequenced/greenlit on its own. (Confirmed.)
+- **Golden-value provenance for D1 — pinned candle run.** Mirror-plugin goldens are
+  captured from a pinned `candle` run, **not** an independent numpy/torch reference.
+  Rationale: for a mirror plugin candle *is* the source of truth, so its own output is
+  authoritative by definition; the fixture tests "does TTR emit the right candle
+  calls," not "is candle numerically correct." An external reference would re-introduce
+  the cross-implementation ULP-tolerance problem the oracle-follows-authority doctrine
+  rejects (§Background point 2) — this decision is that doctrine applied to D1's
+  fixtures. (Confirmed.)
 
-## Open questions (needs Collin's input before specs)
+## Open questions (delegated, not blocking)
 
-1. **Sequencing of D1–D5 + the generator** — one epic, or independent follow-up
-   series (e.g. D4's `String`→declared error type, and the `ttr facade` generator,
-   each as its own dialect-/tooling-touching slice)?
-2. **Golden-value provenance for D1** — are candle goldens captured from a pinned
-   candle run, or asserted against an independent reference (numpy/torch) at fixture
-   authoring time?
-3. **Facade extraction mechanism** — does `ttr facade` read rustdoc JSON
-   (`cargo doc --output-format json`) or parse source via `syn`? (Resolved inside the
-   generator's own series, noted here so it isn't lost.)
+1. **Facade extraction mechanism** — does `ttr facade` read rustdoc JSON
+   (`cargo doc --output-format json`) or parse source via `syn`? Resolved **inside the
+   generator's own series**, noted here so it isn't lost.
