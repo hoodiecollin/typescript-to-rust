@@ -145,8 +145,10 @@ Three fail-loud gates, all consistent with TTR's spine:
 - **Parent:** 121 (#118). **Blocks:** consumers of the facade (D2–D5, the candle
   plugin) depend on this artifact; this series depends on none of them.
 - **New requirement:** a **nightly** toolchain for `ttr facade` only (dev-time).
-- **Status:** design complete; `specs.md` (this series) next, then mock → RED → GREEN
-  per the spec-first flow.
+- **Status:** implemented (PR #120). `src/facade.ts` (generator core) + `src/facade-cli.ts`
+  (CLI seam) + the `ttr facade` subcommand; FAC1–FAC15 green against the checked-in
+  fixture plus a live nightly integration spec. Archive the series to
+  `docs/work/_archive/` on merge.
 
 ## Ground-truth schema (rustdoc `format_version` 57 — captured)
 
