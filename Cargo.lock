@@ -1045,6 +1045,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ttr-facade-fixture"
+version = "0.1.0"
+dependencies = [
+ "ttr-facade-fixture-inner",
+]
+
+[[package]]
+name = "ttr-facade-fixture-inner"
+version = "0.1.0"
+
+[[package]]
 name = "ttr-plugin-leftpad"
 version = "0.1.0"
 
