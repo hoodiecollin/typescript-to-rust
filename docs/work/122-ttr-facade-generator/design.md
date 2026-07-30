@@ -46,9 +46,11 @@ format** tax, handled below.
   buried.**
 - **Pin the `format_version`, fail loud on mismatch.** The rustdoc JSON carries a
   top-level `format_version`. The generator declares the single version it
-  understands; a different `format_version` is a **fail-loud** error (TTR's spine),
-  with a message naming the expected version and the nightly toolchain that emits
-  it — never a best-effort parse of an unknown schema.
+  understands — **pinned to `57`** (emitted by `nightly-1.98.0`, dated 2026-06-19,
+  the toolchain present when this series was grounded). A different `format_version`
+  is a **fail-loud** error (TTR's spine), with a message naming both the expected and
+  found version and the nightly toolchain that emits the expected one — never a
+  best-effort parse of an unknown schema.
 
 ## Output artifacts
 
@@ -77,6 +79,20 @@ Per 121 §"Facade generation", two artifacts, written under `--out`:
 | associated `pub fn` / ctor (`Tensor::zeros`, `randn`) | namespaced static (D3) |
 | return `Result<T, E>` | mark **fallible leaf**; record resolved `E` path (D4) |
 | doc comments | **dropped by default** (`--with-docs` opt-in) — respects a consumer's no-comment policy on generated `.d.ts` |
+
+**Re-exports (refined from ground truth).** A `pub use` appears as a `use` item
+carrying `source` (the canonical path string) and a resolved `id`; `paths[id]` gives
+`{ crate_id, path, kind }`, so the canonical path resolves even cross-crate. **But a
+cross-crate re-exported type's *methods are not in the re-exporting crate's
+`index`*** — they live in the *defining* crate's own rustdoc JSON (confirmed: the
+fixture's `Gadget` re-export exposes the type id but none of its methods). Two
+consequences for v1: (a) **intra-crate** re-exports (submodule → root) resolve fully
+and are surfaced with methods; (b) for a **cross-crate** re-export, the generator
+records the canonical type path but **fails loud** if asked to surface its methods
+without also being pointed at the defining crate. Practically this means *target the
+crate that **defines** the types* — for candle, `candle-core` (where `Tensor` is
+defined), not an umbrella re-export crate. Multi-crate documentation + merge is a
+later enhancement, not v1.
 
 **Trait handling.** v1 surfaces **inherent methods** plus a **declared allowlist**
 of traits (`--allow-trait <path>`, e.g. candle's `Module::forward`). Blanket/std
@@ -132,8 +148,32 @@ Three fail-loud gates, all consistent with TTR's spine:
 - **Status:** design complete; `specs.md` (this series) next, then mock → RED → GREEN
   per the spec-first flow.
 
-## Open (resolved within this series' impl)
+## Ground-truth schema (rustdoc `format_version` 57 — captured)
 
-- **Exact `format_version` pin** — tie to a specific nightly (record the toolchain
-  date alongside the pinned integer) when the mock/impl lands and we can read a real
-  rustdoc JSON on this machine.
+Confirmed by capturing the fixture crate's rustdoc JSON
+(`packages/compiler/tests/fixtures/facade/ttr-facade-fixture.rustdoc.json`). The
+parser targets these encodings; recorded here so the impl doesn't re-derive them:
+
+- **Top level:** `{ root, index, paths, external_crates, format_version, target }`.
+  `index[id]` = documented items of *this* crate; `paths[id]` = `{ crate_id, path[],
+  kind }` for any id incl. external; `external_crates[crate_id] = { name, … }`.
+- **Re-export:** `{ inner: { use: { source, name, id, is_glob } } }`; resolve via
+  `paths[id]` (cross-crate → `crate_id` ≠ 0).
+- **Type alias:** `{ inner: { type_alias: { type: { resolved_path: { path, id,
+  args } }, generics } } }` — the alias body is fully resolved, so a `Result<T>`
+  return resolves through the alias id to `core::result::Result<_, Error(id)>`
+  (fallibility + error path for D4).
+- **Method:** `{ inner: { function: { sig: { inputs: [name, Type][], output },
+  generics, header } } }`. Receiver = first input named `self`; `Type =
+  { borrowed_ref: { is_mutable } }` → `&self` / `&mut self`, absent → owned/by-value.
+  Params carry the same `borrowed_ref.is_mutable` borrow shape (D5). `inputs: []` =
+  associated/static (no receiver) → namespaced (D3).
+- **Generic reject (FAC11):** `function.generics.params` containing a `type` param
+  → fail loud (lifetime-only params are fine).
+- **Impl kind (FAC12):** the struct/enum's `impls[]` → `index[implId].inner.impl`;
+  `impl.trait === null` = inherent (surface); `impl.trait.path` set = trait impl
+  (surface only if `--allow-trait` names it). Macro-generated methods (e.g. `raw`)
+  appear in the inherent impl's `items` — expansion is already applied (FAC6).
+
+*(format_version 57 pinned; see §Engine mechanics. When the toolchain bumps the
+format, the pin + this section move together in a follow-up.)*
