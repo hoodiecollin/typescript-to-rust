@@ -8,6 +8,7 @@
  *   bun run index.ts <file.ts> --emit       # write output next to source
  *   bun run index.ts <file.ts> --check      # also `cargo check` the output
  *   bun run index.ts <file.ts> --run        # also compile & run, print stdout
+ *   bun run index.ts <file.ts> --emit --pin-toolchain   # + a rust-toolchain.toml
  *
  * A lone entry emits one file; an entry that imports `./`-relative modules emits a
  * **crate** (one `.rs` per module). A bare/package import is refused fail-loud.
@@ -24,7 +25,13 @@ import type { CrateFile } from "./src/emitter";
 import { compileEntry } from "./src/compile-entry";
 import { FacadeError } from "./src/facade";
 import { runFacade } from "./src/facade-cli";
-import { ToolchainError } from "./src/toolchain";
+import {
+  ToolchainError,
+  emittedPinChannel,
+  generateRustToolchainToml,
+  loadToolchainConfig,
+  normalizeChannelVersion,
+} from "./src/toolchain";
 import {
   checkRust,
   formatRust,
@@ -34,7 +41,7 @@ import {
 } from "./src/harness";
 
 const USAGE =
-  "usage: bun run index.ts <file.ts> [--fmt] [-o <path>] [--emit] [--check|--run]";
+  "usage: bun run index.ts <file.ts> [--fmt] [-o <path>] [--emit] [--check|--run] [--pin-toolchain [--toolchain <channel>]]";
 
 /**
  * The `ttr facade <crate>` subcommand (series 122) — generate a mirror-plugin
@@ -86,6 +93,8 @@ async function main(): Promise<void> {
   let emitSibling = false;
   let check = false;
   let run = false;
+  let pinToolchain = false;
+  let toolchainOverride: string | undefined;
   const outPaths: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -104,6 +113,18 @@ async function main(): Promise<void> {
       case "--run":
         run = true;
         break;
+      case "--pin-toolchain":
+        pinToolchain = true;
+        break;
+      case "--toolchain": {
+        const value = argv[++i];
+        if (!value) {
+          console.error("--toolchain requires a channel argument");
+          process.exit(1);
+        }
+        toolchainOverride = value;
+        break;
+      }
       case "-o":
       case "--out": {
         const value = argv[++i];
@@ -174,14 +195,41 @@ async function main(): Promise<void> {
   // A single-file emit honors `-o <path>` verbatim; a crate writes its tree under
   // a directory (`-o <dir>` / the `<stem>.crate/` sibling for `--emit`).
   const dirTargets = [...outPaths];
+  if (compiled.isCrate && emitSibling) dirTargets.push(siblingCrateDir(file));
+
+  // A `rust-toolchain.toml` pins the emitted crate's toolchain (series 123, stretch
+  // phase). It is opt-in (`--pin-toolchain`) and needs a directory to live in, so it
+  // only applies to a crate emit written to a directory; misuse fails loud.
+  if (pinToolchain && !(compiled.isCrate && dirTargets.length > 0)) {
+    console.error(
+      "--pin-toolchain requires a crate emit to a directory (-o <dir> or --emit)",
+    );
+    process.exit(1);
+  }
+  const pinChannel = pinToolchain
+    ? toolchainOverride
+      ? normalizeChannelVersion(toolchainOverride)
+      : emittedPinChannel(loadToolchainConfig({ cwd: process.cwd() }))
+    : "";
+
   if (compiled.isCrate) {
-    if (emitSibling) dirTargets.push(siblingCrateDir(file));
     if (dirTargets.length > 0) {
       for (const dir of dirTargets) {
         for (const f of files) {
           const dest = join(dir, f.path);
           mkdirSync(dirname(dest), { recursive: true });
           writeFileSync(dest, withNl(f.content));
+        }
+        if (pinToolchain) {
+          const dest = join(dir, "rust-toolchain.toml");
+          mkdirSync(dirname(dest), { recursive: true });
+          writeFileSync(
+            dest,
+            generateRustToolchainToml({ channel: pinChannel }),
+          );
+          console.error(
+            `wrote ${resolve(dest)} (pinned toolchain: ${pinChannel})`,
+          );
         }
         console.error(`wrote ${files.length} file(s) to ${resolve(dir)}/`);
       }
