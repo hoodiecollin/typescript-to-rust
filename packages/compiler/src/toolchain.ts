@@ -247,6 +247,48 @@ export function loadToolchainConfig(
   });
 }
 
+/**
+ * Normalize a bare `major.minor` version (`"1.85"`) into the full `major.minor.patch`
+ * (`"1.85.0"`) that a `rust-toolchain.toml` version channel requires — rustup
+ * version channels need all three components. Named channels (`stable`, `nightly`,
+ * `1.86.0`, `nightly-2026-06-19`) pass through unchanged.
+ */
+export function normalizeChannelVersion(channel: string): string {
+  return /^\d+\.\d+$/.test(channel) ? `${channel}.0` : channel;
+}
+
+/**
+ * The default channel to pin an emitted crate to: the MSRV as a full version
+ * (`"1.85"` → `"1.85.0"`). Pinning to the exact edition-2024 floor makes the emitted
+ * crate build reproducibly against the toolchain TTR targets; a caller may override.
+ */
+export function emittedPinChannel(config: ResolvedToolchainConfig): string {
+  return normalizeChannelVersion(config.msrv);
+}
+
+/** Options for {@link generateRustToolchainToml}. */
+export interface RustToolchainTomlOptions {
+  channel: string;
+  components?: string[];
+}
+
+/**
+ * Generate the contents of a `rust-toolchain.toml` pinning an emitted crate's
+ * toolchain (design decision 6 / stretch phase). What TTR writes here round-trips
+ * back through {@link parseRustToolchainToml} to the same channel. TTR generates
+ * this only on request (`--pin-toolchain`); it never requires one for its own use.
+ */
+export function generateRustToolchainToml(
+  opts: RustToolchainTomlOptions,
+): string {
+  const lines = ["[toolchain]", `channel = "${opts.channel}"`];
+  if (opts.components && opts.components.length > 0) {
+    const list = opts.components.map((c) => `"${c}"`).join(", ");
+    lines.push(`components = [${list}]`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 function channelIsNightly(channel: string): boolean {
   return channel === "nightly" || channel.startsWith("nightly-");
 }

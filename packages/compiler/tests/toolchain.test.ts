@@ -14,7 +14,10 @@ import {
   type SpawnLike,
   TOOLCHAIN_DEFAULTS,
   ToolchainError,
+  emittedPinChannel,
   ensureToolchain,
+  generateRustToolchainToml,
+  normalizeChannelVersion,
   parseRustToolchainToml,
   parseTtrToml,
   resolveToolchainConfig,
@@ -422,5 +425,52 @@ describe("TOOL12 nightly rust-toolchain.toml is reused for facade, no +nightly s
     expect(res.channel).toBe("nightly");
     expect(res.shim).toEqual([]);
     expect(calls.some(hasNightly)).toBe(false);
+  });
+});
+
+// ── §6 rust-toolchain.toml generation for emitted crates (TOOL13–TOOL15) ──────
+
+describe("TOOL13 generateRustToolchainToml pins the channel and round-trips", () => {
+  test("emits valid TOML that parseRustToolchainToml reads back to the same channel", () => {
+    const content = generateRustToolchainToml({ channel: "1.85.0" });
+    const doc = Bun.TOML.parse(content) as {
+      toolchain?: { channel?: string };
+    };
+    expect(doc.toolchain?.channel).toBe("1.85.0");
+    expect(parseRustToolchainToml(doc).channel).toBe("1.85.0");
+  });
+
+  test("optional components are emitted", () => {
+    const content = generateRustToolchainToml({
+      channel: "stable",
+      components: ["rustfmt", "clippy"],
+    });
+    const doc = Bun.TOML.parse(content) as {
+      toolchain?: { channel?: string; components?: string[] };
+    };
+    expect(doc.toolchain?.channel).toBe("stable");
+    expect(doc.toolchain?.components).toEqual(["rustfmt", "clippy"]);
+  });
+});
+
+describe("TOOL14 emittedPinChannel defaults to the MSRV as a full version", () => {
+  test("the default MSRV (1.85) normalizes to a full 1.85.0 version channel", () => {
+    expect(emittedPinChannel(config())).toBe("1.85.0");
+  });
+
+  test("a full-version or named MSRV passes through unchanged", () => {
+    expect(emittedPinChannel(config({ msrv: "1.86.0" }))).toBe("1.86.0");
+    expect(emittedPinChannel(config({ msrv: "stable" }))).toBe("stable");
+  });
+});
+
+describe("TOOL15 normalizeChannelVersion completes bare major.minor", () => {
+  test("major.minor gains a .0 patch; everything else is unchanged", () => {
+    expect(normalizeChannelVersion("1.85")).toBe("1.85.0");
+    expect(normalizeChannelVersion("1.85.0")).toBe("1.85.0");
+    expect(normalizeChannelVersion("stable")).toBe("stable");
+    expect(normalizeChannelVersion("nightly-2026-06-19")).toBe(
+      "nightly-2026-06-19",
+    );
   });
 });
