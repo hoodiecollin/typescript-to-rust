@@ -1,12 +1,19 @@
 # Full oracle suite — the cargo-backed differential tests (`bun run test`), which
 # compile AND run a real Rust crate per fixture through a live cargo toolchain.
-# This is the expensive one (~12-13 min warm locally; ~20-40 min on a cold
-# runner), so it does NOT run per-PR — the fast checks in `ci.yml` gate those.
+# This is the expensive one, so it does NOT run per-PR — the fast checks in
+# `ci.yml` gate those. Run it before cutting a release, or on demand.
+#
+# The oracle job is SHARDED across 8 parallel runners (`bun test --shard=k/8`).
+# Each shard is a separate machine with its own cargo `target/`, so:
+#   • wall-clock drops ~8x versus a single serial runner, and
+#   • there is no shared-`target/` contention (the flake that plagues running the
+#     whole suite on one constrained local machine — see tests/_support/setup.ts).
+# Public repos get free, effectively unlimited standard-runner minutes and ~20
+# concurrent jobs, so 8 shards is comfortable.
 #
 # Run this PRIOR TO RELEASE:
-#   • manually via the Actions tab ("Run workflow") before cutting a release, or
+#   • manually via the Actions tab ("Run workflow"), or
 #   • automatically when a version tag `v*` is pushed.
-# It runs the complete gate: lint + typecheck + cargo test + the oracle suite.
 name: Oracle suite
 
 on:
@@ -22,12 +29,12 @@ permissions:
   contents: read
 
 jobs:
-  oracle:
-    name: full suite (cargo-backed oracle)
+  # Lint + typecheck + the Rust unit tests — the non-oracle half of `bun run check`,
+  # run once (not per shard).
+  checks:
+    name: lint · typecheck · cargo test
     runs-on: ubuntu-latest
-    # Ceiling guard: the suite is ~20-40 min cold; 60 leaves headroom without
-    # letting a hung cargo invocation run away.
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -47,6 +54,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: checks
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -54,6 +63,48 @@ jobs:
       - name: Lint (biome)
         run: bun run lint
 
-      # `check` = typecheck + cargo test + the full cargo-backed oracle suite.
-      - name: Full gate (typecheck · cargo test · oracle)
-        run: bun run check
+      - name: Typecheck (tsc)
+        run: bun run typecheck
+
+      - name: Rust unit tests (cargo test)
+        run: bun run rust:test
+
+  # The cargo-backed oracle/differential suite, split across 8 parallel shards.
+  oracle:
+    name: oracle shard ${{ matrix.shard }}/8
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Report every shard's result; one failing shard must not cancel the rest.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Cache bun install
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # A per-shard cache key so each shard keeps its own warm `target/` (the oracle
+      # crate build) instead of racing to save one shared cache.
+      - name: Cache cargo (per-shard)
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: oracle-shard-${{ matrix.shard }}
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Oracle suite (shard ${{ matrix.shard }}/8)
+        run: bun test packages/compiler --shard=${{ matrix.shard }}/8
