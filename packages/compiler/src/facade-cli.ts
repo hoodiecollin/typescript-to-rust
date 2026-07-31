@@ -16,23 +16,20 @@ import {
   emitFacade,
   generateFacade,
 } from "./facade";
+import {
+  type EnsureResult,
+  type PromptLike,
+  type ResolvedToolchainConfig,
+  type SpawnLike,
+  type ToolchainConfigLayer,
+  bunSpawn,
+  defaultPrompt,
+  ensureToolchain,
+  loadToolchainConfig,
+} from "./toolchain";
 
-/** The minimal spawn contract this module needs — satisfied by {@link bunSpawn}. */
-export type SpawnLike = (
-  cmd: string[],
-  cwd: string,
-) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
-
-/** Default {@link SpawnLike}: inherit the environment so rustup shims resolve. */
-export const bunSpawn: SpawnLike = async (cmd, cwd) => {
-  const proc = Bun.spawn(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
-};
+export type { SpawnLike };
+export { bunSpawn };
 
 /** Cargo package name → the snake-cased basename rustdoc writes under `target/doc`. */
 function rustdocJsonName(crate: string): string {
@@ -45,6 +42,12 @@ export interface ObtainOptions {
   cwd?: string;
   spawn?: SpawnLike;
   readFile?: (path: string) => string;
+  /**
+   * The cargo channel shim to reach nightly rustdoc-json — `["+nightly"]` by
+   * default, or `[]` when the default toolchain is already nightly (a
+   * `rust-toolchain.toml` pinned to nightly, resolved by `ensureToolchain`).
+   */
+  shim?: string[];
 }
 
 /**
@@ -60,13 +63,14 @@ export async function obtainRustdocJson(
   const cwd = opts.cwd ?? process.cwd();
   const spawn = opts.spawn ?? bunSpawn;
   const readFile = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
+  const shim = opts.shim ?? ["+nightly"];
 
   let result: Awaited<ReturnType<SpawnLike>>;
   try {
     result = await spawn(
       [
         "cargo",
-        "+nightly",
+        ...shim,
         "rustdoc",
         "-p",
         crate,
@@ -124,14 +128,22 @@ export interface FacadeArgs {
   out: string;
   allowTraits: string[];
   withDocs: boolean;
+  /** Toolchain overrides parsed from `--toolchain`/`--yes`/`--no-install`/…. */
+  cli: ToolchainConfigLayer;
 }
 
-/** Parse `<crate>[@version] [--out dir] [--allow-trait path]... [--with-docs]`. */
+/**
+ * Parse `<crate>[@version] [--out dir] [--allow-trait path]... [--with-docs]` plus
+ * the toolchain overrides (`--toolchain`, `--facade-toolchain`,
+ * `--facade-auto-install`, `--yes`/`-y`, `--no-install`) that the highest-precedence
+ * config layer draws from.
+ */
 export function parseFacadeArgs(argv: string[]): FacadeArgs {
   let crateSpec: string | undefined;
   let out = ".";
   const allowTraits: string[] = [];
   let withDocs = false;
+  const cli: ToolchainConfigLayer = {};
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -153,6 +165,32 @@ export function parseFacadeArgs(argv: string[]): FacadeArgs {
       case "--with-docs":
         withDocs = true;
         break;
+      case "--toolchain": {
+        const v = argv[++i];
+        if (!v)
+          throw new FacadeError("facade: --toolchain requires a channel name");
+        cli.channel = v;
+        break;
+      }
+      case "--facade-toolchain": {
+        const v = argv[++i];
+        if (!v)
+          throw new FacadeError(
+            "facade: --facade-toolchain requires a channel name",
+          );
+        cli.facadeToolchain = v;
+        break;
+      }
+      case "--facade-auto-install":
+        cli.facadeAutoInstall = true;
+        break;
+      case "--yes":
+      case "-y":
+        cli.assumeYes = true;
+        break;
+      case "--no-install":
+        cli.noInstall = true;
+        break;
       default:
         if (arg.startsWith("-"))
           throw new FacadeError(`facade: unknown flag ${arg}`);
@@ -170,7 +208,7 @@ export function parseFacadeArgs(argv: string[]): FacadeArgs {
   const at = crateSpec.lastIndexOf("@");
   const crate = at > 0 ? crateSpec.slice(0, at) : crateSpec;
   const version = at > 0 ? crateSpec.slice(at + 1) : null;
-  return { crate, version, out, allowTraits, withDocs };
+  return { crate, version, out, allowTraits, withDocs, cli };
 }
 
 /** Result of a facade run — the model plus the paths written. */
@@ -180,32 +218,63 @@ export interface FacadeRunResult {
   tablePath: string;
 }
 
-/** How {@link runFacade} obtains its rustdoc JSON (injected in specs). */
+/** How {@link runFacade} obtains its rustdoc JSON + toolchain (injected in specs). */
 export interface RunOptions {
   loadRustdoc?: (crate: string, version: string | null) => Promise<unknown>;
   writeFile?: (path: string, content: string) => void;
   mkdir?: (dir: string) => void;
   log?: (message: string) => void;
+  /** Pre-resolved config; loaded from `cwd` + parsed CLI flags when omitted. */
+  config?: ResolvedToolchainConfig;
+  cwd?: string;
+  spawn?: SpawnLike;
+  prompt?: PromptLike;
+  isInteractive?: boolean;
+  /** The toolchain gate; defaults to the real {@link ensureToolchain}. */
+  ensure?: (role: "facade") => Promise<EnsureResult>;
 }
 
 /**
- * Run the `ttr facade` subcommand end-to-end: obtain the crate's rustdoc JSON,
- * generate + emit the facade, write `<crate>.d.ts` + `<crate>.facade.json` under
- * `--out` (FAC1), and **loudly report** any unmappable items to stderr (FAC11 —
- * reported, never faked). Returns the model and the written paths.
+ * Run the `ttr facade` subcommand end-to-end: **ensure the nightly rustdoc-json
+ * toolchain** (`ensureToolchain("facade")` — the generalized FAC3 gate, TOOL10–
+ * TOOL12), obtain the crate's rustdoc JSON via the resolved channel shim, generate +
+ * emit the facade, write `<crate>.d.ts` + `<crate>.facade.json` under `--out`
+ * (FAC1), and **loudly report** any unmappable items to stderr (FAC11 — reported,
+ * never faked). Returns the model and the written paths.
+ *
+ * The toolchain gate only runs on the default rustdoc-loading path; a spec that
+ * injects `loadRustdoc` supplies the JSON directly and stays hermetic.
  */
 export async function runFacade(
   argv: string[],
   opts: RunOptions = {},
 ): Promise<FacadeRunResult> {
   const args = parseFacadeArgs(argv);
-  const load =
-    opts.loadRustdoc ?? ((crate: string) => obtainRustdocJson(crate));
+  const cwd = opts.cwd ?? process.cwd();
   const writeFile =
     opts.writeFile ?? ((p: string, c: string) => writeFileSync(p, c));
   const mkdir =
     opts.mkdir ?? ((d: string) => mkdirSync(d, { recursive: true }));
   const log = opts.log ?? ((m: string) => console.error(m));
+
+  const load =
+    opts.loadRustdoc ??
+    (async (crate: string) => {
+      const config = opts.config ?? loadToolchainConfig({ cwd, cli: args.cli });
+      const ensure =
+        opts.ensure ??
+        ((role: "facade") =>
+          ensureToolchain(role, {
+            config,
+            cwd,
+            spawn: opts.spawn,
+            prompt: opts.prompt ?? defaultPrompt,
+            isInteractive: opts.isInteractive,
+            log,
+          }));
+      const { shim } = await ensure("facade");
+      return obtainRustdocJson(crate, { cwd, spawn: opts.spawn, shim });
+    });
 
   const json = await load(args.crate, args.version);
   const model = generateFacade(json, {

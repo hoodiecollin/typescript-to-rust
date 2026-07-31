@@ -340,6 +340,22 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   The old throw-in-class rejection is removed. **Deferred**: cross-class same-name
   method resolution (name-based can over-`?`; cargo backstops); `try`/`catch`
   inside a method; fallible getters/setters/static/`async` methods.
+- **Toolchain policy + bootstrap** (`src/toolchain.ts`, series 123): the MSRV is now
+  explicit — `[workspace.package] rust-version = "1.85"`, inherited by every crate.
+  Three roles carry distinct requirements (emitted = stable ≥ 1.85; harness = any
+  stable, never nightly; facade = nightly rustdoc-json, opt-in). `ensureToolchain(
+  role)` is the single fail-loud gate every cargo-spawning path routes through:
+  detect → (interactive) consent-gated `rustup toolchain install` (or `rustup-init`
+  when rustup is also absent) → else fail loud naming the exact command. Config comes
+  from `ttr.toml` + `rust-toolchain.toml` + env + CLI (precedence CLI > env >
+  `ttr.toml` > `rust-toolchain.toml` > default); a `no_std` key is rejected fail-loud
+  (parked future target). `ttr facade`'s ad-hoc nightly check (FAC3) is generalized
+  onto `ensureToolchain("facade")`, honoring `auto_install`/`--yes` and reusing a
+  nightly `rust-toolchain.toml` without a `+nightly` shim. TTR can also **generate** a
+  `rust-toolchain.toml` to pin a consumer's emitted crate (`generateRustToolchainToml`
+  / `emittedPinChannel`, defaulting to the MSRV as a full version `1.85.0`), exposed
+  on the `ttr` CLI as `--pin-toolchain [--toolchain <channel>]` for crate emits. Specs:
+  TOOL1–TOOL15 (`tests/toolchain.test.ts`), hermetic over an injected spawn + prompt.
 
 **Next** — the live backlog is **GitHub Issues** (`hoodiecollin/typescript-to-rust`)
 and the [TTR Roadmap project](https://github.com/users/hoodiecollin/projects/4), **not**

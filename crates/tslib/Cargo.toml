@@ -9,6 +9,7 @@ edition = "2021"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 # JSON fidelity (series 045): serialize via serde, render with JS number rules.
