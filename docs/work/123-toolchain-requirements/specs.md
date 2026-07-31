@@ -61,18 +61,19 @@ prompt seam**, so specs are hermetic and need no real toolchain mutation.
 - **TOOL12** — an existing `rust-toolchain.toml` whose `channel` is nightly is
   **respected** for the facade role (reused instead of a separate `+nightly` shim).
 
-## Impl-plan
+## Impl-plan (shipped)
 
-Ordered; each step gated by `bun run typecheck` + the relevant specs RED→GREEN. No
-dialect surface is touched, so this proceeds straight through the spec-first flow.
+All TOOL1–TOOL12 are green and `bun run check` is clean. Ground truth:
 
-1. **MSRV pin** — `[workspace.package] rust-version` + crate inheritance; TOOL1.
-2. **Config loader** — `ttr.toml` + env + CLI → typed config with precedence; the
-   `no_std`-rejection gate; TOOL2–TOOL3.
-3. **`ensureToolchain(role)`** — detection + non-interactive fail-loud over an
-   injected spawn; TOOL4–TOOL6.
-4. **Consent/install seam** — mockable prompt; run resolved rustup commands; TOOL7–
-   TOOL9.
-5. **Facade refactor** — route facade's nightly check through `ensureToolchain`;
-   `auto_install`/`--yes`; TOOL10–TOOL12.
-6. **GREEN** — all TOOL specs pass; `bun run check` clean.
+1. **MSRV pin** — root `Cargo.toml` `[workspace.package] rust-version = "1.85"` +
+   `rust-version.workspace = true` in every crate; TOOL1 reads it.
+2. **Config loader** — `resolveToolchainConfig` / `loadToolchainConfig` +
+   `parseTtrToml` (`no_std` fail-loud) in `src/toolchain.ts`; TOOL2–TOOL3.
+3. **`ensureToolchain(role)`** — detection + non-interactive fail-loud over the
+   injected spawn in `src/toolchain.ts`; TOOL4–TOOL6.
+4. **Consent/install seam** — `PromptLike` + `defaultPrompt`; resolved rustup
+   commands (incl. `rustup-init` on consent); TOOL7–TOOL9.
+5. **Facade refactor** — `runFacade` gates on `ensureToolchain("facade")`;
+   `obtainRustdocJson` honors the resolved channel shim; TOOL10–TOOL12.
+
+The stretch `rust-toolchain.toml` *generation* step is deferred to a follow-up.

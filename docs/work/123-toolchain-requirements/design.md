@@ -126,19 +126,24 @@ of facade's existing `FAC3`; facade's ad-hoc nightly check is refactored onto
   `ensureToolchain("facade")`; `FAC3` is the first instance of the general rule.
 - **Relates to:** `120-public-release` — a defined toolchain + MSRV story is a
   release gate.
-- **Status:** design complete; `specs.md` (this series) next, then the impl phases
-  below through mock → RED → GREEN.
+- **Status:** implemented. Phases 1–5 shipped; TOOL1–TOOL12 green over an injected
+  spawn + prompt. The stretch phase (6) is deferred to a follow-up.
 
 ## Impl phases
 
-1. **Pin MSRV** — `[workspace.package] rust-version = "1.85"` + `rust-version.workspace
-   = true` across crates; a CI/`bun run check` assertion.
-2. **Config loader** — parse `ttr.toml` + env + CLI into a typed config with the
-   precedence above.
-3. **`ensureToolchain(role)`** — detection + fail-loud (non-interactive path first;
-   fully unit-testable with an injected spawn).
-4. **Interactive install** — the consent prompt behind a mockable seam.
-5. **Facade refactor** — route `ttr facade`'s nightly check through
-   `ensureToolchain("facade")`; `auto_install`/`--yes` gate the install.
-6. **(stretch) rust-toolchain.toml generation** — pin a consumer's emitted crate;
-   may defer to a follow-up.
+Phases 1–5 shipped. Ground truth: MSRV pin lives in the root `Cargo.toml`
+(`[workspace.package] rust-version = "1.85"`) inherited by every crate; the config
+loader + precedence + `no_std` fail-loud gate + `ensureToolchain(role)` + the
+consent/install seam live in `packages/compiler/src/toolchain.ts`; `ttr facade` now
+routes its nightly check through `ensureToolchain("facade")`
+(`packages/compiler/src/facade-cli.ts`), with `obtainRustdocJson` honoring the
+resolved channel shim (so a nightly `rust-toolchain.toml` is reused, no `+nightly`).
+Specs: `packages/compiler/tests/toolchain.test.ts` (TOOL1–TOOL12).
+
+1. **Pin MSRV** — shipped.
+2. **Config loader** — shipped (`resolveToolchainConfig` / `loadToolchainConfig`).
+3. **`ensureToolchain(role)`** — shipped (detection + non-interactive fail-loud).
+4. **Interactive install** — shipped (consent prompt behind the injected seam).
+5. **Facade refactor** — shipped (`ensureToolchain("facade")`, `auto_install`/`--yes`).
+6. **(stretch) rust-toolchain.toml generation** — **deferred** to a follow-up; TTR
+   *reads* an existing one but does not yet *generate* one to pin a consumer's crate.
