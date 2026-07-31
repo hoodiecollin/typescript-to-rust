@@ -61,9 +61,21 @@ prompt seam**, so specs are hermetic and need no real toolchain mutation.
 - **TOOL12** — an existing `rust-toolchain.toml` whose `channel` is nightly is
   **respected** for the facade role (reused instead of a separate `+nightly` shim).
 
+## 6. rust-toolchain.toml generation for emitted crates
+
+- **TOOL13** — `generateRustToolchainToml` emits **valid TOML** pinning
+  `[toolchain] channel`, and what it writes **round-trips** back through
+  `parseRustToolchainToml` (the phase-5 reader) to the same channel; optional
+  `components` are emitted.
+- **TOOL14** — `emittedPinChannel` defaults the pin to the **MSRV as a full version**
+  (`1.85` → `1.85.0`); a full-version or named MSRV passes through unchanged.
+- **TOOL15** — `normalizeChannelVersion` completes a bare `major.minor` to
+  `major.minor.patch` (rustup version-channels need three components); named channels
+  (`stable`, `nightly-<date>`, an already-full version) are unchanged.
+
 ## Impl-plan (shipped)
 
-All TOOL1–TOOL12 are green and `bun run check` is clean. Ground truth:
+All TOOL1–TOOL15 are green and `bun run check` is clean. Ground truth:
 
 1. **MSRV pin** — root `Cargo.toml` `[workspace.package] rust-version = "1.85"` +
    `rust-version.workspace = true` in every crate; TOOL1 reads it.
@@ -75,5 +87,6 @@ All TOOL1–TOOL12 are green and `bun run check` is clean. Ground truth:
    commands (incl. `rustup-init` on consent); TOOL7–TOOL9.
 5. **Facade refactor** — `runFacade` gates on `ensureToolchain("facade")`;
    `obtainRustdocJson` honors the resolved channel shim; TOOL10–TOOL12.
-
-The stretch `rust-toolchain.toml` *generation* step is deferred to a follow-up.
+6. **rust-toolchain.toml generation** — `generateRustToolchainToml` /
+   `emittedPinChannel` / `normalizeChannelVersion` in `src/toolchain.ts`, exposed on
+   the `ttr` CLI as `--pin-toolchain [--toolchain <channel>]`; TOOL13–TOOL15.

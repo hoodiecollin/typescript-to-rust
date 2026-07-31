@@ -351,9 +351,11 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
   `ttr.toml` > `rust-toolchain.toml` > default); a `no_std` key is rejected fail-loud
   (parked future target). `ttr facade`'s ad-hoc nightly check (FAC3) is generalized
   onto `ensureToolchain("facade")`, honoring `auto_install`/`--yes` and reusing a
-  nightly `rust-toolchain.toml` without a `+nightly` shim. Specs: TOOL1–TOOL12
-  (`tests/toolchain.test.ts`), hermetic over an injected spawn + prompt. **Deferred**:
-  generating a `rust-toolchain.toml` to pin a consumer's emitted crate.
+  nightly `rust-toolchain.toml` without a `+nightly` shim. TTR can also **generate** a
+  `rust-toolchain.toml` to pin a consumer's emitted crate (`generateRustToolchainToml`
+  / `emittedPinChannel`, defaulting to the MSRV as a full version `1.85.0`), exposed
+  on the `ttr` CLI as `--pin-toolchain [--toolchain <channel>]` for crate emits. Specs:
+  TOOL1–TOOL15 (`tests/toolchain.test.ts`), hermetic over an injected spawn + prompt.
 
 **Next** — the live backlog is **GitHub Issues** (`hoodiecollin/typescript-to-rust`)
 and the [TTR Roadmap project](https://github.com/users/hoodiecollin/projects/4), **not**

@@ -126,24 +126,31 @@ of facade's existing `FAC3`; facade's ad-hoc nightly check is refactored onto
   `ensureToolchain("facade")`; `FAC3` is the first instance of the general rule.
 - **Relates to:** `120-public-release` — a defined toolchain + MSRV story is a
   release gate.
-- **Status:** implemented. Phases 1–5 shipped; TOOL1–TOOL12 green over an injected
-  spawn + prompt. The stretch phase (6) is deferred to a follow-up.
+- **Status:** implemented. All phases (1–6) shipped; TOOL1–TOOL15 green over an
+  injected spawn + prompt.
 
 ## Impl phases
 
-Phases 1–5 shipped. Ground truth: MSRV pin lives in the root `Cargo.toml`
+All shipped. Ground truth: MSRV pin lives in the root `Cargo.toml`
 (`[workspace.package] rust-version = "1.85"`) inherited by every crate; the config
 loader + precedence + `no_std` fail-loud gate + `ensureToolchain(role)` + the
-consent/install seam live in `packages/compiler/src/toolchain.ts`; `ttr facade` now
-routes its nightly check through `ensureToolchain("facade")`
-(`packages/compiler/src/facade-cli.ts`), with `obtainRustdocJson` honoring the
-resolved channel shim (so a nightly `rust-toolchain.toml` is reused, no `+nightly`).
-Specs: `packages/compiler/tests/toolchain.test.ts` (TOOL1–TOOL12).
+consent/install seam + the `rust-toolchain.toml` generator live in
+`packages/compiler/src/toolchain.ts`; `ttr facade` now routes its nightly check
+through `ensureToolchain("facade")` (`packages/compiler/src/facade-cli.ts`), with
+`obtainRustdocJson` honoring the resolved channel shim (so a nightly
+`rust-toolchain.toml` is reused, no `+nightly`); the `ttr` CLI's `--pin-toolchain`
+writes a generated `rust-toolchain.toml` into a crate emit's directory
+(`packages/compiler/index.ts`). Specs:
+`packages/compiler/tests/toolchain.test.ts` (TOOL1–TOOL15).
 
 1. **Pin MSRV** — shipped.
 2. **Config loader** — shipped (`resolveToolchainConfig` / `loadToolchainConfig`).
 3. **`ensureToolchain(role)`** — shipped (detection + non-interactive fail-loud).
 4. **Interactive install** — shipped (consent prompt behind the injected seam).
 5. **Facade refactor** — shipped (`ensureToolchain("facade")`, `auto_install`/`--yes`).
-6. **(stretch) rust-toolchain.toml generation** — **deferred** to a follow-up; TTR
-   *reads* an existing one but does not yet *generate* one to pin a consumer's crate.
+6. **rust-toolchain.toml generation** — shipped. `generateRustToolchainToml` +
+   `emittedPinChannel` (defaults to the MSRV as a full version, `1.85` → `1.85.0`,
+   since rustup version-channels need three components; overridable via
+   `--toolchain <channel>`). Exposed on the `ttr` CLI as `--pin-toolchain`, valid
+   only for a crate emit written to a directory (fails loud otherwise). What TTR
+   writes round-trips back through `parseRustToolchainToml`.
