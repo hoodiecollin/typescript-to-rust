@@ -24,6 +24,7 @@ import type { CrateFile } from "./src/emitter";
 import { compileEntry } from "./src/compile-entry";
 import { FacadeError } from "./src/facade";
 import { runFacade } from "./src/facade-cli";
+import { ToolchainError } from "./src/toolchain";
 import {
   checkRust,
   formatRust,
@@ -51,7 +52,8 @@ async function facadeCommand(argv: string[]): Promise<void> {
       `facade: ${model.types.length} type(s), ${model.methods.length} method(s)${omitted}`,
     );
   } catch (err) {
-    console.error(err instanceof FacadeError ? err.message : String(err));
+    const loud = err instanceof FacadeError || err instanceof ToolchainError;
+    console.error(loud ? (err as Error).message : String(err));
     process.exit(1);
   }
 }
