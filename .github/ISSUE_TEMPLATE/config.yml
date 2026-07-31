@@ -1,0 +1,7 @@
+# Issue-template chooser config.
+# Design proposals are RFC issues, never committed files — so there is a template for them.
+blank_issues_enabled: true
+contact_links:
+  - name: Question / discussion
+    url: https://github.com/hoodiecollin/typescript-to-rust/discussions
+    about: For open-ended questions, use Discussions rather than an issue.
