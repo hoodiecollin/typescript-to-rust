@@ -1,0 +1,42 @@
+name: Playbook
+
+# The invariants are only real if they outlive the person who set them up (§12.9).
+# `check` lints the backlog on every PR; `release-check` refuses a tag whose milestone
+# is gated or incomplete (§5.2).
+#
+# This workflow gates the *backlog*, not the code — `ci.yml` owns lint/typecheck/unit
+# tests per PR and `oracle.yml` owns the cargo-backed differential suite on `v*`.
+#
+# There is no `scope-check` job here on purpose: that gate exists for repos that keep an
+# integration branch (§5.3), and this repo merges feature branches straight to `main`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  backlog:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx @hoodiecollin/pm-playbook check --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+  release-gate:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npx @hoodiecollin/pm-playbook release-check "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
