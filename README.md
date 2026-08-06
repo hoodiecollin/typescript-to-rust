@@ -120,7 +120,10 @@ bun install
 bun run ttr packages/compiler/sample.ts --run   # TS → Rust → compile → run
 ```
 
-**Coming with the v0.1.0 release:**
+**Coming with the v0.1.0 release** — none of the channels below exist yet. There are no
+tags, no GitHub Releases, and nothing published anywhere; this table is the *intent* of
+the release workstream, not something you can install today. See
+[VERSION_ROADMAP.md](./VERSION_ROADMAP.md).
 
 | Channel | Command |
 | --- | --- |
@@ -156,16 +159,36 @@ actually builds and produces the expected output. See
 - [docs/dialect.md](./docs/dialect.md) — the accepted TypeScript subset.
 - [docs/architecture.md](./docs/architecture.md) — pipeline, oracle harness,
   emitter invariants.
-- [docs/plan.md](./docs/plan.md) — goal, memory-model decision, status.
+- [docs/plan.md](./docs/plan.md) — goal, memory-model decision, and the shipped-work log.
+- [WHAT_IT_IS.md](./WHAT_IT_IS.md) — per-feature guarantees **and honest limits**.
+  Where this README over-promises, that document wins.
+- [VERSION_ROADMAP.md](./VERSION_ROADMAP.md) — the honest state of the release effort.
+
+## Backlog
+
+The backlog is **GitHub Issues**, and only GitHub Issues — there is no roadmap file that
+schedules work and no `TODO.md`. Work is organized on two axes: a **milestone** says
+*when* (the release spine) and **labels** say *what kind, and how committed*
+(`idea` → `plan-next` → scheduled). Epics decompose via native sub-issues. This follows
+the [pm-playbook](./.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`.
+
+```bash
+gh issue list --label plan-next   # committed, not yet scheduled
+gh issue list --label rfc         # designs awaiting acceptance
+```
 
 ## Contributing
 
-Contributions are welcome. The development workflow (spec-first BDD, oracle-driven
-TDD, no barrel files) is documented in [.agents/AGENTS.md](./.agents/AGENTS.md). The
-one gate to run before opening a PR:
+Contributions are welcome. **[CONTRIBUTING.md](./CONTRIBUTING.md)** is the full account:
+how work is tracked, the design → plan → spec gates, and the code conventions
+(spec-first BDD against the cargo oracle, fail-loud, no barrel files). The condensed
+version for coding agents is [.agents/AGENTS.md](./.agents/AGENTS.md).
+
+The gates to run before opening a PR:
 
 ```bash
-bun run check    # typecheck + Rust tests + compiler tests
+bun run check                          # lint + typecheck + Rust tests + compiler tests
+bunx @hoodiecollin/pm-playbook check   # the issue-tracker invariants
 ```
 
 ## Layout
