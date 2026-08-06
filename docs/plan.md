@@ -1,14 +1,18 @@
 # TypeScript → Rust Translator — Plan
 
-> **Status of this document (2026-07-18):** historical status/architecture record,
-> not the live backlog. The **architecture, memory-model decision, and pipeline
-> intent below remain authoritative.** The **feature-status prose is a snapshot**
-> that lags the code: much of what the "Type mapping" table and Status section below
-> call "deferred" (async methods & arrows, class inheritance/generics, `try`/`catch`,
-> Map/Set methods, unions, the `Option` model for `?? `/`undefined`, modules, the
-> `@ttr/std` shim, sync generators, RegExp/Date) has since **shipped** through series
-> 102 — see `docs/work/_archive/` and the git log. The live backlog is **GitHub
-> Issues** + the [TTR Roadmap project](https://github.com/users/hoodiecollin/projects/4).
+> **What this document is (2026-08-06):** the **architecture, memory-model decision,
+> and pipeline intent** — authoritative — plus a **shipped-work log** under "Status",
+> written series by series as each landed. It is not the backlog and not the feature
+> matrix.
+>
+> - **What's next** → GitHub Issues (`gh issue list`), never this file.
+> - **The accepted dialect and its Rust mapping** → [`dialect.md`](./dialect.md).
+> - **What works today and where it stops** → [`../WHAT_IT_IS.md`](../WHAT_IT_IS.md).
+>
+> The "Status" log below is append-only history: an entry describes the state at the
+> time that series landed, and a later series may have superseded it. Where an entry
+> and the code disagree, the code wins — and the entry should be corrected, not left
+> to be discovered.
 
 ## Goal (scoped honestly)
 
@@ -93,26 +97,16 @@ and — as several of the original fixtures proved — let invalid Rust (e.g. ba
 `let` at module scope) masquerade as a passing oracle. See
 [architecture.md](./architecture.md) for the harness design.
 
-## Type mapping (current + intended)
+## Type mapping
 
-> Snapshot ~series 037. Several "deferred" notes below have **shipped** since
-> (class inheritance/generics 053/081, async methods/arrows 054, `try`/`catch`
-> 021, Map/Set methods 041/061/072, the `Option` model for `undefined`/`??` 066,
-> unions 093). Treat the *type-mapping shapes* as authoritative and the *deferral
-> annotations* as historical; the code + `_archive/` are ground truth.
+**The authoritative mapping is [`dialect.md`](./dialect.md).** This section used to
+carry a second copy of it, snapshotted around series 037 and annotated with deferrals
+that have since shipped — two documents describing one thing, one of them lagging. The
+copy is gone; `dialect.md` is maintained against the code and is where the accepted
+subset, its Rust lowering, and the current fail-loud residuals are stated.
 
-| TypeScript            | Rust (today)                  | Notes |
-|-----------------------|-------------------------------|-------|
-| `number`              | `f64`, `usize` for indices, `i64` for integer discriminants | Numeric inference (`numeric.ts`) refines index-reached values to `usize` so `Vec` indexing compiles, and an integer `switch` discriminant to `i64` (literal-pattern `match`, series 019). General `i64` counter inference is future work. |
-| `string`              | `String`, or `&str` for read-only params | Read-only string params refine to `&str` (`strings.ts`); owned params stay `String`, mutated stay `&mut String`. |
-| `boolean`             | `bool`                        | |
-| `Array<T>` / `T[]`    | `Vec<T>`                      | ownership pass picks `Vec<T>` / `&Vec<T>` / `&mut Vec<T>`. |
-| `Record<string, T>`   | `HashMap<String, T>`          | Done: type + literal construction (`HashMap::from`) + string-literal lookup (`lower.ts`). String keys only (`f64` isn't `Hash`/`Eq`); mutation/methods/variable keys deferred. |
-| `interface` / object  | `struct`                      | Done: `interface` → `struct` item + named-struct literals (`lower.ts`, resolved via `analysis.structs`). Optional/readonly/nested fields and inheritance deferred. |
-| `class`               | `struct` + `impl`             | Done: fields + field-init `constructor` → `new` + methods (`&self`/`&mut self`), `this`→`self`, `new C()`→`C::new()` (`lower.ts`). No inheritance/statics/accessors/generics; method-param borrows and implicit constructors deferred. Shared-mutable instances would need the `Rc<RefCell>` fallback. |
-| `throw` / `try`       | `Result<T, E>` + `?`          | Done (propagation): a throwing/thrower-calling function returns `Result<T, String>`, `throw new Error(msg)` → `Err(msg)`, returns wrap in `Ok`, callers `?`-propagate (`main` too). **not** `panic!` (changes catch semantics). `try`/`catch`, custom error types, throw-in-method/`async` deferred. |
-| `async` / `await`     | `async fn` / `.await`         | Done: a free `async function` → `async fn`, `Promise<T>` return → `T`, `await asyncFn(...)` → `.await`; a script that awaits gets a `#[tokio::main] async fn main()`. Un-awaited async calls, `await` of a sync call, async methods, and `Promise` combinators/concurrency deferred (fail-loud). |
-| `any` / `unknown`     | `ts_primitives::TsAny`        | escape hatch only. |
+For the honest per-feature account of what works and where it stops, see
+[`../WHAT_IT_IS.md`](../WHAT_IT_IS.md).
 
 ## Status
 
