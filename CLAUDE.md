@@ -3,43 +3,44 @@
 ## Where to look for "what to do next"
 
 **GitHub Issues are the source of truth for the backlog.** Repo:
-`hoodiecollin/typescript-to-rust` (private).
+`hoodiecollin/typescript-to-rust` (public).
 
 ```
-gh issue list                              # the whole backlog
-gh issue list --label epic                 # the big themes
-gh issue list --label deferral-graduation  # graduate-a-fail-loud-deferral tail
-gh issue list --label needs-user-input     # blocked on Collin's design input
-gh issue list --label has-design           # a complete design doc already exists
-gh issue view <n>                          # tasks live in the issue body
+gh issue list                       # the whole backlog
+gh issue list --label epic          # the big themes
+gh issue list --label plan-next     # committed, not yet scheduled to a version
+gh issue list --label idea          # speculative — needs a design first
+gh issue list --label rfc           # designs awaiting acceptance
+gh issue view <n>                   # the design and the plan live in the issue body
 ```
 
-Do **not** treat `docs/plan.md`'s "Next" section as the live todo list any more —
-it's the historical status/architecture record. When you pick up work, start from
-an issue, follow its task checklist, and cross-reference the design doc it names
-(or write one if it's labeled `needs-design`).
+Do **not** treat `docs/plan.md`'s "Next" section as the live todo list — it is the
+historical status/architecture record.
 
-### Label legend
+Labels are the ones in the pm-playbook taxonomy (see the block at the bottom of this
+file) and nothing else. **`has-design`, `needs-design`, `needs-user-input`,
+`deferral-graduation` and the area tags no longer exist** — they were deleted from the
+repo, and the first three are banned by the model: design state is *derived* from whether
+an accepted design exists on the issue, not stickered onto it by someone who has to
+remember to update the sticker. Subsystem grouping is not a label either; it is the epic
+an issue is a sub-issue of.
 
-- `epic` — large multi-part area; the body tracks sub-work.
-- `needs-design` — no complete design doc yet; **design + impl-plan are the first tasks.**
-- `has-design` — a complete design doc exists under `docs/work/**`; reference it, skip the design step.
-- `needs-user-input` — **stop and get Collin's input during design** (see process rule below).
-- `deferral-graduation` — turns an existing fail-loud residual into real support without weakening fail-loud.
-- Area tags: `ownership` · `dialect` · `codegen` · `errors` · `async` · `closures` · `generators` · `control-flow`.
+## Process rule: get Collin's input before designing dialect-shape work
 
-## Process rule: get Collin's input before designing deferral-graduations
-
-**Many of the "graduate a fail-loud deferral" items are dialect-shape decisions,
-not mechanical work.** For any issue labeled `needs-user-input` (and, by default,
-anything touching the accepted dialect surface or the memory model):
+**Many "graduate a fail-loud deferral" items are dialect-shape decisions, not mechanical
+work** — how nullability, inheritance, error enums or module boundaries map onto Rust.
+For anything touching the accepted dialect surface or the memory model:
 
 1. Do the investigation and draft the design **options**, then
 2. **pause and ask Collin** — surface the tradeoffs and get a decision — **before**
-   writing the final `design.md` or any impl.
+   writing the final design or any impl.
 
-Do not silently pick a dialect/semantics direction and build it. A wrong guess here
-is expensive to unwind because it ripples through the validator, HIR, and emitter.
+Do not silently pick a dialect/semantics direction and build it. A wrong guess here is
+expensive to unwind because it ripples through the validator, HIR, and emitter.
+
+This rule used to be carried by a `needs-user-input` label. It is a **standing rule about
+a kind of work**, not a per-issue flag, which is why it lives here instead: a label that
+must be applied by hand is one that gets forgotten on exactly the issue that needed it.
 
 ## The rest
 
@@ -47,7 +48,39 @@ is expensive to unwind because it ripples through the validator, HIR, and emitte
   `.agents/AGENTS.md`.
 - **Architecture, pipeline, memory-model decision, and shipped-status log:**
   `docs/plan.md`.
-- **Design docs & specs per series:** `docs/work/<NNN-slug>/` (active) and
-  `docs/work/_archive/` (shipped).
+- **Design + implementation-plan:** on the issue (Gates 1 and 2). `docs/work/_archive/`
+  holds the pre-2026-08 series folders as a frozen historical record; the workflow no
+  longer creates new ones. See `docs/work/README.md`.
 - Run everything from the repo root (`bun run check`, `bun run test`,
   `bun run typecheck`).
+
+<!-- pm-playbook:begin -->
+## Project management — pm-playbook v1.1.0
+
+Issue tracking in this repo follows the **pm-playbook** two-axis model. The full doctrine is
+vendored at `.pm-playbook/` and is authoritative; this block is only a summary.
+
+**Before you create, label, milestone, or close an issue — read `.pm-playbook/AGENT.md`.**
+It is a short router: load only the reference section relevant to what you are doing.
+
+**The two axes, and nothing else, organize work:**
+- **Milestone** = *when* (a version release — the release spine). Assigning one means "scheduled."
+- **Labels** = *what kind / how committed*. Epics decompose via **native sub-issues**, never
+  checkboxes and never a Project field.
+- There are **no Priority / Size / Workstream fields**. Do not propose adding any.
+
+**Invariants — violating one is a bug, not a style preference:**
+- `plan-next` and a milestone never coexist. Assigning a milestone means dropping `plan-next`.
+- `idea` and `plan-next` never coexist.
+- `experiment` never carries `idea`, `plan-next`, or a milestone. A spike's deliverable is a
+  decision; it feeds the release spine, it never rides it.
+- `release-gate` always has a milestone, and never carries `idea` / `plan-next` / `experiment`.
+  An open `release-gate` means its milestone **cannot be tagged**.
+- A non-core `surface:*` issue never rides a core `v*` milestone.
+
+**Verify before opening a PR** — exit code 0 means compliant:
+
+```bash
+npx @hoodiecollin/pm-playbook check
+```
+<!-- pm-playbook:end -->
