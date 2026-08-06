@@ -1,0 +1,22 @@
+{
+  "package": "@hoodiecollin/pm-playbook",
+  "version": "1.1.0",
+  "migratedThrough": "1.1.0",
+  "files": {
+    "AGENT.md": "0d0c5cfec76ebbea95d26a65b4481913d644193843eaab1565c0d16771f737c0",
+    "PLAYBOOK.md": "5ba0a453468abd28587b729c4819b9fb650cbfb3d8a970a3ccc0df01478b8e96",
+    "reference/01-two-axis-core.md": "15bae1d990c3cd94bca95498f70b70b905854e633c3af4238849ddad85da5b76",
+    "reference/02-commitment-ladder.md": "9148632417846810a5008eb8d9d16a4614644003248d12ff09d574a7f2be6abb",
+    "reference/03-labels.md": "7f047084c93c4868f9bd234fec5312415d7f0f0f278fd3794eed854765f4f1fe",
+    "reference/04-experiments.md": "d47a9b0aa70b59d5e08f9256eb4e47b6d141968b5c4985a9b3f5cae9b3911447",
+    "reference/05-release-spine.md": "3099cf948a775f11e31c179aa07cbb2f13aa5d1cbd4a7d9ceaf301f73cb67ea5",
+    "reference/06-surfaces.md": "cd46918f11b251f92301aa81347d1bcdaa341c3f9629fd0eaf03ada6a5f8decc",
+    "reference/07-epics-and-roadmap.md": "9e1bcd6f832bfa127d51a568527d4c74634d83a4dbf5425cf33a44b6125879cc",
+    "reference/08-board-is-a-view.md": "60af9b18f1598bd22e6bf0004613a561787d446f24f9217dc5f63be2669f9ce0",
+    "reference/09-design-plan-spec.md": "e7b4d11036c07a371232f9d6cc4d4ead862f3a3a1ba380f2f329519139afe56a",
+    "reference/10-documentation.md": "f5413827a2c10e56ce0ba8a4632dc55800f6ab2626d8f7f1ad02b612a2562e35",
+    "reference/11-operating-disciplines.md": "5b2f369fdb3b3432dd39aae7ea09b9ae7a7d1ab00e23e7d93d809206236bae59",
+    "reference/12-adopting.md": "2e2b7add8b5af2a377534b87e2c470f3d12efc67f03de3ec3525d6aaf8d7035e",
+    "reference/13-anti-patterns.md": "2c67ecc930becd5e6fe83c0c333e7cbdf20d44d0f990cf52723fbfab5187156e"
+  }
+}

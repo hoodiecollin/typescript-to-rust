@@ -3,18 +3,17 @@
 ## The backlog lives in GitHub Issues
 
 "What to do next" is `gh issue list` on `hoodiecollin/typescript-to-rust`, **not**
-`docs/plan.md`'s "Next" section (that's now the historical status log). See the
-root `CLAUDE.md` for the label legend. Each issue body carries its task checklist;
-`needs-design` issues start with a design + impl-plan step, `has-design` issues
-name an existing `docs/work/**` doc to follow.
+`docs/plan.md`'s "Next" section (that's now the historical status log). The label
+taxonomy is the pm-playbook one — see the block at the bottom of the root `CLAUDE.md`.
+**The issue body carries the design (Gate 1) and the implementation-plan (Gate 2).**
+Whether a design exists is read off the issue, not off a label.
 
-## Get Collin's input before designing dialect-shape / deferral-graduation work
+## Get Collin's input before designing dialect-shape work
 
-Many "graduate a fail-loud deferral" issues (label `deferral-graduation`, and
-especially `needs-user-input`) are **dialect-semantics decisions, not mechanical
-work** — how nullability, inheritance, error enums, module boundaries, etc. map
-onto Rust. For these: investigate, draft the **options with tradeoffs**, then
-**pause and ask Collin for a decision before writing the final `design.md` or any
+Many "graduate a fail-loud deferral" issues are **dialect-semantics decisions, not
+mechanical work** — how nullability, inheritance, error enums, module boundaries, etc.
+map onto Rust. For these: investigate, draft the **options with tradeoffs**, then
+**pause and ask Collin for a decision before writing the final design or any
 implementation.** A wrong guess ripples through the validator, HIR, and emitter and
 is expensive to unwind. Purely mechanical slices (no new dialect surface, no
 semantics choice) can proceed straight through the spec-first flow below.
@@ -41,23 +40,33 @@ emit `Any` or commented-out stubs.
 
 ## The spec-first workflow (required for every change)
 
-Every change goes through these steps (see `docs/work/README.md`):
+Every change goes through the three gates, in series (see `docs/work/README.md` and
+`.pm-playbook/reference/09-design-plan-spec.md`):
 
-1. **Docs** — a numbered series under `docs/work/<NNN-slug>/`. Required:
-   `design.md`, `specs.md`. Optional per scope: `research.md`, `scratchpad.md`.
-2. **Mock** — a mock interface of what the real impl will supersede.
-3. **RED specs** — transcribe `specs.md` into real BDD tests that call the mock;
-   verify every new spec **fails** before implementing. (Tests must exercise the
-   interface, so they genuinely signal when the spec is met — never fake-green.)
-4. **GREEN** — implement until all specs pass.
-5. **Archive** — move the finished series to `docs/work/_archive/`. Follow-ups get
-   a **new** series; never grow an archived one.
+1. **Gate 1 — design (WHAT & WHY).** Problem, desired behavior, solution *shape*,
+   alternatives, explicit non-goals. **On the issue** — an `rfc` issue for a new
+   proposal, or the design section of the issue that tracks the work. Never a
+   committed `design.md`. Accepted → drop `idea`, add `plan-next`.
+2. **Gate 2 — implementation-plan (HOW).** Files to touch, build order, blockers,
+   interfaces, **and the BDD scenarios to write**. Also on the issue. This is where
+   the old `specs.md` content goes.
+3. **Gate 3 — RED → GREEN.**
+   - **Mock** — a mock interface of what the real impl will supersede.
+   - **RED specs** — transcribe the planned scenarios into real BDD tests that call
+     the mock; verify every new spec **fails** before implementing. (Tests must
+     exercise the interface, so they genuinely signal when the spec is met — never
+     fake-green.)
+   - **GREEN** — implement until all specs pass; refactor under green.
 
-Two scope carve-outs (decided 2026-07-02):
+Two scope carve-outs (decided 2026-07-02, still in force):
 - **Pure refactors** (behavior-preserving, covered by existing green tests) need
-  `design.md` **only** — no new specs, no mock/RED steps.
+  Gate 1 **only** — no new specs, no mock/RED steps.
 - **Pre-rule code** gets characterization specs backfilled **GREEN-from-start**,
   honestly labeled (a truly-RED spec is impossible against working impl).
+
+**If you reopen an accepted gate, purge the issue body first** and replace it with the
+withdrawal placeholder (§9.1). A superseded design left in a body does not read as
+superseded — it reads as *the* design, and the next planner builds on it.
 
 ## No barrel files
 
@@ -79,3 +88,34 @@ re-exports. Outside files may import a folder's siblings directly (e.g.
 
 See docs/plan.md. Emit plain Rust ownership; `Rc<RefCell<T>>` is a last resort,
 not the strategy. Keep `ts-primitives` minimal.
+
+<!-- pm-playbook:begin -->
+## Project management — pm-playbook v1.1.0
+
+Issue tracking in this repo follows the **pm-playbook** two-axis model. The full doctrine is
+vendored at `.pm-playbook/` and is authoritative; this block is only a summary.
+
+**Before you create, label, milestone, or close an issue — read `.pm-playbook/AGENT.md`.**
+It is a short router: load only the reference section relevant to what you are doing.
+
+**The two axes, and nothing else, organize work:**
+- **Milestone** = *when* (a version release — the release spine). Assigning one means "scheduled."
+- **Labels** = *what kind / how committed*. Epics decompose via **native sub-issues**, never
+  checkboxes and never a Project field.
+- There are **no Priority / Size / Workstream fields**. Do not propose adding any.
+
+**Invariants — violating one is a bug, not a style preference:**
+- `plan-next` and a milestone never coexist. Assigning a milestone means dropping `plan-next`.
+- `idea` and `plan-next` never coexist.
+- `experiment` never carries `idea`, `plan-next`, or a milestone. A spike's deliverable is a
+  decision; it feeds the release spine, it never rides it.
+- `release-gate` always has a milestone, and never carries `idea` / `plan-next` / `experiment`.
+  An open `release-gate` means its milestone **cannot be tagged**.
+- A non-core `surface:*` issue never rides a core `v*` milestone.
+
+**Verify before opening a PR** — exit code 0 means compliant:
+
+```bash
+npx @hoodiecollin/pm-playbook check
+```
+<!-- pm-playbook:end -->
