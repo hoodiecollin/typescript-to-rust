@@ -261,10 +261,15 @@ rejects nothing, so every dialect decision has exactly one home.
    unwraps to `T` in `lowerType` (`Promise<void>` → `()`) — Rust wraps the result
    in `Future` implicitly, so the wrapper is not written. `await asyncFn(...)` → an
    `await` HirExpr rendered `<call>.await`; `lowerAwait` accepts only a call to a
-   known `async` function (`analysis.asyncFns`). Because a bare (un-awaited) async
-   call is an un-polled future that never runs — a `must_use` **warning**, not an
-   error, so it would silently diverge from TS — `lowerCall` is fail-loud on any
-   async call that is not directly awaited (`awaited` flag). When the top-level
+   known `async` function (`analysis.asyncFns`). A bare (un-awaited) async call is
+   an un-polled future that never runs — a `must_use` **warning**, not an error, so
+   it would silently diverge from TS — and `lowerCall` was originally fail-loud on
+   any async call not directly awaited (`awaited` flag). **Superseded by series
+   051c:** an un-awaited async *free* call now lowers to `tokio::spawn(...)`,
+   yielding a `JoinHandle<T>`, with `Arc` / `Arc<Mutex<_>>` wrapping for bindings
+   that escape into tasks — see the task-spawning table in `dialect.md`. The
+   fail-loud residual is now "any shape `refineTaskEscape` cannot prove
+   `Send + 'static`-sound," not "un-awaited" as such. When the top-level
    script `await`s, the generated entry becomes `#[tokio::main] async fn main()`
    via `HirModule.mainAsync` (detected by `hirHasAwait` over `main`; composes with
    `mainRet`). A fallible `async` fn composes too — `async fn … -> Result<…>`, and
