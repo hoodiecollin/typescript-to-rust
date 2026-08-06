@@ -4,7 +4,7 @@
  * → `return Err(...)`, a normal `return` wrapped in `Ok`, `?` propagation with
  * `main` returning `Result`, and a non-throwing green control. The cargo-backed
  * COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/013-throw-try-result/specs.md.
+ * series 013.
  *
  * RED against the scaffold seam in `src/lower.ts`: a `ThrowStatement` throws
  * `UnsupportedError` "throw → Result lowering pending" until `lowerThrow`,

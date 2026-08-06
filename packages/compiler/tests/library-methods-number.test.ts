@@ -3,7 +3,7 @@
  * `receiverTypeOf` backbone. Native rows (NUMN*), tslib-quirk rows (NUMT*), and
  * the variadic `min!`/`max!` macro (MINMAX*). Each spec differential-matches;
  * a `Tf` row observes the JS quirk. IDs map to
- * docs/work/083-library-methods-oracle/specs.md.
+ * series 083.
  */
 
 import { expect } from "bun:test";

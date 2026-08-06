@@ -3,7 +3,7 @@
  * `emit(...)` entry and asserts the emitted shape: a `struct` definition, a named
  * struct literal, the named-type binding, and a field read. The cargo-backed
  * COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/011-interface-struct/specs.md.
+ * series 011.
  *
  * RED against the scaffold seam in `src/lower.ts`: a `TSInterfaceDeclaration`
  * throws `UnsupportedError` "interface → struct lowering pending" until

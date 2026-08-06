@@ -6,7 +6,7 @@
  * site) gets a hardware modulo (`(v as i64) % 5`) instead of a libm `frem`; anything
  * unproven stays `f64` — the always-safe fallback. The differential harness
  * cargo-compiles and runs each program, so every shape assertion is also a
- * COMPILES/BEHAVES proof. IDs map to docs/work/105-callback-integrality/specs.md.
+ * COMPILES/BEHAVES proof. IDs map to series 105.
  *
  * Per the corpus-coverage rule, the `Real`-forcing rejects (CI5–CI8) each get a
  * fixture too: they are the soundness-critical cases — a wrong `as i64` there would

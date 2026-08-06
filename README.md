@@ -102,7 +102,7 @@ It is a translator for an **explicitly-enforced TypeScript dialect**. It is **no
 "compile any TypeScript" — TS is unsound and garbage-collected, so a total mapping
 onto Rust's ownership model does not exist. Tractability comes from restricting the
 input, and everything outside the dialect **fails loud** at translation time rather
-than emitting subtly-wrong Rust. See [docs/dialect.md](./docs/dialect.md) for the
+than emitting subtly-wrong Rust. See [docs/DIALECT.md](./docs/DIALECT.md) for the
 accepted subset.
 
 ## Install
@@ -123,7 +123,7 @@ bun run ttr packages/compiler/sample.ts --run   # TS → Rust → compile → ru
 **Coming with the v0.1.0 release** — none of the channels below exist yet. There are no
 tags, no GitHub Releases, and nothing published anywhere; this table is the *intent* of
 the release workstream, not something you can install today. See
-[VERSION_ROADMAP.md](./VERSION_ROADMAP.md).
+[docs/VERSION_ROADMAP.md](./docs/VERSION_ROADMAP.md).
 
 | Channel | Command |
 | --- | --- |
@@ -152,17 +152,20 @@ lowers it to a HIR that resolves ownership (moves vs borrows, `&self` vs `&mut s
 and pretty-prints Rust. Correctness is enforced by an **oracle**: fixtures are
 compiled and run through a real `cargo` toolchain, so a passing test means the Rust
 actually builds and produces the expected output. See
-[docs/architecture.md](./docs/architecture.md).
+[docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 
 ## Docs
 
-- [docs/dialect.md](./docs/dialect.md) — the accepted TypeScript subset.
-- [docs/architecture.md](./docs/architecture.md) — pipeline, oracle harness,
-  emitter invariants.
-- [docs/plan.md](./docs/plan.md) — goal, memory-model decision, and the shipped-work log.
-- [WHAT_IT_IS.md](./WHAT_IT_IS.md) — per-feature guarantees **and honest limits**.
-  Where this README over-promises, that document wins.
-- [VERSION_ROADMAP.md](./VERSION_ROADMAP.md) — the honest state of the release effort.
+- [docs/DIALECT.md](./docs/DIALECT.md) — the accepted TypeScript subset and its Rust
+  mapping. Authoritative.
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) — pipeline, the pass chain, the oracle
+  harness, and the decisions behind them.
+- [docs/WHAT_IT_IS.md](./docs/WHAT_IT_IS.md) — per-feature guarantees **and honest
+  limits**. Where this README over-promises, that document wins.
+- [docs/VERSION_ROADMAP.md](./docs/VERSION_ROADMAP.md) — the honest state of the release
+  effort.
+- [docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md) — how work is tracked and how a change
+  ships.
 
 ## Backlog
 
@@ -179,7 +182,7 @@ gh issue list --label rfc         # designs awaiting acceptance
 
 ## Contributing
 
-Contributions are welcome. **[CONTRIBUTING.md](./CONTRIBUTING.md)** is the full account:
+Contributions are welcome. **[docs/CONTRIBUTING.md](./docs/CONTRIBUTING.md)** is the full account:
 how work is tracked, the design → plan → spec gates, and the code conventions
 (spec-first BDD against the cargo oracle, fail-loud, no barrel files). The condensed
 version for coding agents is [.agents/AGENTS.md](./.agents/AGENTS.md).

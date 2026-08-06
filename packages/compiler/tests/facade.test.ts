@@ -5,7 +5,7 @@
  * `--output-format json` of `crates/ttr-facade-fixture`, the generator's analog of
  * `@ttr/plugin-leftpad`) plus **one live integration spec** that reshells nightly
  * rustdoc and asserts the fixture is still current, skipping loudly without it.
- * IDs → docs/work/122-ttr-facade-generator/specs.md (FAC1–FAC15).
+ * IDs → series 122 (FAC1–FAC15).
  */
 
 import { describe, expect, test } from "bun:test";

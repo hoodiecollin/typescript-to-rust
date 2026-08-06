@@ -2,7 +2,7 @@
  * Specs for series 119 — transitive `refMut` (issue #102). A borrowed param that is
  * forwarded as a bare argument into a callee's `&mut` position must itself become
  * `&mut`, and the forward must emit a bare reborrow (not `&mut q`). Design + spec IDs:
- * docs/work/119-transitive-refmut/{design,specs}.md. Cargo-compiled + differential
+ * series 119. Cargo-compiled + differential
  * (emitted Rust runs; stdout === TS-via-Bun).
  */
 

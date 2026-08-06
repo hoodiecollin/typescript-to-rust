@@ -12,7 +12,7 @@
  * Faithfulness discipline (design §6): file specs write **into the per-spec temp
  * dir** and print only program-produced round-tripped content; fallible specs
  * catch and print a **program-controlled** string (never platform-variant
- * `String(e)`). IDs map to docs/work/100-std-io/specs.md.
+ * `String(e)`). IDs map to series 100.
  *
  * First run may flake while the oracle fetches/builds `reqwest` cold (the cargo
  * dep thundering herd, design §8a) — re-run to confirm green.

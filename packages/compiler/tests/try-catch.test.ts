@@ -5,7 +5,7 @@
  * and no-binding), `finally` emitted after, the enclosing function staying
  * non-`Result` (fallibility shielding), and a non-`try` green control. The
  * cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/021-try-catch/specs.md.
+ * series 021.
  *
  * RED until `lowerTry` + the `try`-aware `analyzeFallible` land (a `TryStatement`
  * currently hits the generic `UnsupportedError` gate). TRY6 is a green control.

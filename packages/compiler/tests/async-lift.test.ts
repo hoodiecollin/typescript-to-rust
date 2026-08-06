@@ -5,7 +5,7 @@
  * 054, an async callback in an array adapter is fail-loud (driving a `Vec<Future>`
  * to values is `Promise.all(arr.map(f))` → `join_all`, 051b). The non-async lift
  * (series 048) is unregressed. IDs map to
- * docs/work/054-async-methods-arrows/specs.md.
+ * series 054.
  */
 
 import { describe, expect, test } from "bun:test";

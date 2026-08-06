@@ -12,7 +12,7 @@
  * (escaping / stored / returned / two-level / scalar / wholesale-rebind / inline) stay.
  *
  * Differential: emitted Rust compiles AND matches the TS run, plus emitted-text and
- * fail-loud checks. IDs map to docs/work/086-closure-rc-capture/specs.md.
+ * fail-loud checks. IDs map to series 086.
  */
 
 import { describe, expect, test } from "bun:test";

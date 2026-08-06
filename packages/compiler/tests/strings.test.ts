@@ -6,7 +6,7 @@
  * untouched.
  *
  * These are RED against the identity mock in `src/strings.ts` and go GREEN when
- * the real pass lands. IDs map to docs/work/004-str-borrows/specs.md.
+ * the real pass lands. IDs map to series 004.
  * `refineStrings` is idempotent, so re-applying it to `lower`'s (already-refined)
  * output is safe in both phases.
  */

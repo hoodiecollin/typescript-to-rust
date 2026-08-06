@@ -2520,7 +2520,7 @@ const TEMPLATE_SCALAR_ELEM = new Set<RustType["kind"]>([
  * Lower one `${…}` interpolation of a template literal (series 095) to a
  * JS-faithful `String`-producing part (Collin's decision: match JS `String()` for
  * arrays, objects, and optionals, not merely inherit `strConcat`'s cargo boundary).
- * See docs/work/095-template-literals/design.md §"Interpolation classifier".
+ * See series 095 §"Interpolation classifier".
  */
 function lowerTemplatePart(
   expr: Expression,

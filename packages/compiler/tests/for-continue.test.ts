@@ -3,7 +3,7 @@
  * public `emit(...)` entry and asserts that an own `continue` runs the `update`
  * before continuing, `break` is unchanged, and the green/deferred cases hold. The
  * cargo-backed BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/018-for-continue/specs.md.
+ * series 018.
  *
  * RED against the existing fail-loud rejection in `lowerFor` (an own `continue`
  * in a C-style for throws "unsound while-desugar — deferred") until the

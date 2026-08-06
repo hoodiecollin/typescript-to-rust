@@ -15,7 +15,7 @@
  *
  * Differential specs (CONC11, CONC13, CONC15) assert Rust stdout === TS stdout ===
  * expected; substring specs (CONC10, CONC10b, CONC12, CONC14) pin the futures/tokio
- * shape; CONC16 is fail-loud. IDs map to docs/work/051-async-concurrency/specs.md.
+ * shape; CONC16 is fail-loud. IDs map to series 051.
  *
  * Fixture adjustments (noted):
  *   - A `Vec<f64>` has no Rust `Display`, so differential fan-out results are printed

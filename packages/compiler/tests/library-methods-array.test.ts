@@ -3,7 +3,7 @@
  * `receiverTypeOf` / `elementTypeOf` backbone: `join`, `concat`, `reverse`,
  * `flat` (depth 1). Each differential-matches. Residuals (`flatMap`, deep
  * `flat(n)`, `splice`) stay fail-loud (ARR-FL*). IDs map to
- * docs/work/083-library-methods-oracle/specs.md.
+ * series 083.
  */
 
 import { expect, test } from "bun:test";

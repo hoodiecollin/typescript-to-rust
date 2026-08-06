@@ -5,7 +5,7 @@
  * (mirroring the free async-fn path). A bare, un-awaited async method call is
  * fail-loud (un-polled future → spawn is 051c). `await` of a non-async method
  * now DROPS the `await` and yields the method's value (series 055 graduated the
- * old fail-loud — AM8). IDs map to docs/work/054-async-methods-arrows/specs.md.
+ * old fail-loud — AM8). IDs map to series 054.
  *
  * Differential specs assert BOTH runtime behavior (Rust stdout == TS stdout ==
  * expected, via `runRust` + Bun) and the emitted `async fn` / `.await` shape.

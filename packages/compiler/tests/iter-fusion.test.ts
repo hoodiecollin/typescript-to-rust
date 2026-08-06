@@ -8,7 +8,7 @@
  * series-048 numeric-surface lift can't produce an impure callback. When the chain's
  * source is a dead-out local, the head lowers to `into_iter()` (3c). The differential
  * harness cargo-compiles and runs each program, so every shape assertion is also a
- * COMPILES/BEHAVES proof. IDs map to docs/work/104-iterator-fusion/specs.md.
+ * COMPILES/BEHAVES proof. IDs map to series 104.
  */
 
 import { expect, test } from "bun:test";

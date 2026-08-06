@@ -12,7 +12,7 @@
  *
  * `compile` threads the source text so the oracle is active (matching 082). Each
  * spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/072-map-set-construction-receivers/specs.md.
+ * series 072.
  */
 
 import { expect, test } from "bun:test";

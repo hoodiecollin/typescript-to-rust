@@ -2,7 +2,7 @@
  * Specs for `for…of` (series 008). Drives the public `emit(...)` entry and
  * asserts the emitted shape: a Rust `for <pat> in <iterable>.iter() { … }`,
  * iterating by reference. The cargo-backed COMPILES/BEHAVES proof lives in
- * compiler.test.ts. IDs map to docs/work/008-for-of/specs.md.
+ * compiler.test.ts. IDs map to series 008.
  *
  * RED against the scaffold seam in `src/lower.ts`: `ForOfStatement` throws
  * `UnsupportedError` "for-of lowering pending" until `lowerForOf` lands. FOF5 is

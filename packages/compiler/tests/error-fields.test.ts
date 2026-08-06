@@ -3,7 +3,7 @@
  * class may declare typed data fields (message + `field: T`, one per ctor param,
  * `super(message);` then identity `this.f = f;`); anything richer is fail-loud.
  * ERR9 is the differential headline — a caught field is read and printed, Rust
- * stdout == Bun. IDs map to docs/work/049-error-enums-discrimination/specs.md.
+ * stdout == Bun. IDs map to series 049.
  */
 
 import { expect, test } from "bun:test";

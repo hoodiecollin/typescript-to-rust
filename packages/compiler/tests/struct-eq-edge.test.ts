@@ -4,7 +4,7 @@
  * dialect signal: a struct whose type is not `PartialEq`-eligible (an fn-pointer
  * field), and an identity/discipline mismatch under `"use rc"`.
  *
- * IDs map to docs/work/047-struct-equality/specs.md.
+ * IDs map to series 047.
  */
 
 import { describe, expect, test } from "bun:test";

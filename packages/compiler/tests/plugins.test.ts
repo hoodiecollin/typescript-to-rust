@@ -5,7 +5,7 @@
  * and fail-loud is preserved. The reference plugin is `@ttr/plugin-leftpad`,
  * exporting `leftPad(s, width, fill)` (JS `padStart` fidelity), which expands to
  * a `ttr_plugin_leftpad::left_pad` call into the bundled reference crate.
- * IDs → docs/work/110-plugin-system/specs.md (PLUG1–PLUG17).
+ * IDs → series 110 (PLUG1–PLUG17).
  *
  * Differential (TS-via-Bun vs Rust) for the behavioral corpus; direct unit +
  * throws for the mechanism (registry, recognition guard, emitter fail-loud).

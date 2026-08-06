@@ -2,8 +2,8 @@
 
 ## The backlog lives in GitHub Issues
 
-"What to do next" is `gh issue list` on `hoodiecollin/typescript-to-rust`, **not**
-`docs/plan.md`'s "Next" section (that's now the historical status log). The label
+"What to do next" is `gh issue list` on `hoodiecollin/typescript-to-rust`. Nothing in
+`docs/` is a todo list — it holds durable references only. The label
 taxonomy is the pm-playbook one — see the block at the bottom of the root `CLAUDE.md`.
 **The issue body carries the design (Gate 1) and the implementation-plan (Gate 2).**
 Whether a design exists is read off the issue, not off a label.
@@ -40,8 +40,8 @@ emit `Any` or commented-out stubs.
 
 ## The spec-first workflow (required for every change)
 
-Every change goes through the three gates, in series (see `docs/work/README.md` and
-`.pm-playbook/reference/09-design-plan-spec.md`):
+Every change goes through the three gates, in series (see
+`.pm-playbook/reference/09-design-plan-spec.md` and `docs/CONTRIBUTING.md`):
 
 1. **Gate 1 — design (WHAT & WHY).** Problem, desired behavior, solution *shape*,
    alternatives, explicit non-goals. **On the issue** — an `rfc` issue for a new
@@ -86,8 +86,8 @@ re-exports. Outside files may import a folder's siblings directly (e.g.
 
 ## Memory model is decided: Option A (idiomatic borrows)
 
-See docs/plan.md. Emit plain Rust ownership; `Rc<RefCell<T>>` is a last resort,
-not the strategy. Keep `ts-primitives` minimal.
+See `docs/ARCHITECTURE.md`. Emit plain Rust ownership; `Rc<RefCell<T>>` is a last
+resort, not the strategy. Keep `ts-primitives` minimal.
 
 <!-- pm-playbook:begin -->
 ## Project management — pm-playbook v1.1.0

@@ -4,7 +4,7 @@
  * keyword and signature, the expression-body `return` desugar, call-site
  * participation, a non-arrow green control, and the fail-loud rejections. The
  * cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/015-arrow-functions/specs.md.
+ * series 015.
  *
  * RED against the scaffold seam in `src/lower.ts`: a qualifying top-level `const`
  * arrow throws `UnsupportedError` "arrow normalization pending" until the

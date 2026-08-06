@@ -6,7 +6,7 @@
  * `reduce`'s two-param shape (its `acc` typed by the init), and two callbacks in
  * one module getting distinct hoisted names from the shared counter.
  *
- * IDs map to docs/work/048-lambda-lifting-closures/specs.md. The loggable
+ * IDs map to series 048. The loggable
  * `console.log(...)` forms keep the spirit of the specs' illustrations (a whole
  * Vec has no Rust `Display`).
  */

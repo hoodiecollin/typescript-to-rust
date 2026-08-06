@@ -13,7 +13,7 @@
  * the stateful `exec`-loop and `re.lastIndex` fail loud → `s.matchAll(re)`.
  *
  * First run may flake while the oracle builds `regex` cold (the cargo dep
- * thundering herd) — re-run to confirm green. IDs map to docs/work/101-regexp/specs.md.
+ * thundering herd) — re-run to confirm green. IDs map to series 101.
  */
 
 import { describe, expect, test } from "bun:test";

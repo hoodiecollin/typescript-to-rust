@@ -4,7 +4,7 @@
  * 083 verifies they stay green (SHIP-*), pins the heterogeneous-Object.assign
  * fail-loud residual (ASSIGN-FL), and characterizes the JSON.stringify
  * `undefined`-omission divergence (JSON-UNDEF) that needs a genuine dialect
- * decision. IDs map to docs/work/083-library-methods-oracle/specs.md.
+ * decision. IDs map to series 083.
  */
 
 import { describe, expect, test } from "bun:test";

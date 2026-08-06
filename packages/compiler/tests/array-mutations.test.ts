@@ -1,6 +1,6 @@
 /**
  * Specs for series 116 — array mutation methods (issue #78). Design + spec IDs:
- * docs/work/116-array-mutations/{design,specs}.md. Differentials (emitted Rust runs;
+ * series 116. Differentials (emitted Rust runs;
  * stdout === TS-via-Bun).
  *
  * Ground truth (verified 2026-07-24): `push` (statement) and `pop` already lower

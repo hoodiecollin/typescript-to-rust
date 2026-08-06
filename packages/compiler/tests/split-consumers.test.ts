@@ -9,7 +9,7 @@
  *
  * The differential harness cargo-compiles and runs each program, so every assertion is
  * a COMPILES/BEHAVES proof; output is byte-identical to node/bun. IDs map to
- * docs/work/112-split-consumers/specs.md.
+ * series 112.
  */
 
 import { expect, test } from "bun:test";

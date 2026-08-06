@@ -8,7 +8,7 @@
  *     These last are the reason this gate is whole-tree and default-deny: the
  *     node *type* is modeled, so lowering matches it and silently drops the flag
  *     — emitting plausible-but-wrong Rust. Rejecting them here restores the
- *     fail-loud contract (see docs/work/024).
+ *     fail-loud contract (see series 024).
  *
  *  2. Default-deny on node type → `UnsupportedError` ("not implemented yet").
  *     Any node whose `type` is not in `MODELED` fails loud. Unmodeled types

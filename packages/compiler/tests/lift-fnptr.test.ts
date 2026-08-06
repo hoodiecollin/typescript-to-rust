@@ -7,7 +7,7 @@
  * form (`UnsupportedError`), and the shipped mutable-capture `forEach` still works
  * (it is not lifted — decision 2026-07-08).
  *
- * IDs map to docs/work/048-lambda-lifting-closures/specs.md.
+ * IDs map to series 048.
  */
 
 import { expect, test } from "bun:test";

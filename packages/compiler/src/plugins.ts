@@ -1,5 +1,5 @@
 /**
- * The plugin system (epic #95, series 110) — design: `docs/work/110-plugin-system`.
+ * The plugin system (epic #95, series 110) — design: series 110.
  *
  * A plugin extends the compiler along three axes (new nodes, new recognition, new
  * "emit" behavior) **without** dissolving the two properties that define this

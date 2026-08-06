@@ -10,7 +10,7 @@
  * reclassified it from forbidden → deferral).
  *
  * Each behavioral spec differential-matches (compile → cargo run → TS-via-Bun). IDs
- * map to docs/work/068-owned-self/specs.md.
+ * map to series 068.
  */
 
 import { expect, test } from "bun:test";

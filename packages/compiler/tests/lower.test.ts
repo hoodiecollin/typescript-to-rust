@@ -1,6 +1,6 @@
 /**
  * Characterization specs for lowering (AST → HIR). See
- * docs/work/002-hir-characterization-specs. Backfill: GREEN-from-start (the impl
+ * series 002. Backfill: GREEN-from-start (the impl
  * predates the spec-first rule), pinning the HIR shape so a regression that still
  * compiles cannot slip past the cargo-backed fixture suite. IDs map to specs.md.
  */

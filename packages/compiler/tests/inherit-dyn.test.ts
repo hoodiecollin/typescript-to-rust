@@ -7,7 +7,7 @@
  * subclass-only field through a `dyn` (a downcast) stays fail-loud, as does
  * `implements` / multiple inheritance.
  *
- * IDs map to docs/work/053-class-inheritance/specs.md (INH12–INH16).
+ * IDs map to series 053 (INH12–INH16).
  */
 
 import { describe, expect, test } from "bun:test";

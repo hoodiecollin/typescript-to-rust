@@ -20,8 +20,8 @@ bun -e 'const j=await Bun.file("target/doc/ttr_facade_fixture.json").json();
 
 Normalization nulls the absolute `.rmeta` paths in `external_crates` (machine-specific)
 so the fixture is deterministic across machines. If a toolchain bump changes
-`format_version`, update the pin in `docs/work/_archive/122-ttr-facade-generator/design.md`
-(§Engine mechanics + §Ground-truth schema) in the same change.
+`format_version`, update `FACADE_FORMAT_VERSION` (and the nightly-toolchain constant
+beside it) in `packages/compiler/src/facade.ts` in the same change.
 
 The live integration spec (FAC3) re-runs the command above and asserts this captured
 file is still current; it skips loudly when no nightly rustdoc-json toolchain is present.

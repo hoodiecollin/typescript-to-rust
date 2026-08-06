@@ -13,7 +13,7 @@
  * inside a `.map`/`.filter` callback is a *separate* capability (the numeric-only
  * callback-body lifter) and is out of scope here.
  *
- * IDs → docs/work/113-plugin-infer-through-containers/specs.md (PIC1–PIC6).
+ * IDs → series 113 (PIC1–PIC6).
  */
 
 import { describe, expect, test } from "bun:test";

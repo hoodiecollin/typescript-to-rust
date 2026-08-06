@@ -4,7 +4,7 @@
  * flowing through the async free-fn path (awaitable via `.await`). The `=> expr`
  * body desugars to `{ return <expr>; }`. A `let`-bound / value-position async
  * arrow stays fail-loud (the arrow deferral boundary). IDs map to
- * docs/work/054-async-methods-arrows/specs.md.
+ * series 054.
  */
 
 import { expect, test } from "bun:test";

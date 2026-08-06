@@ -2,7 +2,7 @@
  * Specs for dialect validation (series 005). Drives the public `emit(...)` entry
  * — so the whole pipeline is exercised — and asserts that `any`/`unknown` are
  * rejected with `DialectError` (forbidden input), distinct from `UnsupportedError`
- * (not-yet-implemented). IDs map to docs/work/005-dialect-validation/specs.md.
+ * (not-yet-implemented). IDs map to series 005.
  *
  * These are RED against the no-op mock in `src/validate.ts`: `any`/`unknown`
  * currently throw `UnsupportedError` from lowering's type `default`, not

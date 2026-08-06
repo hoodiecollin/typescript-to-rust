@@ -6,7 +6,7 @@
  * unqualified glob, so there is no name capture. A **`namespace Foo { export … }`**
  * lowers to an inline `mod Foo { pub … }` and `Foo.bar()` → `Foo::bar()`; a
  * **reopened** namespace coalesces into one `mod`. IDs map to
- * docs/work/050-module-system/specs.md.
+ * series 050.
  */
 
 import { expect } from "bun:test";

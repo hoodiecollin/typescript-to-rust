@@ -4,7 +4,7 @@
  * resume states, and a local live across a yield on only one branch is carried
  * (a struct field) without disturbing the other branch.
  *
- * IDs map to docs/work/_archive/052-generator-state-machines/specs.md.
+ * IDs map to series 052.
  */
 
 import { defineDifferential } from "./_support/differential";

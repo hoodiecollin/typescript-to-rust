@@ -4,7 +4,7 @@
  * keyword, the `Promise<T>` → `T` return unwrap, `await` → `.await`, the runtime
  * `main`, a non-async green control, and the fail-loud rejections. The
  * cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/014-async-await/specs.md.
+ * series 014.
  *
  * RED against the scaffold seam in `src/lower.ts`: an `async` function and an
  * `AwaitExpression` each throw `UnsupportedError` "async/await lowering pending"

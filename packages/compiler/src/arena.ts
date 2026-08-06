@@ -16,7 +16,7 @@
  * Soundness is by the oracle: an arena value that **escapes** the scope
  * (returned, stored past the arena's lifetime) is a Rust lifetime error cargo
  * rejects — cargo *is* the escape analysis, so this stays fail-loud without a
- * bespoke pass. See `docs/work/028-compiler-directives/arena-spike.md`.
+ * bespoke pass. See series 028.
  *
  * Slices: `array`-literal `let`s (028c), plus (series 087) `string`-literal `let`s
  * → `bumpalo::collections::String::from_str_in(…, &arena)` and **nested**

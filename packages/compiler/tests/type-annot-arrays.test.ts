@@ -6,7 +6,7 @@
  * arrays stay fail-loud — their element type is not statically obvious in one
  * pass.
  *
- * IDs map to docs/work/046-type-annotation-enforcement/specs.md.
+ * IDs map to series 046.
  */
 
 import { describe, expect, test } from "bun:test";

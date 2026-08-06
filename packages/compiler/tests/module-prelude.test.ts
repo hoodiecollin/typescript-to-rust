@@ -4,7 +4,7 @@
  * `mod prelude { pub(crate) use … }`, and every library module file globs it
  * (`use crate::prelude::*;`) to cut `use` noise. Pure name routing → differential-
  * neutral. A cross-module name collision is dropped from the prelude (it would be
- * ambiguous in one module). IDs map to docs/work/050-module-system/specs.md.
+ * ambiguous in one module). IDs map to series 050.
  */
 
 import { expect } from "bun:test";

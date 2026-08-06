@@ -7,7 +7,7 @@
  *
  * `compile` threads the source text (so the oracle is active); `compileNoSource`
  * lowers without it (the pre-082 `bindingTypes`-only path), used to prove the
- * regression specs. IDs map to docs/work/082-type-oracle/specs.md.
+ * regression specs. IDs map to series 082.
  */
 
 import { describe, expect, test } from "bun:test";

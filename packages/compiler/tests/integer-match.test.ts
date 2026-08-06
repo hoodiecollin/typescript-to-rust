@@ -4,7 +4,7 @@
  * `i64` and its cases become bare literal-pattern arms (`1 => …`), superseding the
  * series-009 guarded-wildcard form (`_ if x == 1.0`). The cargo-backed
  * COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/019-integer-match/specs.md.
+ * series 019.
  *
  * RED against the existing guarded-wildcard behaviour: until `promoteIntegerMatches`
  * lands, an integer `switch` still emits `_ if x == 1.0 => …`. IMATCH4/5 are

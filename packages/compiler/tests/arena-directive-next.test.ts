@@ -7,7 +7,7 @@
  * and a nested `array` literal element is recursively routed into the same arena.
  * `.len()`/methods exist on both bumpalo collections, so existing emission works
  * unchanged. Escape (into a signature/field) stays cargo-loud — cargo is the
- * escape analysis. See docs/work/087-directives-next/design.md.
+ * escape analysis. See series 087.
  */
 
 import { expect, test } from "bun:test";

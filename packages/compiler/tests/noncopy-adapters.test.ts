@@ -1,6 +1,6 @@
 /**
  * Specs for series 115 — non-Copy element adapter chains (issue #96, a series-057
- * residual). Design + spec IDs: docs/work/115-noncopy-adapters/{design,specs}.md.
+ * residual). Design + spec IDs: series 115.
  *
  * Graduates: `reduce` over a non-Copy element (borrow the element like map/filter),
  * `forEach` over a non-Copy element (`for p in …` not `for &p`), and element-type

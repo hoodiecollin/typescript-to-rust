@@ -10,7 +10,7 @@
  *
  * Differential: emitted Rust compiles AND matches the TS run; derive/clone
  * placement is asserted on the emitted source. See
- * docs/work/037-ownership-cfg-liveness/specs.md.
+ * series 037.
  */
 
 import { expect, test } from "bun:test";

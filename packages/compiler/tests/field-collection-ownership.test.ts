@@ -13,7 +13,7 @@
  *    through `.borrow_mut().field.insert(..)` (the `refineRc` write-mode fix).
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/078-field-collection-ownership/specs.md.
+ * series 078.
  */
 
 import { expect, test } from "bun:test";

@@ -10,7 +10,7 @@
  *
  * Differential specs (CONC3, CONC5, CONC7) assert Rust stdout === TS stdout ===
  * expected; substring specs (CONC1, CONC2, CONC4, CONC6) pin the tokio shape;
- * CONC8/CONC9 are fail-loud. IDs map to docs/work/051-async-concurrency/specs.md.
+ * CONC8/CONC9 are fail-loud. IDs map to series 051.
  *
  * Fixture adjustments (noted): CONC1's callback is `x => x + 1` (a numeric-surface
  * body) rather than the illustrative `row => row.length` — the lift's callback

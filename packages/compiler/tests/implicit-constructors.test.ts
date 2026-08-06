@@ -7,7 +7,7 @@
  * fail-loud.
  *
  * Each behaving spec differential-matches (compile → cargo run == TS-via-Bun ==
- * expected). IDs → docs/work/070-implicit-constructors/specs.md.
+ * expected). IDs → series 070.
  */
 
 import { describe, expect, test } from "bun:test";

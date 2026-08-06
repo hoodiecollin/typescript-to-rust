@@ -518,7 +518,7 @@ function rcBody(
   // owner.borrow().field.iter()` lowering would hold that `borrow()` across the
   // body's `borrow_mut()` → `RefCell` runtime panic (JS never panics). We rewrite it
   // to an **index-based re-borrow** loop (`forInReborrow`) that holds no borrow
-  // across the body. See docs/work/077-mutate-during-iteration/design.md.
+  // across the body. See series 077.
 
   /** The root identifier of a projection chain (`a.b[c].d` → `a`), or null. */
   const rootIdent = (e: HirExpr): string | null => {

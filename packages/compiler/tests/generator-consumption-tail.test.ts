@@ -10,7 +10,7 @@
  *   - generator array-destructuring (`const [a, b] = g()`, rides 067).
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/075-generator-consumption-tail/specs.md.
+ * series 075.
  */
 
 import { expect, test } from "bun:test";

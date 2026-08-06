@@ -8,7 +8,7 @@
  * The gate only *validates* — it leaves `ty = null` untouched, so the usize/i64
  * refinement in `numeric.ts` still keys on the binding name (TYP8).
  *
- * IDs map to docs/work/046-type-annotation-enforcement/specs.md.
+ * IDs map to series 046.
  */
 
 import { describe, expect, test } from "bun:test";

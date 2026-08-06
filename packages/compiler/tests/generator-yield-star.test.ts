@@ -6,7 +6,7 @@
  * stays fail-loud (pull-only `Option<T>`, no `{value, done}`).
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/065-yield-star-consumption/specs.md.
+ * series 065.
  */
 
 import { expect, test } from "bun:test";

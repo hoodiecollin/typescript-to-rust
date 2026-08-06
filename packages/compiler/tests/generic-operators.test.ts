@@ -8,7 +8,7 @@
  * The trait bound IS the constraint (no `<T extends number>`). Mixed operands
  * (`this.v + 1`) and logical/bitwise over a bare `T` stay fail-loud.
  *
- * IDs map to docs/work/088-generic-operators/specs.md (GOP1–GOP9).
+ * IDs map to series 088 (GOP1–GOP9).
  */
 
 import { describe, expect, test } from "bun:test";
