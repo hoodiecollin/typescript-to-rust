@@ -7,7 +7,7 @@
  * Soundness is by the oracle: an arena value that escapes the scope is a Rust
  * lifetime error cargo rejects — cargo *is* the escape analysis. So the no-escape
  * case behaves identically to the heap version, and escape is loud, never silent.
- * See docs/work/028-compiler-directives/arena-spike.md.
+ * See series 028.
  */
 
 import { describe, expect, test } from "bun:test";

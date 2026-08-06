@@ -1,6 +1,6 @@
 /**
  * `ttr facade` — generate a **mirror-plugin facade** from a Rust crate's rustdoc
- * JSON (series 122; design in `docs/work/122-ttr-facade-generator/design.md`).
+ * JSON (series 122; design in series 122).
  *
  * The mirror archetype (series 121) keeps the *crate* authoritative: rather than
  * reimplement a library in TypeScript and diff the two, we generate a types-only

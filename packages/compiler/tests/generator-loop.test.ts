@@ -7,7 +7,7 @@
  * numbering, the `loop { match self.state { … } }` `next()`, and the public
  * wrapper fn (which keeps the 035 `impl Iterator` shape, so `for-of` composes).
  *
- * IDs map to docs/work/_archive/052-generator-state-machines/specs.md.
+ * IDs map to series 052.
  * Differential specs assert Rust stdout === TS stdout; substring specs pin the
  * generated state-machine shape.
  */

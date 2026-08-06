@@ -1,6 +1,6 @@
 /**
  * Specs for series 096 — `++` / `--` (`UpdateExpression`) → Rust `+= 1` / `-= 1`.
- * Design + spec IDs: docs/work/096-update-expr/{design,specs}.md. Differentials
+ * Design + spec IDs: series 096. Differentials
  * (emitted Rust runs; stdout === TS-via-Bun) unless a plain `test()` fail-loud pin.
  *
  * Covers: statement position (local/field/index, prefix & postfix, for-update

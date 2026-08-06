@@ -6,7 +6,7 @@
  * (a `yield` inside a `try`/`catch`). GEN12 guards that the 035 straight-line
  * path is not regressed.
  *
- * IDs map to docs/work/_archive/052-generator-state-machines/specs.md.
+ * IDs map to series 052.
  */
 
 import { describe, expect, test } from "bun:test";

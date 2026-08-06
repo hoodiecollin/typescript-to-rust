@@ -1,6 +1,6 @@
 /**
  * Specs for series 095 — template literals `` `hi ${x}` `` → JS-faithful string
- * building. Design + spec IDs: docs/work/095-template-literals/{design,specs}.md.
+ * building. Design + spec IDs: series 095.
  * Differentials (emitted Rust runs; stdout === TS-via-Bun) unless a plain `test()`
  * fail-loud pin.
  *

@@ -6,7 +6,7 @@
  * as __default_export;` alias (a named fn/class), and `import def from "./d"` binds
  * it via `use crate::d::__default_export as def;`. An anonymous **value** default
  * (`export default 42/{}`) has no named Rust analog and stays fail-loud (MOD17).
- * IDs map to docs/work/050-module-system/specs.md.
+ * IDs map to series 050.
  */
 
 import { expect } from "bun:test";

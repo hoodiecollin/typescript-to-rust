@@ -6,7 +6,7 @@
  * fail-loud). Generics, owned-`self`, and decorators stay fail-loud.
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/060-class-deferrals/specs.md.
+ * series 060.
  */
 
 import { expect, test } from "bun:test";

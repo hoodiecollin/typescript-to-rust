@@ -5,7 +5,7 @@
  * `class C implements I` gets `impl I<Name> for C` (method forwarders + 059
  * getters); a param typed as the interface is `&impl I<Name>` with trait dispatch.
  *
- * IDs map to docs/work/071-trait-struct-model/specs.md (BINT1–BINT11).
+ * IDs map to series 071 (BINT1–BINT11).
  */
 
 import { describe, expect, test } from "bun:test";

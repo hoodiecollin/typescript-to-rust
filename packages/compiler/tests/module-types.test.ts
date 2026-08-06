@@ -6,7 +6,7 @@
  * **by construction** during lowering; the importer's `use` map brings the name
  * into scope, and 050b's visibility closure has already widened the exported type
  * (its fields / ctor / methods) to `pub(crate)` so the cross-module access is legal.
- * IDs map to docs/work/050-module-system/specs.md.
+ * IDs map to series 050.
  */
 
 import { expect } from "bun:test";

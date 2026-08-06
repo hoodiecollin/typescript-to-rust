@@ -3,7 +3,7 @@
  * provably-string operand lowers to `format!("{}{}…", …)`; a numeric `+` is
  * untouched. Graduates #47 (`String + String` for field / method-result operands).
  *
- * IDs map to docs/work/080-string-concat/specs.md (SCAT1–SCAT7).
+ * IDs map to series 080 (SCAT1–SCAT7).
  */
 
 import { expect, test } from "bun:test";

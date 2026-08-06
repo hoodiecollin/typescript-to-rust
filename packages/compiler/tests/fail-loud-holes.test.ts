@@ -12,7 +12,7 @@
  * Each gap gets GREEN specs (the fix compiles + behaves) and, where a full fix
  * is out of scope, a fail-loud spec (`UnsupportedError`, honest "not yet").
  *
- * IDs map to docs/work/031-fail-loud-lowering-holes/specs.md.
+ * IDs map to series 031.
  */
 
 import { expect, test } from "bun:test";

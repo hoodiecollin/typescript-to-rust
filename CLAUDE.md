@@ -14,8 +14,7 @@ gh issue list --label rfc           # designs awaiting acceptance
 gh issue view <n>                   # the design and the plan live in the issue body
 ```
 
-Do **not** treat `docs/plan.md`'s "Next" section as the live todo list — it is the
-historical status/architecture record.
+There is no todo list in the tree. `docs/` holds durable references only.
 
 Labels are the ones in the pm-playbook taxonomy (see the block at the bottom of this
 file) and nothing else. **`has-design`, `needs-design`, `needs-user-input`,
@@ -46,11 +45,12 @@ must be applied by hand is one that gets forgotten on exactly the issue that nee
 
 - **Process / workflow (spec-first BDD, oracle-driven TDD, no-barrel-files):**
   `.agents/AGENTS.md`.
-- **Architecture, pipeline, memory-model decision, and shipped-status log:**
-  `docs/plan.md`.
-- **Design + implementation-plan:** on the issue (Gates 1 and 2). `docs/work/_archive/`
-  holds the pre-2026-08 series folders as a frozen historical record; the workflow no
-  longer creates new ones. See `docs/work/README.md`.
+- **Architecture, the pass pipeline, and the memory-model decision:**
+  `docs/ARCHITECTURE.md`. The accepted input dialect: `docs/DIALECT.md`.
+- **Design + implementation-plan:** on the issue (Gates 1 and 2). The numbered
+  `docs/work/<NNN>/` series folders this repo used to keep are **deleted** — their
+  durable content was distilled into `docs/ARCHITECTURE.md` and git history holds the
+  rest. Do not recreate them.
 - Run everything from the repo root (`bun run check`, `bun run test`,
   `bun run typecheck`).
 

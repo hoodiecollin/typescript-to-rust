@@ -5,7 +5,7 @@
  * *integer* discriminant to `i64` with idiomatic literal-pattern arms, so SW2
  * asserts the promoted form (see tests/integer-match.test.ts for the full 019
  * specs). The cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs
- * map to docs/work/009-switch-break-continue/specs.md.
+ * map to series 009.
  *
  * RED against the scaffold seam in `src/lower.ts`: `SwitchStatement` throws
  * `UnsupportedError` until `lowerSwitch` lands. SW6 is a green control.

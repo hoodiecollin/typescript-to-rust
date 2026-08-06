@@ -3,7 +3,7 @@
  * lowers to `&str`; a Map/Set lookup used to wrap it as `&(&str)` = `&&str`
  * (E0277). The fix drops the outer borrow for an already-`&str` key. Owned /
  * literal / OrderedFloat / structKey keys keep their `&`-wrapped path (regression).
- * IDs map to docs/work/083-library-methods-oracle/specs.md.
+ * IDs map to series 083.
  */
 
 import { expect } from "bun:test";

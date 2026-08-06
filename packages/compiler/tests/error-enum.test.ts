@@ -2,7 +2,7 @@
  * Series 049a specs — the whole-program `AppError` enum + throw construction
  * (ERR1–ERR6). The oracle is a real cargo toolchain: substring assertions pin the
  * cargo-checked *representation*, never a golden `.rs` file. IDs map to
- * docs/work/049-error-enums-discrimination/specs.md.
+ * series 049.
  */
 
 import { describe, expect, test } from "bun:test";

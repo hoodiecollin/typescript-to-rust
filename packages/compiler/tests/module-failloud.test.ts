@@ -3,7 +3,7 @@
  * have no sound Rust analog and are rejected in `lowerCrate`/lowering with a
  * dedicated message (never silently mistranslated). TS→Rust-rejection tests, so
  * they use `compileCrate(...)` + `toThrow` (they never reach cargo). IDs map to
- * docs/work/050-module-system/specs.md.
+ * series 050.
  */
 
 import { describe, expect, test } from "bun:test";

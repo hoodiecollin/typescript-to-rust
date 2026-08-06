@@ -1,6 +1,6 @@
 /**
  * Specs for series 099 — inference tier. Relaxes the "explicit type annotation
- * required on every binding/return" positive rule (docs/dialect.md) to an
+ * required on every binding/return" positive rule (docs/DIALECT.md) to an
  * inference-with-re-validation rule: an un-annotated binding/return whose type the
  * lib-backed TypeOracle can infer *and* which re-validates to a modeled `RustType`
  * uses the inferred type; anything outside the accepted surface (or a parameter,
@@ -10,7 +10,7 @@
  * `INF-FL*` = transpiler fail-loud pin (inferred type out of surface, or a param).
  * `INF-R*` = regression (no behavior change where it must not change).
  *
- * IDs map to docs/work/099-inference-tier/specs.md.
+ * IDs map to series 099.
  */
 
 import { describe, expect, test } from "bun:test";

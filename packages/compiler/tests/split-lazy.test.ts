@@ -4,7 +4,7 @@
  * streams Rust's native `str::split` (borrowed `&str`, zero allocation) instead of
  * materializing a `Vec<String>`. The differential harness cargo-compiles and runs each
  * program, so every shape assertion is also a COMPILES/BEHAVES proof; output is
- * byte-identical to the materialized form. IDs map to docs/work/107-split-lazy/specs.md.
+ * byte-identical to the materialized form. IDs map to series 107.
  *
  * This is staging 1 — **iteration** consumers (for-of, temp + inline). Count (`.length`)
  * and single-index (`[i]`) land in staging 2. The negatives are as load-bearing as the

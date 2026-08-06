@@ -3,7 +3,7 @@
  * subclasses and a bare string literal, each → `return Err(<String>);`. Drives
  * the public `emit(...)` entry and asserts the emitted shape plus the still
  * fail-loud deferrals. The cargo-backed BEHAVES proof lives in compiler.test.ts.
- * IDs map to docs/work/017-throw-values/specs.md.
+ * IDs map to series 017.
  *
  * RED against the existing non-`Error` rejection in `lowerThrow` (only
  * `throw new Error(msg)` is accepted today) until it widens to the subclass set

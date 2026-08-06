@@ -11,7 +11,7 @@
  *
  * Differential specs assert BOTH runtime behavior and the shim shape. A whole-Vec
  * `console.log` has no Rust `Display`, so results are reduced to a scalar element /
- * `.length` / a `bool`. IDs map to docs/work/057-noncopy-element-callbacks/specs.md.
+ * `.length` / a `bool`. IDs map to series 057.
  */
 
 import { expect, test } from "bun:test";

@@ -5,7 +5,7 @@
  * JS identity semantics — so the differential vs. Bun agrees (contrast the 047a
  * structural divergence, where the same field values give the opposite result).
  *
- * IDs map to docs/work/047-struct-equality/specs.md.
+ * IDs map to series 047.
  */
 
 import { expect } from "bun:test";

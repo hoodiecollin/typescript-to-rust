@@ -5,7 +5,7 @@
  * over-deep/no-op `flat(k)`, and a `flatMap` ternary `cond ? U : U[]` callback.
  * Genuinely-dynamic shapes (runtime-variable depth, heterogeneous `(U|U[])[]`,
  * empty-arm) stay fail-loud → the deferred JsonValue increment. IDs map to
- * docs/work/085-flatmap-flat/specs.md and docs/work/092-static-flat-flatmap/specs.md.
+ * series 085 and series 092.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -1,6 +1,6 @@
 /**
  * Specs for series 094 — ternary `cond ? a : b` → Rust `if`/`else` **expression**.
- * Design + spec IDs: docs/work/094-ternary/{design,specs}.md. Differentials
+ * Design + spec IDs: series 094. Differentials
  * (emitted Rust runs; stdout === TS-via-Bun) unless a plain `test()` fail-loud pin.
  *
  * Covers: homogeneous arms (typed + untyped), nested/chained, bare-statement,

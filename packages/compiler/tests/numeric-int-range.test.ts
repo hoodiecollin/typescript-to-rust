@@ -6,7 +6,7 @@
  * a function whose only result-use is `Display`/discard specializes its `f64`
  * return to `i64` (dropping 103b-1's `as f64` bridge). The differential harness
  * cargo-compiles and runs each program, so every shape assertion is also a
- * COMPILES/BEHAVES proof. IDs map to docs/work/103-numeric-specialization/specs.md.
+ * COMPILES/BEHAVES proof. IDs map to series 103.
  */
 
 import { expect, test } from "bun:test";

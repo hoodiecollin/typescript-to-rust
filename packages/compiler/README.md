@@ -33,7 +33,7 @@ bun run check       # typecheck + rust tests + compiler tests
 ## Layout
 
 - `src/ast.ts` — typed ESTree subset (the shape oxc-parser actually emits; see
-  `docs/architecture.md` for why this isn't `@oxc-project/types`).
+  `docs/ARCHITECTURE.md` for why this isn't `@oxc-project/types`).
 - `src/emitter/` — AST → Rust module string. Always emits a complete, compilable
   module; throws `UnsupportedError` on out-of-dialect input.
 - `src/harness/` — the verification oracle: drives `cargo check`/`cargo run` and

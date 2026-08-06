@@ -5,7 +5,7 @@
  * value is the pinned behavior. `f64` fields are `PartialEq` but not `Eq` (so this
  * does NOT unlock struct map/set keys, #21).
  *
- * IDs map to docs/work/047-struct-equality/specs.md.
+ * IDs map to series 047.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -1,6 +1,6 @@
 /**
  * Specs for series 114 — string enums → Rust `enum` with a `Display` round-trip.
- * Design + spec IDs: docs/work/114-string-enums/{design,specs}.md. Issue #77.
+ * Design + spec IDs: series 114. Issue #77.
  *
  * A string enum (`enum Dir { North = "north" }`) lowers to a fieldless `HirEnum`
  * carrying a `display` per variant; `emitEnum` emits `#[derive(Clone, Copy, Debug,

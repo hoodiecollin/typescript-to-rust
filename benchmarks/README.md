@@ -87,7 +87,7 @@ inference pass now proves the counter/accumulator integer-valued and retypes the
 `f64` → `i64`, emitting a native `for i in 0i64..N` range with hardware integer
 arithmetic — so `loopsum` moves from the *loses* column to a **win** (~95ms → ~7ms
 steady-state), with byte-identical output. The accepted `i64` divergence (past 2⁵³)
-is documented in `docs/dialect.md`.
+is documented in `docs/DIALECT.md`.
 
 **`arraypipe`** taught a lesson about *measuring* before optimizing — twice. It looked
 like an allocation problem — `map`/`filter`/`reduce` materialized two throwaway `Vec`s —
@@ -108,7 +108,7 @@ moves from the *loses* column to a **win in both dimensions**: **steady-state ~1
 Bun 58MB — byte-identical throughout. The lattice only specializes a value it *proves*
 integer; a fractional source, an upstream `/`, or a single fractional call site leaves the
 modulo `f64` (no truncation). The accepted `i64` divergence (past 2⁵³) is documented in
-`docs/dialect.md`.
+`docs/DIALECT.md`.
 
 **`strbuild`** — the last workload to flip — taught the *same lesson* a second time. Its build
 loop `s = s + "abc" + (i % 10)` lowered to `s = format!("{}{}{}", s, …)` — a fresh buffer +

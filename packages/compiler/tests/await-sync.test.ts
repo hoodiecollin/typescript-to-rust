@@ -7,7 +7,7 @@
  * The genuine-future paths (async fn / method / combinator / spawned handle /
  * sleep) are untouched — AWAIT6 guards that.
  *
- * IDs map to docs/work/055-await-sync-unwrap/specs.md. Differential specs assert
+ * IDs map to series 055. Differential specs assert
  * Rust stdout === TS stdout; substring specs pin the drop / retain shape.
  */
 

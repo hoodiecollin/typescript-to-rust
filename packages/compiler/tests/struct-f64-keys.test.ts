@@ -12,7 +12,7 @@
  * `behaves`. The structural SameValueZero win (distinct-but-equal keys dedupe,
  * `NaN` keys collide, `-0`/`+0` collapse) is the documented divergence from JS
  * object-identity keying — pinned directly on the Rust run via `rustBehaves`.
- * IDs map to docs/work/074-struct-f64-keys/specs.md.
+ * IDs map to series 074.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -8,7 +8,7 @@
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun) and pins the
  * refined emitted shape. The dialect writes loop updates as `i = i + 1` (no
- * `++`/`--`). IDs map to docs/work/064-control-flow-refinements/specs.md.
+ * `++`/`--`). IDs map to series 064.
  */
 
 import { expect } from "bun:test";

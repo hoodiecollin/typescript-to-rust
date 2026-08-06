@@ -5,7 +5,7 @@
  * (so a cross-module call resolves by construction), and the emitter writes one
  * `.rs` file per module plus a `mod foo;` root — one binary, one stdout to diff.
  * The inline single-file form stays the no-import fast path. IDs map to
- * docs/work/050-module-system/specs.md.
+ * series 050.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -3,7 +3,7 @@
  * asserts the *desugared* structure: a scope-containing block wrapping the loop
  * variable and a `while` whose body ends with the loop's `update`. The
  * cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/007-for-loops/specs.md.
+ * series 007.
  *
  * RED against the scaffold seam in `src/lower.ts`: `ForStatement` throws
  * `UnsupportedError` "for-loop lowering pending" until `lowerFor` lands. FOR6 is

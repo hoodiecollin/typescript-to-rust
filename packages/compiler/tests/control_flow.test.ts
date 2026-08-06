@@ -3,7 +3,7 @@
  * Drives the public `emit(...)` entry (parse → lower → emit) and asserts the
  * *structure* of the emitted Rust. The cargo-backed COMPILES/BEHAVES proof lives
  * in compiler.test.ts; these pin the emitted shape. IDs map to
- * docs/work/006-control-flow/specs.md.
+ * series 006.
  *
  * RED against the scaffold seam in `src/lower.ts`: `IfStatement`/`WhileStatement`
  * throw `UnsupportedError` "control flow lowering pending" until real lowering

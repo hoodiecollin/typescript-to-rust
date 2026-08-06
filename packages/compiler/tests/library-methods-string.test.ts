@@ -3,7 +3,7 @@
  * `receiverTypeOf` backbone. Native rows (STRN*) and tslib-quirk rows (STRT*).
  * Each spec differential-matches (compile → cargo run → TS-via-Bun); a `Tf` row
  * observes the JS quirk it reproduces. IDs map to
- * docs/work/083-library-methods-oracle/specs.md.
+ * series 083.
  */
 
 import { expect } from "bun:test";

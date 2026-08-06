@@ -4,7 +4,7 @@
  * index-driven loop — is rewritten from the while-desugar (series 006/018) into a
  * native range, while non-eligible loops keep the correct while-desugar. The
  * cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts. IDs map to
- * docs/work/020-for-range/specs.md.
+ * series 020.
  *
  * RED against the while-desugar: until `promoteRanges` lands, an index-driven
  * counting loop still emits `let mut i: usize = 0; while i < arr.len()`. RANGE5/6

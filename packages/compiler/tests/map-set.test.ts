@@ -6,7 +6,7 @@
  * `OrderedFloat` (faithful to JS SameValueZero), and gated struct keys.
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun) and pins the
- * refined emitted shape. IDs map to docs/work/061-hashmap-map-set/specs.md.
+ * refined emitted shape. IDs map to series 061.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -1,6 +1,6 @@
 /**
  * Specs for series 093 — union types → Rust `enum`. Design + spec IDs:
- * docs/work/093-union-types/{design,specs}.md. Differentials (emitted Rust runs;
+ * series 093. Differentials (emitted Rust runs;
  * stdout === TS-via-Bun) unless a plain `test()` fail-loud pin.
  *
  * Grows stage-by-stage (design §10): a spec is added only once its stage compiles,

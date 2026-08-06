@@ -6,7 +6,7 @@
  * own `continue`, so BC5 now asserts the supported behaviour (see
  * tests/for-continue.test.ts for the full 018 specs). The cargo-backed BEHAVES
  * proof lives in compiler.test.ts. IDs map to
- * docs/work/009-switch-break-continue/specs.md.
+ * series 009.
  *
  * RED against the scaffold seam in `src/lower.ts`: `Break`/`ContinueStatement`
  * throw `UnsupportedError` until lowering lands. BC6 is a green control.

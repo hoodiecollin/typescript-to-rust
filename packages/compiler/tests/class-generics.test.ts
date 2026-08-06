@@ -8,7 +8,7 @@
  * methods. Operators-on-`T`, explicit call-site type args, class/multi bounds stay
  * fail-loud (slice 3 / #44).
  *
- * IDs map to docs/work/081-class-generics/specs.md (CG1–CG13).
+ * IDs map to series 081 (CG1–CG13).
  */
 
 import { expect, test } from "bun:test";

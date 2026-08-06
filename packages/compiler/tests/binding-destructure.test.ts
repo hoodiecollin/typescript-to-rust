@@ -5,7 +5,7 @@
  * (`const { x, y } = point`) and array-pattern over a fixed-arity tuple source
  * (`const [a, b] = [e0, e1]`). Vec-source array-patterns, renamed/rest/nested
  * fields, and arity mismatches stay fail-loud. IDs map to
- * docs/work/067-binding-destructuring/specs.md.
+ * series 067.
  */
 
 import { describe, expect, test } from "bun:test";

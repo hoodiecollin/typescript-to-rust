@@ -9,7 +9,7 @@
  * closure stay fail-loud (documented residuals). Scalar mutable capture is unchanged.
  *
  * Differential: emitted Rust compiles AND matches the TS run, plus emitted-text and
- * fail-loud checks. IDs map to docs/work/079-closure-captured-containers/specs.md.
+ * fail-loud checks. IDs map to series 079.
  */
 
 import { expect, test } from "bun:test";

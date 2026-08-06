@@ -3,7 +3,7 @@
  * `.toString()` end-to-end for `this.field` / `getX()` / identifier / `local.field`
  * receivers (RT*), zero-regression on existing collection/string receivers
  * (RT-REG*), and fail-loud on unmodeled receiver shapes (RT-FL*). IDs map to
- * docs/work/083-library-methods-oracle/specs.md.
+ * series 083.
  */
 
 import { expect, test } from "bun:test";

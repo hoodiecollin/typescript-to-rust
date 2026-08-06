@@ -3,7 +3,7 @@
  * bound error (ERR12–ERR16). ERR14 is the headline differential: one `try` throws
  * either variant by input, and the catch prints a distinct string per variant;
  * Rust stdout == Bun on *both* branches. IDs map to
- * docs/work/049-error-enums-discrimination/specs.md.
+ * series 049.
  */
 
 import { describe, expect, test } from "bun:test";

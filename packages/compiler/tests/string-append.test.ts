@@ -6,7 +6,7 @@
  * accumulator's `std::fmt::Write` impl. The differential harness cargo-compiles and
  * runs each program, so every shape assertion is also a COMPILES/BEHAVES proof; the
  * output is byte-identical to the `format!` form. IDs map to
- * docs/work/106-string-append/specs.md.
+ * series 106.
  *
  * Per the corpus-coverage rule, the non-append rejects (SA5–SA7) each get a fixture:
  * they are soundness-critical — an in-place append there would reorder or corrupt a

@@ -1,7 +1,7 @@
 /**
  * TypeOracle (series 082) — a TypeScript-checker-backed type-resolution layer
  * coupled to the oxc front end. Graduates spike #44 (see
- * `docs/work/_archive/082-type-oracle/design.md`; the exploratory
+ * series 082; the exploratory
  * `044-type-layer-spike` code has since been pruned — see git history).
  *
  * The front end is `oxc-parser` (syntax only, no checker), so the transpiler

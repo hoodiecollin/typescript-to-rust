@@ -1,6 +1,6 @@
 /**
  * Characterization specs for emission (HIR → string). See
- * docs/work/002-hir-characterization-specs. The emitter is pure and total, so
+ * series 002. The emitter is pure and total, so
  * these build HIR literals directly — no parser, no cargo — and assert the exact
  * Rust rendered. Backfill: GREEN-from-start. IDs map to specs.md.
  */

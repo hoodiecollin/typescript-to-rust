@@ -13,7 +13,7 @@
  * All instants are UTC internally; the short local accessors are UTC-normalized
  * (`getHours ≡ getUTCHours`, `getTimezoneOffset ≡ 0`) — a documented divergence,
  * made airtight by pinning `TZ=UTC` on the Bun run in the harness. IDs map to
- * docs/work/102-date/specs.md.
+ * series 102.
  */
 
 import { describe, expect, test } from "bun:test";

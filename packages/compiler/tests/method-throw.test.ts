@@ -4,7 +4,7 @@
  * shape: a `Result`-wrapped method, a `Result`-wrapped constructor with an
  * `Ok`-wrapped struct return, `?`-propagation at a fallible method call and a
  * fallible `new`, and a non-throwing class staying unchanged. The cargo proof
- * lives in compiler.test.ts. IDs map to docs/work/023-throw-in-methods/specs.md.
+ * lives in compiler.test.ts. IDs map to series 023.
  *
  * RED until the unified `analyzeFallible` fixpoint + fallible method/ctor
  * lowering land (throw-in-method currently hits the `lowerClass` rejection).

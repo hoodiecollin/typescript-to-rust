@@ -15,7 +15,7 @@
  * that is also used after the spawn (or shared across tasks, or mutated inside a
  * task) stays fail-loud (CONC-SHARE-TEMP), and increment 2 graduates it.
  *
- * IDs map to docs/work/051-async-concurrency/specs.md. Differential specs assert
+ * IDs map to series 051. Differential specs assert
  * Rust stdout === TS stdout; substring specs pin the tokio shape.
  */
 

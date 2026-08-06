@@ -1,6 +1,6 @@
 /**
  * Specs for series 097 — destructuring (graduate the binding fail-loud residuals).
- * Design + spec IDs: docs/work/097-destructuring/{design,specs}.md. Differentials
+ * Design + spec IDs: series 097. Differentials
  * (emitted Rust runs; stdout === TS-via-Bun) unless a plain `test()` fail-loud pin.
  *
  * Covers shapes A–D: array-over-Vec → Option-typed elements (OOB → undefined);

@@ -4,7 +4,7 @@
  * state numbering across multiple loop regions with a lazy side-effecting
  * statement between them.
  *
- * IDs map to docs/work/_archive/052-generator-state-machines/specs.md.
+ * IDs map to series 052.
  */
 
 import { defineDifferential } from "./_support/differential";

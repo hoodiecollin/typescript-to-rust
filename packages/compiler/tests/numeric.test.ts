@@ -5,7 +5,7 @@
  * initializers and integer arithmetic, and that an int/float conflict fails loud.
  *
  * These are RED against the identity mock in `src/numeric.ts` and go GREEN when
- * the real pass lands. IDs map to docs/work/003-numeric-inference/specs.md.
+ * the real pass lands. IDs map to series 003.
  * `refineNumerics` is idempotent, so re-applying it to `lower`'s (already-refined)
  * output is safe in both phases.
  */

@@ -4,7 +4,7 @@
  * (no cast). 103a's local `((x as i64) % k) as f64` remains only as the fallback
  * for an integer-valued `%` whose binding could not retype (it mixes with `f64`).
  * Either way the libm `fmod` is gone. IDs map to
- * docs/work/103-numeric-specialization/specs.md.
+ * series 103.
  */
 
 import { expect, test } from "bun:test";

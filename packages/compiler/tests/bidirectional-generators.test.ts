@@ -12,7 +12,7 @@
  *     read yield result.
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/076-bidirectional-generators/specs.md.
+ * series 076.
  */
 
 import { expect, test } from "bun:test";

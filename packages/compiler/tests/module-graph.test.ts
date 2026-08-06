@@ -5,7 +5,7 @@
  * std-import preludes, and the **visibility inference** (Axis 1) — an item named in
  * an `export`, or reachable from an exported signature, is `pub(crate)`; a purely
  * local item stays private. A top-level statement in a non-entry module is
- * fail-loud. IDs map to docs/work/050-module-system/specs.md.
+ * fail-loud. IDs map to series 050.
  */
 
 import { describe, expect, test } from "bun:test";

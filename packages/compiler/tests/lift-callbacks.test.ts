@@ -10,7 +10,7 @@
  * whole point of the reframe is the shape, so we pin it). The illustrative
  * `console.log(xs.map(...))` from specs.md logs a whole Vec, which has no Rust
  * `Display`; the loggable forms below (an element / a `.length`) keep the spirit.
- * IDs map to docs/work/048-lambda-lifting-closures/specs.md.
+ * IDs map to series 048.
  */
 
 import { describe, expect, test } from "bun:test";

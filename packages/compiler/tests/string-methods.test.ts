@@ -4,7 +4,7 @@
  * (indexOf/lastIndexOf/at/1-arg-pad/concat/split-limit/substr), switches string
  * `.length` to a char count, and converts the deferred UTF-16 / RegExp / locale
  * surface from cargo-loud to a clean transpiler fail-loud. IDs map to
- * docs/work/098-string-methods/specs.md.
+ * series 098.
  */
 
 import { expect, test } from "bun:test";

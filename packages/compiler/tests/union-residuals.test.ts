@@ -1,6 +1,6 @@
 /**
  * Specs for series 118 — union-type residuals (graduate #82). Design + spec IDs:
- * docs/work/118-union-residuals/{design,specs}.md. Follow-up to series 093 (#63):
+ * series 118. Follow-up to series 093 (#63):
  * graduates three deferred residuals to real support — (d) fielded/literal union as
  * a Map/Set key, (f) two named structs with no shared discriminant (`in`-narrowed
  * newtype enum), (c) mixed literal + object union (G) via a single-level mixed

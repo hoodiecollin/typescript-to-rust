@@ -9,12 +9,13 @@ both are worth loading before you touch anything:
 - **[`CLAUDE.md`](CLAUDE.md)** — the same rules plus where to find "what to do next," and
   the standing rule about getting a decision before designing dialect-shape work.
 
-The human-facing version of all of it is **[`CONTRIBUTING.md`](CONTRIBUTING.md)**.
+The human-facing version of all of it is **[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)**.
 
 **Three things that are load-bearing here:**
 
-1. **The backlog is GitHub Issues.** Not `docs/plan.md`, whose "Status" section is a
-   historical log. Not `docs/work/`, which is a frozen archive.
+1. **The backlog is GitHub Issues.** Nothing in `docs/` schedules work — it holds
+   durable references only ([`ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+   [`DIALECT.md`](docs/DIALECT.md), and the three process docs).
 2. **Designs and implementation-plans live on the issue**, never as a committed
    `design.md`. If you reopen an accepted gate, purge the issue body first — a superseded
    design left in place reads as *the* design.

@@ -4,7 +4,7 @@
  * entry and asserts the emitted shape: the `Result`-wrapped async signature, the
  * `<call>.await?` propagation, the async fallible `main`, a non-fallible green
  * control, and the still-fail-loud non-awaited call. The cargo-backed BEHAVES
- * proof lives in compiler.test.ts. IDs map to docs/work/016-async-throw/specs.md.
+ * proof lives in compiler.test.ts. IDs map to series 016.
  *
  * RED against the existing fail-loud guard in `lowerFunction` (an `async` fn that
  * throws is rejected "async throwing function (async + Result deferred)") until

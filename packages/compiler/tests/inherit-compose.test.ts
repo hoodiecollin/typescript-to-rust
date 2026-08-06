@@ -5,7 +5,7 @@
  * `b.x` → `b.base.x` (own-vs-inherited classification, multi-level hops). A subclass
  * constructor with no `super(...)` is fail-loud.
  *
- * IDs map to docs/work/053-class-inheritance/specs.md (INH1–INH6).
+ * IDs map to series 053 (INH1–INH6).
  */
 
 import { expect, test } from "bun:test";

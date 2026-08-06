@@ -3,7 +3,7 @@
  * `emit(...)` entry and asserts the emitted shape: a `struct` + `impl`, a `new`
  * constructor building a struct literal, a `&mut self` method, and `this`/`new`
  * translation. The cargo-backed COMPILES/BEHAVES proof lives in compiler.test.ts.
- * IDs map to docs/work/012-class-struct-impl/specs.md.
+ * IDs map to series 012.
  *
  * RED against the scaffold seam in `src/lower.ts`: a `ClassDeclaration` throws
  * `UnsupportedError` "class → struct/impl lowering pending" until `lowerClass`

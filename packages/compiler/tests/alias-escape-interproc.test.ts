@@ -11,7 +11,7 @@
  *    container into `a`'s alias closure, so a mutation through either promotes both.
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/069-alias-escape-interprocedural/specs.md.
+ * series 069.
  */
 
 import { expect } from "bun:test";

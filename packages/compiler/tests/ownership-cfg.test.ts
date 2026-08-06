@@ -11,7 +11,7 @@
  *
  * The pass still only ever *adds* clones (fail-loud preserved). Differential:
  * emitted Rust compiles AND matches the TS run; clone *placement* is asserted on
- * the emitted source. See docs/work/037-ownership-cfg-liveness/specs.md.
+ * the emitted source. See series 037.
  */
 
 import { expect, test } from "bun:test";

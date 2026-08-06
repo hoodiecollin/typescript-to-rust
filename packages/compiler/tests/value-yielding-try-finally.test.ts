@@ -8,7 +8,7 @@
  * labeled block.
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/073-finally-escape-carrier/specs.md.
+ * series 073.
  */
 
 import { expect } from "bun:test";

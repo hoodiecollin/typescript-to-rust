@@ -11,7 +11,7 @@
  *   - Default-deny on an unmodeled node *type* (enum, namespace, parameter
  *     property) → `UnsupportedError` ("not implemented yet").
  *
- * IDs map to docs/work/024-fail-loud-esoteric/specs.md.
+ * IDs map to series 024.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -27,7 +27,7 @@ describe("024: flagged rejections — permanent (DialectError) vs deferral (Unsu
   // #80 re-examined the flag-based walls: decorators + `declare` stay permanent
   // (DialectError); async generators, `for await`, `await using`, and `abstract`
   // classes are in-dialect-but-unbuilt and reclassified to deferrals
-  // (UnsupportedError). See docs/dialect.md and #80.
+  // (UnsupportedError). See docs/DIALECT.md and #80.
   //
   // EF1: sync generators graduated to supported in series 025d — a straight-line
   // finite-yield `function*` → `impl Iterator` (see generators.test.ts). This

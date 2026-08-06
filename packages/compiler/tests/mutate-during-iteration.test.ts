@@ -11,7 +11,7 @@
  * differential-matches (compile → `cargo run` → compare vs Bun-run TS). Fail-loud
  * residuals stay fail-loud (`UnsupportedError`)/cargo-loud, never a silent
  * miscompile. IDs map to
- * docs/work/077-mutate-during-iteration/specs.md.
+ * series 077.
  */
 
 import { describe, expect, test } from "bun:test";

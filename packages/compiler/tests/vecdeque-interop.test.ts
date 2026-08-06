@@ -1,7 +1,7 @@
 /**
  * Specs for series 117 — VecDeque interop + cross-boundary propagation (issue #101,
  * the residual tail of 116/#78). Design + spec IDs:
- * docs/work/117-vecdeque-interop-propagation/{design,specs}.md. Cargo-compiled +
+ * series 117. Cargo-compiled +
  * differential (emitted Rust runs; stdout === TS-via-Bun).
  *
  * Three graduations: (1) whole-program deque propagation across arg→param / return /

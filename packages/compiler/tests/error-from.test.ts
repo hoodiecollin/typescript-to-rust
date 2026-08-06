@@ -4,7 +4,7 @@
  * (`.into()`, `?` on a `Result<_, String>`). ERR19 is the mixed-throw + opaque
  * Display differential (021/022 compat); ERR20 is the #16 boundary (per-branch
  * returning discriminator stays fail-loud). IDs map to
- * docs/work/049-error-enums-discrimination/specs.md.
+ * series 049.
  */
 
 import { describe, expect, test } from "bun:test";

@@ -9,7 +9,7 @@
  * Reuses the series 042 machinery (`Option<T>` type lowering, `Some`/`None`
  * boundary wrapping, `!== undefined` narrowing → `if let Some`, `??` → `unwrap_or`)
  * and extends it. Each behavioral spec differential-matches (compile → cargo run →
- * TS-via-Bun); IDs map to docs/work/066-undefined-model/specs.md.
+ * TS-via-Bun); IDs map to series 066.
  */
 
 import { expect, test } from "bun:test";

@@ -9,7 +9,7 @@
  *
  * Differential (TS-via-Bun vs Rust) + shape (emitted-Rust substring) + fail-loud
  * (runtime panic via `expectFail`, or compile-time reject via plain `test`).
- * IDs map to docs/work/090-json-value/specs.md (JSV1–20).
+ * IDs map to series 090 (JSV1–20).
  */
 
 import { describe, expect, test } from "bun:test";

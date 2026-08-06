@@ -10,7 +10,7 @@
  * so serde omits the key. `null`-bearing fields keep the key (null wins).
  *
  * Differential (TS-via-Bun `stringifyJson` === Rust) + emitted-Rust shape.
- * IDs map to docs/work/091-undefined-omission/specs.md (UOM1–UOM10).
+ * IDs map to series 091 (UOM1–UOM10).
  */
 
 import { expect, test } from "bun:test";

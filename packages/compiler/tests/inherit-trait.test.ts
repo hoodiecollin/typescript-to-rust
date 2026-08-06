@@ -5,7 +5,7 @@
  * `impl IA for Sub` (overrides + forwarders). A monomorphic base-typed param is
  * `impl IA` (static dispatch, no `dyn`). `super.m()` reuses the base body.
  *
- * IDs map to docs/work/053-class-inheritance/specs.md (INH7–INH11).
+ * IDs map to series 053 (INH7–INH11).
  */
 
 import { expect, test } from "bun:test";

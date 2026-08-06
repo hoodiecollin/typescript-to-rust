@@ -3,7 +3,7 @@
  * #121). Detection, consent, and install are exercised through an **injected spawn +
  * prompt seam**, so every spec is hermetic — no spec installs a real toolchain or
  * mutates the machine. One MSRV spec reads the real `Cargo.toml` files (ground
- * truth). IDs → docs/work/123-toolchain-requirements/specs.md (TOOL1–TOOL12).
+ * truth). IDs → series 123 (TOOL1–TOOL12).
  */
 
 import { describe, expect, test } from "bun:test";

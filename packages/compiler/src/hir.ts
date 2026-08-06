@@ -1605,7 +1605,7 @@ export interface HirUnionEnum {
  * Emitted as a `struct` (`state: u32` + carried params + across-yield locals) +
  * `impl New` + `impl Iterator for … { fn next(&mut self) { loop { match
  * self.state { … } } } }` + the public `fn <name>(…) -> impl Iterator<Item = T>`
- * wrapper. See docs/work/_archive/052-generator-state-machines/.
+ * wrapper. See series 052.
  */
 export interface HirGenerator {
   kind: "generator";

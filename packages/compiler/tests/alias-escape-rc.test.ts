@@ -7,7 +7,7 @@
  * on a promoted binding route through `.borrow()` / `.borrow_mut()`.
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/062-alias-escape-auto-rc/specs.md.
+ * series 062.
  */
 
 import { expect } from "bun:test";

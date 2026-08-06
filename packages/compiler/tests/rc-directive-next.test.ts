@@ -11,7 +11,7 @@
  *    class (`x: &Box`) → the new 087 rewrite wraps the read `show(&a.borrow())`
  *    instead of the bare `&a` that would be an `E0308` type mismatch.
  * A `refMut`/owned use into a non-promoted param stays cargo-loud (never silent).
- * See docs/work/087-directives-next/design.md.
+ * See series 087.
  */
 
 import { expect, test } from "bun:test";

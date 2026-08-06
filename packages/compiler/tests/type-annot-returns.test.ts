@@ -4,7 +4,7 @@
  * functions, methods, and `const`-bound arrows. An explicit `: void` still
  * lowers to `-> ()`, and an annotated return still works.
  *
- * IDs map to docs/work/046-type-annotation-enforcement/specs.md.
+ * IDs map to series 046.
  */
 
 import { expect, test } from "bun:test";

@@ -7,7 +7,7 @@
  * combined with an escaping jump stays fail-loud (carrier-enum follow-on).
  *
  * Each spec differential-matches (compile → cargo run → TS-via-Bun). IDs map to
- * docs/work/063-value-yielding-try-catch/specs.md.
+ * series 063.
  */
 
 import { expect } from "bun:test";

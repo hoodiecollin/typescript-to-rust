@@ -5,7 +5,7 @@
  * (differential-neutral name routing); a **renamed** re-export becomes
  * `pub use … as …;` (the lifted renamed-export residual). A **mixed** logic +
  * re-export file stays fail-loud (see module-failloud.test.ts, MOD25). IDs map to
- * docs/work/050-module-system/specs.md.
+ * series 050.
  */
 
 import { expect } from "bun:test";
