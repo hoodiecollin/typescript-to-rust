@@ -61,7 +61,7 @@ in an unreleased tree.
   the TypeScript (Bun) and the Rust (`cargo run`) and compares stdout. String-matching
   against golden `.rs` files was retired — it let invalid Rust pass.
 - **The accepted dialect**, catalogued fail-loud rejection by fail-loud rejection in
-  [`docs/dialect.md`](docs/dialect.md): classes with inheritance and generics, interfaces
+  [`DIALECT.md`](DIALECT.md): classes with inheritance and generics, interfaces
   with usage-directed dual lowering, enums, generators, `async`/`await` on tokio, the
   `AppError` enum with `instanceof` catch discrimination, modules, closures and callbacks,
   destructuring, unions, regex, dates, and the `@ttr/std` shim for I/O and JSON.
@@ -108,4 +108,4 @@ These feed the spine; they never ride it.
 
 - [`WHAT_IT_IS.md`](WHAT_IT_IS.md) — per-feature guarantees and honest limits.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — the two-axis model, the ladder, and the gates.
-- [`docs/plan.md`](docs/plan.md) — the shipped-work log, series by series.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the compiler is built, and why.
