@@ -16,6 +16,9 @@ on:
     branches: [main]
     tags: ['v*']
 
+# `check` reads issues and milestones through the GITHUB_TOKEN. A repo whose default
+# workflow permissions are contents-only fails with "Resource not accessible by
+# integration", so the read scopes are named here rather than assumed.
 permissions:
   contents: read
   issues: read
