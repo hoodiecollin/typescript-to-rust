@@ -13,8 +13,7 @@ input shape that triggers it and whether it is a hard "no" or a "not yet".
 > `any` escape hatches) and garbage-collected. A *total* TS→Rust translation does
 > not exist. Constraining the input is what makes the problem decidable and the
 > output idiomatic — under the "Option A" memory model (idiomatic borrows, no
-> blanket `Rc<RefCell<T>>`). See [plan.md](./plan.md) and
-> [architecture.md](./architecture.md).
+> blanket `Rc<RefCell<T>>`). See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## How to read this catalog
 
@@ -170,7 +169,7 @@ flip it.
   it is *preferring* — anything not provably integral stays `f64` (never fail-loud).
   There are **no runtime panics**: release builds wrap; we never emit checked
   arithmetic here. Pinned by `packages/compiler/tests/numeric-int-modulo.test.ts`
-  and `numeric-int-range.test.ts`; see `docs/work/_archive/103-numeric-specialization/`.
+  and `numeric-int-range.test.ts` (series 103).
 
   **The same posture reaches across procedures (series 105, #90).** A module-wide
   integrality lattice proves the property *inter-procedurally* — a lifted callback's
@@ -181,7 +180,7 @@ flip it.
   above governs it unchanged, and the same proof discipline applies — a fractional
   source element, an upstream `/`, or a single fractional call site keeps the value
   `f64` (the `as i64` cast never truncates real data). Pinned by
-  `callback-integrality.test.ts`; see `docs/work/_archive/105-callback-integrality/`.
+  `callback-integrality.test.ts` (series 105).
 
 ---
 
@@ -770,7 +769,7 @@ Supported receiver methods route to `tslib`/native Rust: array `map`, `filter`,
   only for astral (non-BMP) chars (the same documented `char`-vs-UTF-16 edge as
   string ordering). `.length` lowers to `.chars().count()`.
 - **`.length` in an `f64` context** (a `number` binding, `return`, arithmetic, an
-  argument) is cast `(… as f64)` — series 111 (`docs/work/_archive/111-length-f64/`) lifted the
+  argument) is cast `(… as f64)` — series 111 lifted the
   former restriction that counts had to go through a `for…of` counter. A `.length` in a
   **usize** slot (an array index, a range bound, a comparison against a usize counter)
   stays a bare `usize` `.len()`/`.chars().count()`; only the f64 consumers are cast. The

@@ -13,9 +13,9 @@ Two things carry more weight here than in most projects, so they are stated firs
 
 ## Where the backlog lives
 
-**GitHub Issues, and only GitHub Issues.** There is no `TODO.md`, no roadmap file that
-schedules work, and `docs/plan.md`'s "Status" section is a *historical* log, not a
-to-do list.
+**GitHub Issues, and only GitHub Issues.** There is no `TODO.md` and no roadmap file
+that schedules work. The design and the implementation-plan live in the issue body, not
+in the tree.
 
 ```bash
 gh issue list                     # the whole backlog
@@ -29,7 +29,7 @@ gh issue view <n>                 # the design and the plan live in the issue bo
 ## The two axes
 
 Work is organized by exactly two things. This repo follows the
-[pm-playbook](.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`, which is
+[pm-playbook](../.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`, which is
 authoritative wherever this file is less specific.
 
 - **Milestone = *when*.** A version (`v0.1.0`, `v0.2.0`, `v0.3.0`). Assigning one means
@@ -86,7 +86,7 @@ gh api repos/hoodiecollin/typescript-to-rust/issues/<epic>/sub_issues -F sub_iss
 ## Design → plan → spec
 
 Every change goes through three gates, in series. The full statement is in
-[`.pm-playbook/reference/09-design-plan-spec.md`](.pm-playbook/reference/09-design-plan-spec.md);
+[`.pm-playbook/reference/09-design-plan-spec.md`](../.pm-playbook/reference/09-design-plan-spec.md);
 this is the repo-shaped version.
 
 ### Gate 1 — design (WHAT and WHY)
@@ -97,9 +97,9 @@ explicit non-goals.
 **It lives on the issue.** A new proposal is an `rfc` issue; work already tracked by an
 issue gets a design section in that issue's body. It is **never** a committed `design.md`
 — a document in the tree is invisible to `gh issue list`, and it gives you two
-identifiers for one piece of work that someone has to keep in sync by hand. The
-`docs/work/` series folders that used to hold designs are a
-[frozen archive](docs/work/README.md).
+identifiers for one piece of work that someone has to keep in sync by hand. This repo used to keep numbered
+`docs/work/<NNN>/design.md` series folders; they were deleted once their durable content
+was distilled into [ARCHITECTURE.md](ARCHITECTURE.md), and git history holds the rest.
 
 Accepted → drop `idea`, add `plan-next`.
 
@@ -111,7 +111,7 @@ it reads as *the* design, and the next person plans against it.
 
 Files to touch, build order, blockers, interfaces, **and the BDD scenarios you are going
 to write**. Same issue, below the design. There is an
-[implementation-plan issue template](.github/ISSUE_TEMPLATE/implementation-plan.md).
+[implementation-plan issue template](../.github/ISSUE_TEMPLATE/implementation-plan.md).
 
 ### Gate 3 — RED → GREEN
 
@@ -194,26 +194,25 @@ runs the cargo-backed differential suite on `v*`, and `playbook.yml` gates the b
   folder's siblings directly (`./harness/cargo`) is preferred over a barrel.
 - **Fail loud.** Outside the dialect is `DialectError` (permanent — fix the input) or
   `UnsupportedError` (a deferral — not built yet). The error *message string* is the
-  stable anchor that `docs/dialect.md` quotes; line numbers drift, messages don't.
+  stable anchor that `DIALECT.md` quotes; line numbers drift, messages don't.
 - **The emitter is pure and total.** Analysis and rejection happen in lowering. The
   emitter carries exactly one defensive throw, and it is an invariant guard, not a
   feature boundary.
 - **Keep `ts-primitives` minimal.** `Rc<RefCell<T>>` is a local last resort, not the
-  strategy. The memory model is decided: idiomatic borrows (`docs/plan.md`).
+  strategy. The memory model is decided: idiomatic borrows ([ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ## Where to read next
 
 | Document | What it is |
 |---|---|
-| [`docs/dialect.md`](docs/dialect.md) | The accepted TypeScript subset and its Rust mapping — authoritative |
-| [`docs/architecture.md`](docs/architecture.md) | Pipeline, oracle harness, emitter invariants |
-| [`docs/plan.md`](docs/plan.md) | Goal, memory-model decision, and the shipped-work log |
+| [`DIALECT.md`](DIALECT.md) | The accepted TypeScript subset and its Rust mapping — authoritative |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Pipeline, pass chain, oracle harness, and the decisions behind them |
 | [`WHAT_IT_IS.md`](WHAT_IT_IS.md) | Per-feature guarantees *and* honest limits |
 | [`VERSION_ROADMAP.md`](VERSION_ROADMAP.md) | The honest state of the current release effort |
-| [`.agents/AGENTS.md`](.agents/AGENTS.md) | The same rules, condensed for coding agents |
+| [`.agents/AGENTS.md`](../.agents/AGENTS.md) | The same rules, condensed for coding agents |
 
 ## License
 
 By contributing you agree that your contribution is dual-licensed under
-[Apache-2.0](LICENSE-APACHE) and [MIT](LICENSE-MIT), at the user's option, per the
+[Apache-2.0](../LICENSE-APACHE) and [MIT](../LICENSE-MIT), at the user's option, per the
 statement in the README.

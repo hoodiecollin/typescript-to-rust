@@ -5,7 +5,7 @@ limits are stated plainly. **Where the README over-promises, this document wins.
 
 **Verify every maturity claim below against the code.** Ground truth is
 `packages/compiler/src/`, `packages/compiler/tests/`, and a `bun run test` run — not this
-file, not `docs/plan.md`'s status log, and not an issue body. If a claim here disagrees
+file and not an issue body. If a claim here disagrees
 with the code, the code is right and this file should be corrected, not explained away.
 
 Last reconciled against the tree: **2026-08-06**.
@@ -31,7 +31,7 @@ everything outside that subset loudly, at translation time.
 - **It is not a typechecker.** `tsc` is still your typechecker. `ttr` consumes annotations;
   it does not verify your program's types are internally consistent.
 - **It is not silent about what it cannot do.** Every gap is a thrown error with a stable
-  message, catalogued in [`docs/dialect.md`](docs/dialect.md). It never emits `Any`, never
+  message, catalogued in [`DIALECT.md`](DIALECT.md). It never emits `Any`, never
   emits a commented-out stub, and never guesses.
 
 ## The claims that are load-bearing
@@ -86,7 +86,7 @@ it is a complete program — behaves differentially.
 
 These are **accepted** and translated — not rejected — and their runtime meaning
 intentionally differs from JS. Each is pinned by a fixture so a refactor cannot silently
-flip it. The full statement is in [`docs/dialect.md`](docs/dialect.md#semantic-divergences-from-typescript).
+flip it. The full statement is in [`DIALECT.md`](DIALECT.md#semantic-divergences-from-typescript).
 
 - **Object `===` is structural, not identity.** JS compares object identity; the dialect
   derives `PartialEq`, so equal fields mean equal. A moved, cloned, or literal-rebuilt
@@ -153,7 +153,8 @@ before trusting a red local run.
 
 ## See also
 
-- [`docs/dialect.md`](docs/dialect.md) — the accepted subset, rejection by rejection. Authoritative.
+- [`DIALECT.md`](DIALECT.md) — the accepted subset, rejection by rejection. Authoritative.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the compiler is built, and why.
 - [`VERSION_ROADMAP.md`](VERSION_ROADMAP.md) — the state of the release effort.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how work is tracked and how a change ships.
 - **GitHub Issues** — the backlog, and the only place a design or an implementation-plan lives.
