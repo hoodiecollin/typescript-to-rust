@@ -7,7 +7,7 @@
 
 <p align="center">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue">
-  <img alt="Status: pre-release (v0.1.0)" src="https://img.shields.io/badge/status-pre--release-orange">
+  <img alt="Status: pre-release" src="https://img.shields.io/badge/status-pre--release-orange">
 </p>
 
 **Translate a strict subset of TypeScript into _idiomatic_ Rust — with real
@@ -120,9 +120,10 @@ bun install
 bun run ttr packages/compiler/sample.ts --run   # TS → Rust → compile → run
 ```
 
-**Coming with the v0.1.0 release** — none of the channels below exist yet. There are no
+**Coming with the first release** — none of the channels below exist yet. There are no
 tags, no GitHub Releases, and nothing published anywhere; this table is the *intent* of
-the release workstream, not something you can install today. See
+the release epic ([#143](https://github.com/hoodiecollin/typescript-to-rust/issues/143)),
+not something you can install today. See
 [docs/VERSION_ROADMAP.md](./docs/VERSION_ROADMAP.md).
 
 | Channel | Command |

@@ -32,7 +32,7 @@ Work is organized by exactly two things. This repo follows the
 [pm-playbook](../.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`, which is
 authoritative wherever this file is less specific.
 
-- **Milestone = *when*.** A version (`v0.1.0`, `v0.2.0`, `v0.3.0`). Assigning one means
+- **Milestone = *when*.** A version (`v0.1.0`, `v0.2.0`, …). Assigning one means
   the work is *scheduled*. This is the release spine.
 - **Labels = *what kind*, and *how committed*.**
 
