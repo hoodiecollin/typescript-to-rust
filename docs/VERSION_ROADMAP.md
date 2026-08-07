@@ -21,9 +21,11 @@ which is why the release epic (#143) is about *publishing artifacts*, not about 
 repo.
 
 Four milestones exist and **all four now hold scope**: `v0.1.0`, `v0.2.0`, `v0.3.0`, and
-`v0.4.0`. 35 of the 54 open issues are scheduled; the remaining 19 all carry `idea` and no
-milestone, which means exactly "speculative, and not yet scheduled." Nothing carries
-`plan-next` — there is no committed-but-unscheduled work left.
+`v0.4.0`. 42 of the 61 open issues are scheduled. Of the 19 unscheduled, 15 carry `idea` —
+"speculative, and not yet scheduled" — and four do not: #126 and #134 are `rfc` designs
+awaiting acceptance, #118 is an epic whose children are not yet filed, and #79 is a
+`tech-debt` triage item. Nothing carries `plan-next` — there is no committed-but-unscheduled
+work left.
 
 The ordering is worth stating plainly, because it is not the obvious one: **correctness and
 the dialect come first, publishing comes third.** The artifacts that make `ttr` installable
