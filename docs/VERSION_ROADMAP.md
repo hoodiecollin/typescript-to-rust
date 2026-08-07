@@ -5,7 +5,9 @@ effort — what is real, what is not, and what is deliberately not on the spine.
 a schedule and it is not the backlog. Where it disagrees with the tracker, the tracker
 wins and this file should be corrected.
 
-Last reconciled against the code and the tracker: **2026-08-06**.
+Last reconciled against the code and the tracker: **2026-08-07** — a full revalidation of all
+open issues against the code, by probe rather than by reading, followed by a scope
+assignment across four milestones.
 
 ## Situation
 
@@ -14,37 +16,105 @@ published package on any channel — npm, crates.io, Homebrew, or GitHub Release
 Running from source (`bun run ttr <file.ts>`) is the only supported path today, and the
 README says so.
 
-Three milestones exist — `v0.1.0`, `v0.2.0`, `v0.3.0` — and **all three are empty**. No
-issue is assigned to any of them.
+The repository itself is public, with history kept. That much of the release effort is done —
+which is why the release epic (#143) is about *publishing artifacts*, not about opening the
+repo.
 
-That is deliberate, and it is the single most important thing on this page: **no milestone
-has locked scope.** The milestones are containers waiting for a scope decision, not
-commitments that have been made and not met. What *is* committed is carried by the
-`plan-next` label, which means exactly "committed, not yet scheduled."
+Four milestones exist and **all four now hold scope**: `v0.1.0`, `v0.2.0`, `v0.3.0`, and
+`v0.4.0`. 35 of the 54 open issues are scheduled; the remaining 19 all carry `idea` and no
+milestone, which means exactly "speculative, and not yet scheduled." Nothing carries
+`plan-next` — there is no committed-but-unscheduled work left.
 
-The repository itself is public. That much of the release epic (#104 W8) is done.
+The ordering is worth stating plainly, because it is not the obvious one: **correctness and
+the dialect come first, publishing comes third.** The artifacts that make `ttr` installable
+are not the first tag — they are `v0.3.0`, behind a milestone that closes the fail-loud
+hole and graduates the deferral backlog, and behind the docs site.
 
-## What v0.1.0 is meant to be
+### The one thing blocking a tag on correctness grounds
 
-The shape of the first release is designed and tracked as **epic #104 — public
-open-source release**, decomposed into nine sub-issues, W1–W9. That epic is the candidate
-scope for `v0.1.0`; it has not been assigned to the milestone, because assigning a
-milestone is a scheduling decision.
+**#142 — the method router has no fail-loud fall-through.** When no route matches, the JS
+method name is emitted verbatim as a Rust method call, so the failure lands as a `cargo`
+error inside generated Rust instead of a clean `UnsupportedError`. It silently miscompiles
+array `includes` / `indexOf` / `lastIndexOf` and dynamic-depth `flat(d)` today, and the
+surface is unbounded — any unrouted method on a `Vec` or `String` receiver.
 
-| | Workstream | State |
+This is a `release-gate` on `v0.1.0` because fail-loud is the claim the project is sold on,
+in the README, in `WHAT_IT_IS.md`, and in the dialect doctrine. An open `release-gate` means
+its milestone cannot be tagged, by invariant. It also blocks honest triage: #79 and #138
+both ask "is this row shipped?", and the natural probe — *does it fail loud?* — cannot
+currently distinguish "unimplemented" from "implemented".
+
+## What each milestone holds
+
+### `v0.1.0` — correctness and the dialect
+
+Eighteen issues. The theme is *make the thing honest before making it available*: close the
+fail-loud hole, fix every reproducible codegen defect, and graduate the three dialect epics
+that have real remaining children.
+
+| Issue | Why here |
+|---|---|
+| **#142** `release-gate` | the fail-loud fall-through — blocks the tag outright |
+| **#98** | `switch` with `return` in every case over an enum → non-exhaustive match tail (`E0308`) |
+| **#99** | `String(x)` over an enum / literal union emits invalid `String(x)` (`E0423`) |
+| **#100** | adapter chain `X.map(cb).reduce(…)` — adapter-result element type unresolved |
+| **#163** | `async function main()` emits a bare `async fn main()`, no `#[tokio::main]` (`E0752`) |
+| **#2** *(epic)* | graduate the fail-loud deferral backlog — children **#72**, **#74** |
+| **#52** *(epic)* | the `@ttr/std` shim as a third routing lane — children **#75**, **#76** |
+| **#157** *(epic)* | the library-method catalog — children **#138**, **#158**–**#162** |
+
+Every codegen bug above was confirmed by repro on 2026-08-07: emitted Rust and cargo error
+codes match their issue bodies exactly.
+
+The five catalog children under #157 came out of that same pass. The one worth naming is
+**#159** — an `Option<T>` cannot be printed or string-concatenated (`E0277`), which means
+`find` and `Map.get`, both recorded as *landed*, return a value the dialect's only output
+surface rejects. Unwrapping it first works; the coercion path is what is missing.
+
+> **#72, #74, #75 and #76 are dialect-shape decisions**, not mechanical work. Per
+> `CLAUDE.md`, they need Collin's input on the tradeoffs *before* a design is written —
+> scheduling them does not exempt them from that gate.
+
+### `v0.2.0` — the docs site
+
+One issue, **#156**. Built and currently undeployed on purpose. It sits ahead of the
+publishing work deliberately: there is more value in documentation that describes a narrow,
+honest dialect than in a package that installs and then surprises people.
+
+### `v0.3.0` — publishable artifacts
+
+Thirteen issues: epic **#143** and its twelve native sub-issues. **Nothing is installable
+today** — no package is publishable under any name, so no distribution channel can work.
+That single fact orders the epic.
+
+| | Issue | Why |
 |---|---|---|
-| #105 | W1 — license + attribution | Initial pass landed: `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, and the dual-license statement in the README are all in the tree. Open for the attribution sweep. |
-| #106 | W2 — package hygiene + emitter path→version | **Not started.** Every workspace package is still `private: true`, and `packages/compiler` has no `name` at all. Nothing is publishable as it stands. |
-| #107 | W3 — distribution channels + release tooling | **Not started.** The README's channel table (`bunx @ttr/cli`, Homebrew, crates.io, Releases binaries) describes W3's *output*, not anything that exists. |
-| #108 | W4 — CI/CD + branch protection | Partly real: `ci.yml` (lint · typecheck · cargo test, per-PR), `oracle.yml` (the sharded cargo-backed differential suite, on `v*` or manual), and `playbook.yml` (backlog invariants) all run. Branch protection and the release pipeline are open. |
-| #109 | W5 — README overhaul | Partly real — the README has been rewritten once. Open for the pre-release pass. |
-| #110 | W6 — docs website | Scaffolded (`apps/website`, Next.js). **Nothing is live**: `website.yml` is deliberately manual-dispatch-only, because the project is being released as source rather than product-ized. |
-| #111 | W7 — community-health files + templates | Issue templates exist (`epic`, `idea`, `rfc`, `implementation-plan`, `release-gate`). `CONTRIBUTING.md` now exists. Code of conduct, security policy and PR template are open. |
-| #112 | W8 — curate + secret-scrub + open the repo | **The repo is public.** The curation and scrub work that preceded it is done. |
-| #113 | W9 — cut v0.1.0 + announce | Blocked on the rest. This is the issue that turns a milestone into a tag. |
+| 1 | #144 — publishable as `@ttr/cli` | `packages/compiler` is named `compiler`, has no `version`, is `private`, and has no `bin` |
+| 2 | #145 — emitted crates resolve deps from crates.io | emitted Rust `use`s `tslib`; today it resolves by machine-local `path` and cannot work off this machine |
+| 3 | #146 — publish the runtime crates | **reserve the names first** — the one deadline that is not ours |
+| 4 | #147 — publish `@ttr/cli` + `@ttr/std` to npm | the channel the README already advertises |
+| 5 | #148 — standalone binaries + Homebrew | removes the Bun prerequisite, not the Rust one |
+| 6 | #149 — changesets + tag-driven release workflow | makes cutting a release a tag, not a checklist |
+| 7 | #150 — `ttr doctor` | every channel still needs a local Rust toolchain |
+| 8 | #151 — macOS in CI + branch protection | `ci.yml` is ubuntu-only; `main` is unprotected on a public repo |
+| 9 | #152 — user-facing templates + CoC/SECURITY/PR | the five templates that exist are maintainer process ones |
+| 10 | #153 — README accuracy + licensing residuals | the install table advertises four channels that do not exist |
+| 11 | #154 — newcomer on-ramp | `good first issue` label exists, 0 issues carry it; Discussions disabled |
+| 12 | #155 — cut the first release + announce | gated on the rest |
 
-**Before v0.1.0 can be tagged, W2 and W3 are the load-bearing gaps** — the compiler
-package is not currently publishable under any name, so no distribution channel can work.
+**Items 1–4 are the critical path, in order.** The rest can proceed in parallel.
+
+> **The previous release epic (#104) and its nine `W1`–`W9` children are closed.** A
+> "workstream" is not a unit this model has — `.pm-playbook/AGENT.md` is explicit that there
+> are no Priority / Size / Workstream fields. It was also carrying a lot of drift: four of
+> the nine workstreams were substantially done while tracked as untouched. #143 re-files
+> only the work a 2026-08-07 revalidation confirmed is actually left.
+
+### `v0.4.0` — performance residuals
+
+Three issues: epic **#86** and its two open children, **#133** (`strsearch` short-needle
+throughput) and **#91** (the boundary-boxed `Numeric` hybrid). Everything else under #86 has
+shipped — see below.
 
 ## Complete — in the code, not yet released
 
@@ -74,20 +144,15 @@ in an unreleased tree.
   are now wins end to end: `loopsum`, `arraypipe`, and `strbuild`. `ttr` also wins on
   resident memory (1.4–14 MB vs 30–105 MB) and startup (4.2 ms vs Bun 12.2 ms, Node 97 ms).
 
-## Still deferred
+## Still unscheduled
 
-Committed but unscheduled — everything below carries `plan-next` or `idea` and no
-milestone.
+19 issues carry `idea` and no milestone. The ones worth naming:
 
 | | What | Why it is not scheduled |
 |---|---|---|
-| #2 | Graduate the fail-loud deferral backlog | An epic, not a unit. Its remaining children are individually dialect-shape decisions. |
-| #51 | The 029 library-method catalog | Its row list has gone stale — #138 re-verifies every row against the shipped lowering before anything is planned against it. #139 (variadic `Math.min`/`max`) is the one row that is unambiguously absent. |
-| #59 | The dynamic/recursive value model (`JsonValue`) | Gate 1 is not passed. It is a deliberate hole in the dialect's static premise, and the design has to say exactly how large that hole is. #134 is that design. |
-| #86 | Benchmark-driven codegen performance | One corpus residual left: #133, `strsearch` short-needle throughput. |
-| #98, #99, #100 | Three known codegen bugs | Real, reproducible, and `plan-next`: a non-exhaustive `match` tail over an enum (E0308), `String(x)` over an enum emitting invalid Rust (E0423), and adapter-chain element types going unresolved. |
-| #118 | Plugin archetypes — mirror vs macro | D1 (a Rust-authoritative oracle mode) blocks the other five. Without it there is no way to test a mirror plugin at all. |
-| #79, #138 | Two verify-then-triage sweeps | Both exist because a list that says "not done" about things that are done is worse than no list: it aims effort at work that does not exist while hiding the work that does. |
+| #59 | The dynamic/recursive value model (`JsonValue`) | Gate 1 is not passed. It is a deliberate hole in the dialect's static premise, and the design has to say exactly how large that hole is. #134 is that design; #135–#137 are its dependents. |
+| #118 | Plugin archetypes — mirror vs macro | D1 (#127, a Rust-authoritative oracle mode) blocks the other five. Without it there is no way to test a mirror plugin at all. |
+| #79 | Verify-then-triage the "not covered" language surface | It exists because a list that says "not done" about things that are done is worse than no list: it aims effort at work that does not exist while hiding the work that does. A partial pass on 2026-08-07 confirmed the premise — of 22 rows probed, roughly half were already shipped. It should wait on #142, which restores the probe method it depends on. Its catalog counterpart, #138, is now scheduled under #157. |
 
 ## Not on the release spine
 
@@ -99,10 +164,6 @@ These feed the spine; they never ride it.
   is no v7 compiler API yet.
 - **#25 — the Rust-AST + pretty-printer rewrite.** A structural improvement to how Rust is
   produced. Real, `idea`, and not a user-visible feature.
-- **#91 — the boundary-boxed `Numeric` hybrid.** Filed so the sound shape is decided
-  before it is ever built. Every number in the benchmark corpus is statically provable, so
-  nothing today needs it.
-- **The docs website.** Scaffolded and deliberately undeployed. It is not a v0.1.0 gate.
 
 ## See also
 
