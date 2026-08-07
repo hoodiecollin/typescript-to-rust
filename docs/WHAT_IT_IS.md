@@ -25,7 +25,7 @@ everything outside that subset loudly, at translation time.
 - **It is not a Node or Bun runtime port.** There are no Node APIs. I/O exists only through
   the blessed `@ttr/std` shim, and only for the surface that shim covers.
 - **It is not released.** No tags, no GitHub Releases, nothing published to npm, crates.io,
-  or Homebrew. The README's channel table describes the *intent* of release workstream #107,
+  or Homebrew. The README's channel table describes the *intent* of the release epic (#143),
   not something you can install. Running from source is the only supported path. See
   [`VERSION_ROADMAP.md`](VERSION_ROADMAP.md).
 - **It is not a typechecker.** `tsc` is still your typechecker. `ttr` consumes annotations;
@@ -68,10 +68,10 @@ it is a complete program — behaves differentially.
 | Interfaces | Shipped | Usage-directed dual lowering — a struct-shaped interface becomes a `struct`, a behavioral one becomes a trait. |
 | Enums | Shipped | Including string enums. |
 | Errors | Shipped | `throw` → `Result` with `?` propagation over a whole-program fixpoint; `try`/`catch`/`finally` via a `Result`-returning IIFE closure; custom error classes; the `AppError` enum with `instanceof` catch discrimination. `return`/`break`/`continue` *inside* a `try` is not built — the closure would swallow the jump. |
-| `async` / `await` | Shipped | `async fn` on tokio, `#[tokio::main]` when the script awaits, fallible async composing with `?`. Un-awaited async calls lower to `tokio::spawn`. `Promise` combinators (`Promise.all`, timers, `.then`) are not built. |
+| `async` / `await` | Shipped, with two holes | `async fn` on tokio, `#[tokio::main]` when the script awaits, fallible async composing with `?`. Un-awaited async calls lower to `tokio::spawn`. Timers and `.then` are not built. Two known defects: a user-defined `async function main()` emits a bare `async fn main()` with no attribute (#163), and `Promise.all` emits a `join!` tuple bound to a `Vec` instead of rejecting (#161). |
 | Generators | Shipped | Including bidirectional generators. `async function*` is a deferral, not a permanent rejection. |
 | Nullability | Shipped | `null ≡ undefined` collapse to one `Option<T>`. Coercion is always explicit — no silent `None → T::default()`. **Only single-level optional chaining (`a?.b`) is built**; `a?.b?.c`, `a?.[i]`, `a?.()` are not. A `T \| null \| undefined` union compiles but warns, because its collapsed print and `===` may diverge from JS. |
-| Arrays, strings, library methods | Mostly shipped | The catalog (#51) is broad but its *row list has gone stale* — several rows it calls outstanding already have lowering, and whether each is complete is exactly what has not been checked. **#138 re-verifies it. Do not read #51's body as the current gap list.** The one unambiguous absence is variadic `Math.min`/`Math.max` (#139). |
+| Arrays, strings, library methods | Mostly shipped, with known holes | Tracked by #157. A 2026-08-07 probe pass found five real gaps: array `includes`/`indexOf`/`lastIndexOf` have no lowering and miscompile (#158); an `Option<T>` — what `find` and `Map.get` return — cannot be printed or concatenated (#159); string `lastIndexOf(x, from)` is unrouted (#160); `Promise.all` emits a tuple bound to a `Vec` (#161); and unrouted *global* functions emit verbatim (#162). The rest of the row list is **unverified in both directions** — #138 is re-checking it. |
 | Records / `Map` / `Set` | Shipped | `Record<string, V>` → `HashMap`. `f64` is not `Hash`/`Eq`, so numeric keys are out; struct keys are blocked on the same problem (#21). |
 | Modules | Shipped | A multi-file program is one Rust crate, resolved transitively through `./`-relative imports with a cycle-terminating visited set. Bare and package imports are refused. `@ttr/std` is the only modeled non-relative import. |
 | `@ttr/std` shim | Shipped | JSON (`parseJson<T>`, `stringifyJson`, and the opt-in `JsonValue` boundary), a seeded RNG, a seeded clock, and the I/O surface: fs, env, process, stdin, async fs, and text-only HTTP GET/POST. Expanding beyond text-only HTTP is #75; CLI argument-parsing ergonomics past raw `args(): string[]` is #76. |
