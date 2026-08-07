@@ -79,15 +79,30 @@ surface rejects. Unwrapping it first works; the coercion path is what is missing
 
 ### `v0.2.0` — the docs site
 
-One issue, **#156**. Built and currently undeployed on purpose. It sits ahead of the
-publishing work deliberately: there is more value in documentation that describes a narrow,
-honest dialect than in a package that installs and then surprises people.
+Six issues: epic **#156** and five of its seven native sub-issues. The site is built and
+currently undeployed on purpose. It sits ahead of the publishing work deliberately: there is
+more value in documentation that describes a narrow, honest dialect than in a package that
+installs and then surprises people.
+
+The epic is scoped against **ForgeDB's `apps/website/`** as the template for what a project's
+website is here, the same reference Optigon's site issue uses. About half that pattern is
+already in the tree, and each remaining row is one child: a derived roadmap page computed
+from live issues and milestones (#164), a TS-dialect Shiki grammar (#165), a build-time
+TS→Rust side-by-side over the verified corpus (#166), content depth generated from
+`DIALECT.md` rather than forked from it (#167), and the deploy decisions — domain, secrets,
+triggers, analytics (#168).
+
+**The epic spans releases**, which is allowed: two children ride `v0.3.0` because their
+*inputs* do. The changelog page (#169) needs a `CHANGELOG.md` from #149, and the
+install-script redirect (#170) needs the binaries from #148. Neither gates the rest, and the
+epic gates nothing.
 
 ### `v0.3.0` — publishable artifacts
 
-Thirteen issues: epic **#143** and its twelve native sub-issues. **Nothing is installable
-today** — no package is publishable under any name, so no distribution channel can work.
-That single fact orders the epic.
+Fifteen issues: epic **#143** and its twelve native sub-issues, plus the two website children
+(#169, #170) that ride here because their inputs do. **Nothing is installable today** — no
+package is publishable under any name, so no distribution channel can work. That single fact
+orders the epic.
 
 | | Issue | Why |
 |---|---|---|
