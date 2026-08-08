@@ -186,6 +186,27 @@ bunx @hoodiecollin/pm-playbook check   # the issue-tracker invariants
 CI runs the same things: `ci.yml` owns lint/typecheck/unit tests per PR, `oracle.yml`
 runs the cargo-backed differential suite on `v*`, and `playbook.yml` gates the backlog.
 
+## How branches land
+
+**Merge commits, always.** Squash and rebase are disabled in typescript-to-rust's GitHub settings, so a
+merge commit is the only method the merge button will accept. A branch is a unit of work and
+its history is worth keeping — a squash throws away the story the commits were split up to
+tell, and a rebase erases the fact that the work happened on a branch at all.
+
+The subject line names the branch and what it did, with the issue in parentheses:
+
+```bash
+git merge --no-ff <branch> -m "Merge <branch>: <what it did> (#<issue>)"
+```
+
+`--no-ff` is load-bearing. Without it a branch that is merely ahead fast-forwards, and the
+branch boundary disappears exactly as if it had been rebased.
+
+Work merges into `main`, which is the default branch, so a `Closes #<n>` line in the PR body
+closes the issue on merge. That stops being true the moment an integration branch is
+introduced — GitHub honours closing keywords only for PRs targeting the *default* branch, and
+an issue merged into an integration branch stays open however the body is written.
+
 ## Code conventions
 
 - **No barrel files.** No re-export-only modules — they hide the dependency graph and
