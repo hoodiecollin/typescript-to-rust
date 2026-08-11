@@ -100,3 +100,12 @@ Work milestoned **past the cycle in flight** does not go on it. Put it on its ow
 integration branch, unmerged, carrying its real milestone; rebase after the release merge. The
 cycle in flight is *derived* — the lowest open core `v*` milestone — so read it from the
 milestones, never from a constant.
+
+**Closing keywords do not reach an issue merged into an integration branch.** GitHub honours
+`Closes #<n>` only for PRs targeting the *default* branch, so a PR into `develop` leaves its issue
+open however the body is written — close it yourself, and say what you verified.
+
+**Check how this repo lands branches before you merge one.** If the merge button refuses a method,
+that is a decision, not an obstacle to route around. Read `CONTRIBUTING.md`; where the choice is
+merge commits, `--no-ff` is required, because a branch that is merely ahead fast-forwards and
+loses its boundary exactly as a rebase would.

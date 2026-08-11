@@ -17,3 +17,6 @@ benchmarks/.build/
 
 # series-109 lower.ts modularization byte-identical baseline (local only)
 packages/compiler/.lower-baseline.txt
+
+# Materialized backlog — machine-owned local state, rewritten by `pm-playbook pull`.
+.pm-playbook/backlog/

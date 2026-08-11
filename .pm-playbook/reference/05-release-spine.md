@@ -207,3 +207,34 @@ Two second long-lived branches *are* legitimate, and neither is a second cycle l
   Cut it when a patch actually materializes, not pre-emptively.
 - **A track that cannot merge into the current cycle** — a format break, a major rewrite. Name it
   for the work (`format-v2`), never for a version, precisely so nobody reads it as a release line.
+
+### 5.4 How branches land — decide it, then make the settings say it
+
+Everything above is about *which* branch work targets. It is silent on *how* the work lands, and
+that silence is not free: squash, rebase and merge-commit produce three different histories, and a
+repo that has never chosen drifts into all three.
+
+**Pick one and enforce it in the repository settings, not in prose.** Disable the methods you did
+not pick. A written convention the merge button contradicts loses to the button every time — and
+the reverse fails too: a setting nobody wrote down gets *worked around* by whoever meets it,
+because a bare refusal reads as an obstacle rather than as a decision.
+
+That is not hypothetical. It is what a settings/prose/history disagreement looks like from inside:
+
+- the settings allowed rebase only,
+- every branch in the history had landed as a local `--no-ff` merge commit,
+- and `CONTRIBUTING.md` listed all three methods, naming as "default" the one the settings refused.
+
+Three sources, three answers, and each contributor followed whichever they met first.
+
+Two rules make the choice legible once it is made:
+
+1. **Write it in `CONTRIBUTING.md`**, with the exact command if work merges locally. When the
+   choice is merge commits, say that `--no-ff` is required: a branch that is merely ahead
+   fast-forwards otherwise, and the branch boundary vanishes exactly as a rebase would have
+   erased it.
+2. **Say whether closing keywords work.** GitHub honours `Closes #<n>` only for PRs targeting the
+   *default* branch. Under §5.2's hold-the-gap-off-trunk model, every PR into the integration
+   branch therefore leaves its issue **open** however the body is written, and it must be closed
+   by hand. Teams adopting an integration branch discover this by finding a milestone full of
+   merged work that still reads as unfinished.
