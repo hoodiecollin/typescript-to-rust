@@ -7,6 +7,16 @@ Standing rules that keep Issues the single, always-current source of truth:
 
 - **Backlog lives in Issues — no markdown backlog.** No `TASKS.md` / `TODO.md` shadow list. Ask
   "what's next" with `gh issue list --state open` (filter by label / milestone), not a file.
+  - **A reconciled local mirror is not a shadow backlog.** `pull` materializes Issues to
+    `.pm-playbook/backlog/` so agents can read and edit them without a round trip per question.
+    That is allowed, and the distinction is precise: **a second copy is a shadow backlog when it
+    can disagree with Issues indefinitely.** This one cannot. It is gitignored rather than
+    committed, so it is never a reviewable artifact competing with the issue; `pull` overwrites it
+    from GitHub; and `push` refuses outright the moment both sides have moved, rather than merging
+    or picking a winner. A `TASKS.md` has none of those properties — nothing overwrites it and
+    nothing refuses on its behalf, so it drifts silently and forever. **If you find yourself
+    hand-maintaining a file the tooling does not reconcile, that is the forbidden thing**,
+    regardless of where it lives.
 - **Auto-file issues for new work.** When you commit to a piece of work, `gh issue create` first
   (`tech-debt` for grounded gaps, `idea` for speculative features), *then* implement — don't wait
   to be asked.

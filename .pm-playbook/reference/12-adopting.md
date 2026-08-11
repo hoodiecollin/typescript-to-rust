@@ -21,6 +21,10 @@
    whether you publish eagerly or hold the gap off trunk, write the answer and the branch a PR
    targets into `CONTRIBUTING.md`, and wire the outside-repo reclose as a required check on the
    default branch. A repo that publishes nothing can skip this entirely.
+6c. **Pick how branches land** (§5.4) — merge commit, squash, or rebase. Disable the other two in
+   the repository settings so the merge button and `CONTRIBUTING.md` cannot disagree, and record
+   the choice, the exact local command if work merges locally, and whether closing keywords reach
+   your issues.
 7. Backfill: label the existing backlog along the ladder, assign milestones, and **enforce the
    invariants** (§3.2) — a `plan-next`+milestone collision is the #1 drift smell. Find every
    violation at once with `npx @hoodiecollin/pm-playbook check --all-states`.
