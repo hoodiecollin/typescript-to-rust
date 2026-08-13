@@ -103,13 +103,17 @@ becomes visible*.
 
 §2's ladder ends `… → closed-into-milestone → released`. That gap is where release obligations
 live, and they are not features: publishing artifacts, reconciling a version line, proving a
-reclose, rotating a credential before it expires. Left as ordinary `tech-debt`, they are
+reclose, rotating a credential before it expires. Left as an ordinary `improvement`, they are
 indistinguishable from work you could defer — and they are the exact opposite.
 
 **`release-gate` names them.** An open `release-gate` issue on a milestone means that milestone
 **cannot be tagged**, even if every feature on it is closed. It makes "are we releasable?" a
 query (`--label release-gate --state open`) instead of a memory, and it gives the tag workflow
 something mechanical to check.
+
+**"Something to check" is not the same as something that blocks** — wiring the query somewhere it
+can actually fail the tag is its own decision, and §5.5 is about making it deliberately. A gate
+reported beside the release rather than in front of it is a notification.
 
 File one the moment you *knowingly* defer a release obligation — the deferral is precisely when
 it is most likely to be forgotten, because everything still works locally.
@@ -181,15 +185,28 @@ PRs pass, and correctly so — work with no issue cannot be next-cycle work, bec
 is *defined* by carrying that milestone. The only thing the rule can fire on is the thing it exists
 to catch.
 
-**Derive the cycle in flight; never configure it.** It is the lowest open core milestone by
-version order. No constant to update, nothing that can drift from the actual spine, and it
-advances on its own when a milestone closes.
+**Derive the cycle in flight; never configure it.** It is the lowest open core milestone **whose
+release line has not already shipped** — where a line is `major.minor`, so `v1.2.0` and `v1.2.1`
+share one, and a closed milestone on the line is what marks it shipped. No constant to update,
+nothing that can drift from the actual spine, and it advances on its own when a milestone closes.
 
-That derivation has exactly one prerequisite, and it is worth stating because it is easy to skip:
-**closing the milestone must be part of the release ritual**, alongside publishing and tagging. A
-milestone left open after its tag freezes the gate and starts blocking legitimate next-cycle work
-— a loud, self-announcing failure rather than a silent one, which is the right direction to fail
-in. `release-check` returning clean and the milestone closing are the same moment.
+The line clause is not a refinement; without it the gate inverts. **A patch on a released version
+opens a milestone that sorts *below* the cycle** — `v1.2.1` while `v1.3.0` is in flight — so a plain
+"lowest open" reading names the patch as the cycle and then fails every legitimate PR on the
+integration branch, for as long as the patch milestone stays open. The check that exists to keep
+next-cycle work out ends up blocking this-cycle work instead, and the only workaround is to stop
+tracking patches.
+
+Note that both halves rest on **one** prerequisite, which is worth stating because it is easy to
+skip: **closing the milestone must be part of the release ritual**, alongside publishing and
+tagging. It is what advances the cycle, and it is also the evidence a line has shipped — the line
+clause reads exactly the same signal, for a second question.
+
+So a milestone left open after its tag still freezes the gate and still starts blocking legitimate
+next-cycle work. The line clause does not rescue it, deliberately: nothing on that line is closed,
+so there is nothing to say it shipped. That is a loud, self-announcing failure rather than a silent
+one, which is the right direction to fail in. `release-check` returning clean and the milestone
+closing are the same moment.
 
 `pm-playbook scope-check` implements this as **PM008**. Wire it on pull requests targeting the
 integration branch.
@@ -238,3 +255,166 @@ Two rules make the choice legible once it is made:
    branch therefore leaves its issue **open** however the body is written, and it must be closed
    by hand. Teams adopting an integration branch discover this by finding a milestone full of
    merged work that still reads as unfinished.
+
+### 5.5 Enforcement points — a rule needs a place where it can fail
+
+Everything in §5 defines rules: the milestone cannot be tagged while a `release-gate` is open, the
+ledger's rows must be current, the trunk must stay releasable. Each is stated as an obligation.
+**None of that says where the obligation is checked**, and a rule with no enforcement point is
+enforced by memory at the exact moment memory is worst — mid-release, under pressure, by whoever
+is holding the tag.
+
+Naming the enforcement point is a separate act from writing the rule, and it is the one that gets
+skipped, because the rule feels finished once it is written down.
+
+#### A report is not a gate
+
+The failure is easy to miss because the output *looks* like enforcement. A step lists the open
+`release-gate` issues; the log shows them; everyone reads it. But if the step cannot fail the
+thing it guards, it is a notification, and it will be scrolled past on the day it matters.
+
+Two shapes produce this, and both are things a careful person does on purpose:
+
+- **The step is deliberately non-failing.** A check that runs on every push to trunk *must not*
+  fail on an open gate — mid-cycle gates are normal, and a job that is red for a whole cycle stops
+  being read (the same argument §5.2 makes for keeping the reclose off the integration branch).
+  So it is written `if: always()`, correctly for where it sits. What is missing is a *second*
+  invocation at the tag, where an open gate is not normal at all.
+- **The check runs beside the thing it guards, not in front of it.** On GitHub, two workflows
+  triggered by the same event are independent: a `release-gate` check triggered by a tag push
+  **cannot** block a release workflow triggered by the same tag push. It runs in parallel while
+  artifacts build and publish. This is the trap to watch for, because "a workflow that runs on the
+  tag" is the obvious reading of "a tag gate" and it is wrong.
+
+So: **when you wire a gate, state what it is capable of failing.** If the answer is "nothing," it
+is a report — keep it, label it as one, and put the gate somewhere else.
+
+#### Put the check where the irreversible step is
+
+Most CI accumulates on pull requests, because that is where checks are cheap to add and cheap to
+re-run. But a PR can be redone; a merge can be reverted. **A published version cannot be
+unpublished, and a consumed tag cannot be recalled.** Registries refuse re-uploads of a version
+that already exists, so an incorrect release is corrected by *burning a version*, never by undoing
+one.
+
+Checks placed only on PRs are therefore concentrated where mistakes are recoverable and absent
+where they are not. Ask of each gate: *what is the last moment this could still fail usefully?*
+That is where it belongs. For a release, the honest options are:
+
+1. **Fold the check into the release tool's own pre-release hook**, so it runs inside the pipeline
+   it guards rather than beside it. Best when the tool supports it.
+2. **Make it a required status check** via branch/tag protection rules, so the platform enforces
+   ordering instead of your workflow graph.
+3. **Accept parallel-and-loud** — the check races the release but fails visibly, and the release is
+   reviewed before anything is announced. Legitimate, but it is a *convention* about announcement,
+   not a mechanism, so write down which one you chose and why.
+
+Choosing (3) unknowingly is the failure. Choosing (3) deliberately is fine.
+
+#### A continuously-true claim needs a continuously-run check
+
+"Trunk is releasable" is not a property of a commit. It is a property of the **relationship**
+between the repo and everything outside it — the registry, the runner's default toolchain, the
+advisory database, an expiring credential. All of those change with **no commit from you**.
+
+A check triggered only by `push` therefore confirms the claim against evidence that may predate
+the change, and it can sit green for an entire cycle on a run whose conclusion has expired. That
+is the same stale-evidence failure as the ledger's absent row in §5.2, one level up: the badge
+does not distinguish *verified now* from *verified once*.
+
+**Add a `schedule:` to any check that validates state you do not control.** The reclose, the
+advisory scan, and the credential-expiry check are all in this class. A push trigger answers "did
+*we* break it"; only a schedule answers "is it *still* true."
+
+#### Where a generator writes half your pipeline, the seam is unowned
+
+Release tooling that generates CI (cargo-dist, goreleaser, changesets, and friends) usually ships a
+`--check` that keeps *its* file honest. Nothing keeps yours honest, and the two are not
+independent: the moment you add a custom job that consumes what the generated jobs produce, you
+have a **compatibility constraint spanning a file that updates itself and a file that does not**.
+
+That seam has the worst possible properties. It is exercised only during a real release, it sits
+downstream of the irreversible step, and it is invisible to the generator's own check. When you add
+a custom job, **record the coupling in a comment at the coupling point** — not in a design doc —
+so the next person to bump a version knows what it must stay compatible with.
+
+#### Fail-closed needs a resume path, or it is only fail-stuck
+
+Publish steps should fail closed: a release that reports success with a channel missing is worse
+than one that stops. But fail-closed is only half a design. The other half is what happens *next*,
+and it is usually never specified, because the failure is assumed to be all-or-nothing.
+
+It often is not. A publish that uploads several artifacts can fail partway, and registries reject
+re-uploading what already landed — so the naive retry fails on exactly the files that succeeded,
+and the recovery path written for "nothing was published" does not cover "some of it was."
+
+**Make the retry idempotent rather than making the failure impossible.** Then say plainly what
+idempotence costs: a step that tolerates already-present artifacts can no longer distinguish
+*resuming* from *re-running against a version that already shipped*, so the gate deciding when it
+may run at all is what keeps that safe, and it stays strict.
+
+---
+
+### 5.6 Hotfixes — the bounded exception, with a warrant
+
+A **hotfix** is a `bugfix` that also carries the `hotfix` label. It takes the **same two gates** —
+the bugfix path is already short, so there is no separate sequence to learn. What differs is
+**eligibility, the milestone, and the branch**.
+
+#### Eligibility — three tests, all of which must hold
+
+1. **It is a defect in *released* behavior.** Not a missing feature, and not a regression that
+   exists only on the integration branch. If an installed user of a published version cannot reach
+   it, it is not a hotfix.
+2. **Waiting for the next scheduled release is unacceptable, and the issue says why concretely** —
+   data loss, a security hole, a broken install path, wrong output users act on. **The test is what
+   damage accrues, never how long the wait is.**
+3. **The fix is bounded, checkably:** no public API change, no schema change, no config surface, no
+   dependency bumps, no new capability — and it is expressible as **one regression test that fails
+   before and passes after**.
+
+Failing any one means the work takes the normal path.
+
+**Urgent but unbounded is not a hotfix.** That is a reason to cut the cycle short and ship what is
+on the integration branch, or to accept the damage until the next release. Treating an unbounded
+fix as a hotfix is how a patch release quietly becomes a minor release nobody designed.
+
+#### The warrant lives in gate 1
+
+Gate 1 (diagnose) carries the reproduction and the root cause as always, plus **the warrant**: why
+it cannot wait, and what the fix will not touch. Gate 2 (fix) is spec-first, and the failing
+regression test **is** the reproduction from the warrant — which is what mechanically proves
+eligibility test 3 rather than asserting it.
+
+#### The patch milestone
+
+A hotfix gets **its own `vX.Y.Z` milestone**, opened when the warrant is accepted, and it is never
+folded into the cycle in flight.
+
+**One hotfix, one milestone.** A patch milestone that accumulates "while we're in there" work has
+lost the boundedness that made it cheap, which is why this is an invariant (PM015) and not a habit.
+
+Two things this does *not* waive:
+
+- **The §5.2 asset ledger applies.** A patch publishes artifacts, so the stale-source-behind-a-
+  correct-version failure is exactly as live as it is for a minor.
+- **`release-check` is unchanged.** A patch milestone is an ordinary core milestone for gating.
+
+And note the interaction with §5.3: a patch milestone sorts *below* the cycle in flight, which is
+why the cycle is derived as "the lowest open core milestone **on an unreleased line**". Without
+that clause a hotfix would freeze the scope gate for its whole window.
+
+#### Branch topology
+
+This path assumes the integration-branch model (§5.2, option 2), where `main` holds released state
+— which is what makes it simple:
+
+> The fix **branches off `main`**, lands on `main`, is **tagged there**, and is then **merged
+> forward** into the integration branch.
+
+No maintenance line is needed in the common case; §5.3's `release/vX.Y.x` is only required when
+patching a version *older* than the latest release.
+
+**Forward-porting is part of the hotfix.** The issue does not close until the fix exists on both
+branches — otherwise the next release silently regresses the bug, and it regresses it in exactly
+the code someone just proved was urgent.

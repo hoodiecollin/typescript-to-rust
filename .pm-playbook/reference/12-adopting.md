@@ -25,10 +25,20 @@
    the repository settings so the merge button and `CONTRIBUTING.md` cannot disagree, and record
    the choice, the exact local command if work merges locally, and whether closing keywords reach
    your issues.
-7. Backfill: label the existing backlog along the ladder, assign milestones, and **enforce the
-   invariants** (§3.2) — a `plan-next`+milestone collision is the #1 drift smell. Find every
-   violation at once with `npx @hoodiecollin/pm-playbook check --all-states`.
+7. Backfill: give every existing issue **exactly one type label**, assign milestones to what you
+   are committed to, and **enforce the invariants** (§3.2). Find every violation at once with
+   `npx @hoodiecollin/pm-playbook check --all-states` — PM010 enumerates what is still untyped.
 8. Convert epic checklists to **native sub-issues** (§7.1).
+8b. **Materialize gates for the cycle in flight**: `npx @hoodiecollin/pm-playbook materialize --yes`.
+   PM013 tells you when this is owed, and it is owed again at every cycle rollover — which is why
+   step 9b's `schedule:` matters more than it looks.
 9. **Wire the gates into CI** so the invariants survive the person who set them up:
    `check` on pull requests, `release-check <vX.Y.Z>` before a tag, and — if you keep an
    integration branch (§5.3) — `scope-check <pr>` on PRs targeting it.
+9b. **For each gate you just wired, name what it can fail** (§5.5) — "before a tag" in step 9 is
+   doing more work than it looks. A `release-check` job triggered by the same tag push as your
+   release workflow runs *beside* it and blocks nothing; it needs a pre-release hook, a required
+   status check, or a written acknowledgement that it is parallel-and-loud. Also give a
+   `schedule:` to every check validating state you do not control (the reclose, advisories,
+   credential expiry) — those go stale with no commit from you, and a push-triggered badge cannot
+   tell *verified now* from *verified once*.

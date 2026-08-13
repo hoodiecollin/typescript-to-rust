@@ -8,7 +8,7 @@ labels: release-gate
 <!--
   PLAYBOOK §5.2. An open `release-gate` issue on a milestone means that milestone CANNOT be
   tagged, even if every feature on it is closed. Assign the milestone — `release-gate` requires
-  one, and is mutually exclusive with `idea` / `plan-next` / `experiment`.
+  one (PM004), and is mutually exclusive with `experiment` (PM005).
 
   File this the moment you KNOWINGLY defer a release obligation. The deferral is exactly when it
   gets forgotten, because everything still builds locally.
