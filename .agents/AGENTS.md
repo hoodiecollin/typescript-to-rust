@@ -40,16 +40,17 @@ emit `Any` or commented-out stubs.
 
 ## The spec-first workflow (required for every change)
 
-Every change goes through the three gates, in series (see
-`.pm-playbook/reference/09-design-plan-spec.md` and `docs/CONTRIBUTING.md`):
+Every change goes through the gates, in series (see `.pm-playbook/reference/09-gates.md`
+and `docs/CONTRIBUTING.md`). Gates are **native sub-issues** of the work item, created
+by `pm-playbook materialize` as a complete set — **never by hand**. An `improvement`
+takes three; a `bugfix` takes two (diagnose → fix). **Closing a gate means accepted.**
 
 1. **Gate 1 — design (WHAT & WHY).** Problem, desired behavior, solution *shape*,
-   alternatives, explicit non-goals. **On the issue** — an `rfc` issue for a new
-   proposal, or the design section of the issue that tracks the work. Never a
-   committed `design.md`. Accepted → drop `idea`, add `plan-next`.
-2. **Gate 2 — implementation-plan (HOW).** Files to touch, build order, blockers,
-   interfaces, **and the BDD scenarios to write**. Also on the issue. This is where
-   the old `specs.md` content goes.
+   alternatives, explicit non-goals. **On the gate sub-issue** — never a committed
+   `design.md`.
+2. **Gate 2 — plan (HOW).** Files to touch, build order, blockers, interfaces, **and
+   the BDD scenarios to write**. Also on its gate sub-issue. This is where the old
+   `specs.md` content goes.
 3. **Gate 3 — RED → GREEN.**
    - **Mock** — a mock interface of what the real impl will supersede.
    - **RED specs** — transcribe the planned scenarios into real BDD tests that call
@@ -99,19 +100,25 @@ vendored at `.pm-playbook/` and is authoritative; this block is only a summary.
 It is a short router: load only the reference section relevant to what you are doing.
 
 **The two axes, and nothing else, organize work:**
-- **Milestone** = *when* (a version release — the release spine). Assigning one means "scheduled."
-- **Labels** = *what kind / how committed*. Epics decompose via **native sub-issues**, never
-  checkboxes and never a Project field.
+- **Milestone** = *when*. Assigning one means **committed**; being the cycle in flight is what
+  means *scheduled*. There is no label for "committed but unscheduled."
+- **Labels** = *what kind*. Epics decompose via **native sub-issues**, never checkboxes and never
+  a Project field.
 - There are **no Priority / Size / Workstream fields**. Do not propose adding any.
+- Every work item carries exactly one of `improvement` / `bugfix` / `experiment`, and the type
+  decides its gate set. The commitment ladder is **derived** from gate state — ask
+  `pm-playbook ladder`, since no filter can compute it.
 
 **Invariants — violating one is a bug, not a style preference:**
-- `plan-next` and a milestone never coexist. Assigning a milestone means dropping `plan-next`.
-- `idea` and `plan-next` never coexist.
-- `experiment` never carries `idea`, `plan-next`, or a milestone. A spike's deliverable is a
-  decision; it feeds the release spine, it never rides it.
-- `release-gate` always has a milestone, and never carries `idea` / `plan-next` / `experiment`.
+- Exactly **one** type label per work item — never zero, never two (PM010).
+- `experiment` never carries a milestone. A spike's deliverable is a decision; it feeds the
+  release spine, it never rides it (PM003).
+- **Never create a gate by hand** — `materialize` owns them, and a hand-made gate destroys the
+  meaning of an absent one.
+- A gate's milestone equals its parent's (PM011); an `epic` never carries gates (PM012).
+- `release-gate` always has a milestone and never carries `experiment` (PM004/PM005).
   An open `release-gate` means its milestone **cannot be tagged**.
-- A non-core `surface:*` issue never rides a core `v*` milestone.
+- A non-core `surface:*` issue never rides a core `v*` milestone (PM006).
 
 **Verify before opening a PR** — exit code 0 means compliant:
 

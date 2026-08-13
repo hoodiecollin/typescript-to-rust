@@ -20,10 +20,10 @@ in the tree.
 ```bash
 gh issue list                     # the whole backlog
 gh issue list --label epic        # the big themes
-gh issue list --label plan-next   # committed, not yet scheduled to a version
-gh issue list --label idea        # speculative — needs a design first
-gh issue list --label rfc         # designs awaiting acceptance
-gh issue view <n>                 # the design and the plan live in the issue body
+gh issue list --milestone v0.1.0  # what is committed to a release
+gh issue list --label improvement:gate-1 --state open   # designs in progress
+gh issue view <n>                 # the design and the plan live in the gate sub-issues
+bunx @hoodiecollin/pm-playbook ladder   # the derived rung — no filter can compute it
 ```
 
 ## The two axes
@@ -32,9 +32,10 @@ Work is organized by exactly two things. This repo follows the
 [pm-playbook](../.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`, which is
 authoritative wherever this file is less specific.
 
-- **Milestone = *when*.** A version (`v0.1.0`, `v0.2.0`, …). Assigning one means
-  the work is *scheduled*. This is the release spine.
-- **Labels = *what kind*, and *how committed*.**
+- **Milestone = *when*.** A version (`v0.1.0`, `v0.2.0`, …). Assigning one means the work is
+  **committed**; the milestone being the *cycle in flight* is what means scheduled. This is the
+  release spine.
+- **Labels = *what kind*.** Exactly one of `improvement` / `bugfix` / `experiment` per work item.
 
 There are **no Priority, Size, Workstream, or status fields**, and adding one is not an
 improvement to propose — a third axis is how a tracker stops describing reality. In
@@ -46,32 +47,37 @@ Subsystem grouping is not a label either — it is the epic an issue is a sub-is
 
 ### The commitment ladder
 
+The ladder is **derived** from gate state, not stored in a label. Walk a work item's gates in
+order; the first one not closed decides the rung.
+
 ```
-idea  →  plan-next  →  milestone assigned  →  closed  →  GitHub Release
-        (committed,      (scheduled;         (merged)
-       not scheduled)  plan-next dropped)
+idea  →  design-next  →  design-pending  →  plan-next  →  plan-pending
+      →  impl-next  →  impl-pending  →  closed-in-milestone  →  GitHub Release
 ```
+
+Nothing to set, nothing to forget to unset — and a rung can never disagree with the artifacts it
+summarizes. Ask `bunx @hoodiecollin/pm-playbook ladder`; no GitHub filter can compute it.
 
 | Label | Means |
 |---|---|
-| `idea` | Speculative. Not committed. Needs a design before anything else. |
-| `plan-next` | Committed, not yet scheduled to a version. |
-| `rfc` | A design awaiting acceptance. **Design docs are issues, never committed files.** |
-| `epic` | A theme. Decomposes into **native sub-issues** — see below. |
-| `experiment` | A timeboxed spike whose deliverable is a *decision*, not a feature. |
-| `tech-debt`, `perf`, `bug`, `documentation` | What kind of work it is. |
+| `improvement` | Makes the product better: features, refactors, perf, debt. Gates: design → plan → impl. |
+| `bugfix` | A defect in behavior that already exists. Gates: diagnose → fix. |
+| `experiment` | A timeboxed spike whose deliverable is a *decision*, not a feature. Never milestoned. |
+| `hotfix` | Urgent `bugfix` in released behavior, on its own patch milestone. Never alone. |
+| `epic` | A theme. Decomposes into **native sub-issues** — see below. Never carries gates. |
 | `release-gate` | Blocks tagging its milestone. Always has a milestone. |
+| `{type}:gate-{n}` | A gate sub-issue. Created by `materialize`, **never by hand**. |
 
 ### Invariants
 
 Violating one of these is a bug, not a style preference. `bunx @hoodiecollin/pm-playbook check`
 enforces them and must exit 0 before you open a PR.
 
-- `plan-next` and a milestone never coexist — assigning a milestone means dropping `plan-next`.
-- `idea` and `plan-next` never coexist.
-- `experiment` never carries `idea`, `plan-next`, or a milestone. A spike feeds the release
-  spine; it never rides it.
-- `release-gate` always has a milestone and never carries `idea` / `plan-next` / `experiment`.
+- Exactly **one** type label per work item — never zero, never two (PM010).
+- `experiment` never carries a milestone. A spike feeds the release spine; it never rides it (PM003).
+- A gate's milestone equals its parent's (PM011); an `epic` never carries gates (PM012).
+- Work on the focused milestone carries its complete gate set (PM013).
+- `release-gate` always has a milestone and never carries `experiment` (PM004/PM005).
   An open `release-gate` means its milestone **cannot be tagged**.
 - **An epic decomposes via native sub-issues** — the GitHub Sub-issues panel — never via a
   checkbox list in the body, and never via a Project field. A checklist is a second,
@@ -85,8 +91,10 @@ gh api repos/hoodiecollin/typescript-to-rust/issues/<epic>/sub_issues -F sub_iss
 
 ## Design → plan → spec
 
-Every change goes through three gates, in series. The full statement is in
-[`.pm-playbook/reference/09-design-plan-spec.md`](../.pm-playbook/reference/09-design-plan-spec.md);
+Every change goes through its type's gates, in series — three for an `improvement`, two for a
+`bugfix` (diagnose → fix). They are **native sub-issues** created by `pm-playbook materialize` as a
+complete set, never by hand. The full statement is in
+[`.pm-playbook/reference/09-gates.md`](../.pm-playbook/reference/09-gates.md);
 this is the repo-shaped version.
 
 ### Gate 1 — design (WHAT and WHY)
@@ -94,14 +102,14 @@ this is the repo-shaped version.
 Problem, desired behavior, the *shape* of the solution, the alternatives considered, and
 explicit non-goals.
 
-**It lives on the issue.** A new proposal is an `rfc` issue; work already tracked by an
-issue gets a design section in that issue's body. It is **never** a committed `design.md`
+**It lives on the gate sub-issue.** `materialize` creates the gate set for a work item; the design
+goes in gate 1's body. It is **never** a committed `design.md`
 — a document in the tree is invisible to `gh issue list`, and it gives you two
 identifiers for one piece of work that someone has to keep in sync by hand. This repo used to keep numbered
 `docs/work/<NNN>/design.md` series folders; they were deleted once their durable content
 was distilled into [ARCHITECTURE.md](ARCHITECTURE.md), and git history holds the rest.
 
-Accepted → drop `idea`, add `plan-next`.
+**Closing the gate means accepted.**
 
 **If you reopen an accepted gate, purge the issue body first** and replace it with the
 withdrawal placeholder. A superseded design left in place does not *read* as superseded —
@@ -110,8 +118,8 @@ it reads as *the* design, and the next person plans against it.
 ### Gate 2 — implementation-plan (HOW)
 
 Files to touch, build order, blockers, interfaces, **and the BDD scenarios you are going
-to write**. Same issue, below the design. There is an
-[implementation-plan issue template](../.github/ISSUE_TEMPLATE/implementation-plan.md).
+to write**. It lives on gate 2's sub-issue, which `materialize` created alongside gate 1 — the
+seed body is the template.
 
 ### Gate 3 — RED → GREEN
 
