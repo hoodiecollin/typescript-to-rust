@@ -171,14 +171,17 @@ actually builds and produces the expected output. See
 ## Backlog
 
 The backlog is **GitHub Issues**, and only GitHub Issues — there is no roadmap file that
-schedules work and no `TODO.md`. Work is organized on two axes: a **milestone** says
-*when* (the release spine) and **labels** say *what kind, and how committed*
-(`idea` → `plan-next` → scheduled). Epics decompose via native sub-issues. This follows
-the [pm-playbook](./.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`.
+schedules work and no `TODO.md`. Work is organized on two axes: a **milestone** says *when* and
+means **committed** (being the cycle in flight is what means *scheduled*), and **labels** say
+*what kind* — every work item is exactly one of `improvement`, `bugfix` or `experiment`. Each
+decomposes into gate sub-issues, and how far along it is derives from which gates are closed.
+Epics decompose via native sub-issues. This follows the
+[pm-playbook](./.pm-playbook/PLAYBOOK.md) doctrine, vendored at `.pm-playbook/`.
 
 ```bash
-gh issue list --label plan-next   # committed, not yet scheduled
-gh issue list --label rfc         # designs awaiting acceptance
+gh issue list --milestone v0.1.0                        # what is committed to a release
+gh issue list --label improvement:gate-1 --state open   # designs in progress
+bunx @hoodiecollin/pm-playbook ladder                   # the derived rung of every work item
 ```
 
 ## Contributing

@@ -126,7 +126,7 @@ losses. A corpus win is not a claim about your program.
 
 ## Known-bad output
 
-Three reproducible codegen bugs are open and `plan-next`. They produce Rust that does not
+Three reproducible codegen bugs are open and committed to a milestone. They produce Rust that does not
 compile — loud, not silent — but they are real:
 
 - **#98** — a `switch` with a `return` in every case over an enum emits a non-exhaustive

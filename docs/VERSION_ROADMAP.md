@@ -21,11 +21,10 @@ which is why the release epic (#143) is about *publishing artifacts*, not about 
 repo.
 
 Four milestones exist and **all four now hold scope**: `v0.1.0`, `v0.2.0`, `v0.3.0`, and
-`v0.4.0`. 42 of the 61 open issues are scheduled. Of the 19 unscheduled, 15 carry `idea` —
-"speculative, and not yet scheduled" — and four do not: #126 and #134 are `rfc` designs
-awaiting acceptance, #118 is an epic whose children are not yet filed, and #79 is a
-`tech-debt` triage item. Nothing carries `plan-next` — there is no committed-but-unscheduled
-work left.
+`v0.4.0`. 42 of the 61 open issues carry a milestone. The 19 that do not are the *ideas* —
+uncommitted by definition, since under the two-axis model a milestone is what means committed.
+Four of them are not merely speculative: #126 and #134 are designs awaiting acceptance, #118 is
+an epic whose children are not yet filed, and #79 is a triage item.
 
 The ordering is worth stating plainly, because it is not the obvious one: **correctness and
 the dialect come first, publishing comes third.** The artifacts that make `ttr` installable
@@ -161,9 +160,10 @@ in an unreleased tree.
   are now wins end to end: `loopsum`, `arraypipe`, and `strbuild`. `ttr` also wins on
   resident memory (1.4–14 MB vs 30–105 MB) and startup (4.2 ms vs Bun 12.2 ms, Node 97 ms).
 
-## Still unscheduled
+## Still uncommitted
 
-19 issues carry `idea` and no milestone. The ones worth naming:
+19 issues carry no milestone, which is what "idea" means now — it is derived, not labelled. The
+ones worth naming:
 
 | | What | Why it is not scheduled |
 |---|---|---|
@@ -180,7 +180,7 @@ These feed the spine; they never ride it.
 - **#61 — migrate `TypeOracle` to the tsgo v7 native checker.** Externally blocked: there
   is no v7 compiler API yet.
 - **#25 — the Rust-AST + pretty-printer rewrite.** A structural improvement to how Rust is
-  produced. Real, `idea`, and not a user-visible feature.
+  produced. Real, uncommitted, and not a user-visible feature.
 
 ## See also
 
