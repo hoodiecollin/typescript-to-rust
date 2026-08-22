@@ -14,6 +14,10 @@ labels: improvement
   derived from the absence of a milestone rather than stuck on as a label (§2).
 -->
 
+### In plain English
+<!-- Two or three sentences: what this is about, for a reader who has never seen it.
+     This is the FIRST section, always, and it is what other tooling reads (PLAYBOOK §9.6). -->
+
 ### What is the need?
 <!-- The business / project / product problem, in plain English. Not the solution. -->
 

@@ -55,7 +55,7 @@ must be applied by hand is one that gets forgotten on exactly the issue that nee
   `bun run typecheck`).
 
 <!-- pm-playbook:begin -->
-## Project management — pm-playbook v2.1.0
+## Project management — pm-playbook v2.3.0
 
 Issue tracking in this repo follows the **pm-playbook** two-axis model. The full doctrine is
 vendored at `.pm-playbook/` and is authoritative; this block is only a summary.
@@ -86,7 +86,8 @@ gates in order; the first not closed decides the rung. Ask for it with `pm-playb
 GitHub filter can compute it.
 
 **Invariants — violating one is a bug, not a style preference:**
-- Exactly **one** type label per work item — never zero, never two (PM010).
+- Exactly **one** type label per work item — never zero, never two (PM010). An `epic`, a gate and
+  a `release-gate` are not work items for this purpose and need no type.
 - `experiment` never carries a milestone. A spike's deliverable is a finding; it feeds the
   release spine, it never rides it (PM003).
 - **Never create a gate by hand** — `pm-playbook materialize` owns them and creates a complete

@@ -169,7 +169,10 @@ These keep the two axes clean and the derived views trivial. **Enforce them on e
 `pm-playbook check` does, and each rule id below is what it reports.
 
 - **Exactly one type label per work item** (PM010). Not zero, not two. An epic is a container
-  rather than work, and a gate takes its type from its own label, so neither needs one.
+  rather than work, a gate takes its type from its own label, and a `release-gate` is a release
+  *obligation* rather than work with a design→plan→impl arc, so none of the three needs one. A
+  `release-gate` may carry a type anyway; it is simply not required to, and PM013 never asks one
+  for a gate set it could not fill.
 - **`experiment` ⊕ milestone** (PM003). A spike feeds the spine; it never rides it (§4).
 - **`release-gate` ⇒ milestone** (PM004), and **`release-gate` ⊕ `experiment`** (PM005). A gate
   blocks a *specific* tag, so it is meaningless without the milestone it blocks — and it is
@@ -178,7 +181,9 @@ These keep the two axes clean and the derived views trivial. **Enforce them on e
   (§5.2).
 - **`hotfix` ⇒ `bugfix` + a milestone, and `hotfix` ⊕ {`experiment`, `epic`}** (PM014). A hotfix is
   a *form* of bugfix, not a fourth type (§5.6).
-- **A patch milestone holds one hotfix and its gates, nothing else** (PM015).
+- **A patch milestone holds one hotfix, its gates, and any `release-gate` — no other work** (PM015).
+  A `release-gate` is a release obligation rather than work, so it was never what "nothing else"
+  excluded; §5.6 says where a patch's asset ledger lives.
 
 The structural rules live with the structures they govern: gate parentage and completeness in §9,
 epic decomposition in §7.1.
@@ -484,7 +489,7 @@ That is not hypothetical. It is what a settings/prose/history disagreement looks
 
 Three sources, three answers, and each contributor followed whichever they met first.
 
-Two rules make the choice legible once it is made:
+Three rules make the choice legible once it is made:
 
 1. **Write it in `CONTRIBUTING.md`**, with the exact command if work merges locally. When the
    choice is merge commits, say that `--no-ff` is required: a branch that is merely ahead
@@ -495,6 +500,32 @@ Two rules make the choice legible once it is made:
    branch therefore leaves its issue **open** however the body is written, and it must be closed
    by hand. Teams adopting an integration branch discover this by finding a milestone full of
    merged work that still reads as unfinished.
+3. **Name the mechanics for *each direction* of the trunk↔integration sync, because they are not
+   symmetric.** Integration → trunk **is** the release, and it is a merge commit: that boundary is
+   the record of what shipped together, which is rule 1. Trunk → integration is only a **sync**,
+   and it should be a **rebase**.
+
+   A back-merge in that direction adds a commit whose entire payload is already on trunk. Do it
+   every release and the integration branch fills with content-free `Merge trunk into integration`
+   commits — noise that buries the real work, and worse, makes `trunk..integration` a liar: it
+   lists commits that changed nothing, so the one query that should answer "what is unreleased?"
+   stops meaning that.
+
+   Two operational notes, both of which surprise people the first time:
+
+   - Rebasing a *pushed* integration branch rewinds the ref, so it needs `--force-with-lease`.
+     **Check the branch protections before adopting this**: if the integration branch is protected
+     against non-fast-forward pushes, the rule cannot be applied there without a bypass — resolve
+     that deliberately rather than discovering it mid-release. (Protecting only the default branch
+     is the common setup, and leaves the integration branch free.)
+   - `git rebase` drops merge commits by default. If the integration branch's only commits since
+     the last release *are* prior back-merges, it collapses to exactly trunk — the correct outcome,
+     though it looks alarming. Confirm `git diff trunk integration` is empty before force-pushing,
+     so you know what was dropped carried nothing.
+
+   This does not contradict rule 1. Rule 1 governs how a **branch of work lands**; this governs a
+   **sync between two long-lived branches**. A repo can, and usually should, disable rebase merging
+   for pull requests while still rebasing the integration branch onto trunk locally.
 
 ### 5.5 Enforcement points — a rule needs a place where it can fail
 
@@ -634,11 +665,23 @@ folded into the cycle in flight.
 **One hotfix, one milestone.** A patch milestone that accumulates "while we're in there" work has
 lost the boundedness that made it cheap, which is why this is an invariant (PM015) and not a habit.
 
+**"Nothing else" means no other *work*.** A `release-gate` may — and for the ledger below, must —
+sit on a patch milestone. It is a release obligation, not something anyone could defer, which is
+the whole reason §5.2 gave it its own label. PM015 exempts it for the same reason PM010 and PM013
+do.
+
 Two things this does *not* waive:
 
-- **The §5.2 asset ledger applies.** A patch publishes artifacts, so the stale-source-behind-a-
-  correct-version failure is exactly as live as it is for a minor.
+- **The §5.2 asset ledger applies, and it lives in the same place it always does** — a `release-gate`
+  issue on the patch milestone. §5.2 describes the ledger being created "when the milestone opens",
+  which for a patch is the moment the warrant is accepted and the milestone is cut, not some earlier
+  planning step. A one-row table still gets the issue: the ledger's value is the **"no change"** rows
+  that prove an asset was considered, and a patch is where the temptation to skip that is strongest
+  because exactly one thing usually moved.
 - **`release-check` is unchanged.** A patch milestone is an ordinary core milestone for gating.
+
+> Do not improvise the ledger into the fix gate's body. It works once and teaches the next person to
+> improvise somewhere else, and it puts the ledger where no query can find it.
 
 And note the interaction with §5.3: a patch milestone sorts *below* the cycle in flight, which is
 why the cycle is derived as "the lowest open core milestone **on an unreleased line**". Without
@@ -892,7 +935,48 @@ the tree are **durable architecture references for *shipped* features** (`ARCHIT
 feature ships, fold its durable design into `ARCHITECTURE.md`; the gate issue is already closed and
 stays as the record of how the decision was reached.
 
-### 9.6 Reopening an accepted gate — purge the body FIRST
+### 9.6 A body states current truth only — purge as you amend
+
+**The general rule, of which reopening a gate is one instance:**
+
+> **An amendment replaces. The thing being superseded comes out in the same edit that puts the
+> replacement in.** Not struck through, not annotated "see below", not left in place with a
+> correction underneath.
+
+**Why this is a hard rule and not a nicety.** A superseded paragraph does not read as superseded —
+it reads as current, because that is what a body *is*. Everything downstream trusts it: the next
+planning pass, an agent picking the issue up cold, a reviewer checking whether the implementation
+matches. The correction is invariably in a comment, and top-down readers never reach it. The failure
+is silent and it compounds, and it costs every parallel agent separately, because each one loads the
+whole body and pays for the dead half.
+
+Two shapes recur. **Superseded content accumulates**: a claim is disproved, a constraint turns out
+to be an assumption, a number gets corrected — the correction lands in a new paragraph and the
+original stays, so every later reader has to work out which half is live. And **justification
+outgrows substance**: rationale gets written at the length it took to think rather than the length
+it takes to convey, until the artifact stops being reviewable by a human and stops being usable by
+an agent. **Rationale is proportionate to the decision it supports.**
+
+This is about the **body**, which is the only surface that reads as current by default. Comments
+remain the discussion record; nothing here deletes history.
+
+#### Every body opens with a plain-English summary
+
+**The first section of every work item and every epic is `### In plain English`** — two or three
+sentences on what this is, for a reader who has never seen it. Structured content follows it;
+rationale follows that.
+
+The heading is **identical everywhere** rather than tuned per type, because it is read by tooling as
+well as by people, and a per-type heading would push a type-to-heading table into every consumer and
+break the moment a type is added. It is checked by **PM017**, on presence and position only — no
+mechanism can tell a live paragraph from a dead one, and a length threshold measures the symptom
+least correlated with the defect.
+
+**Gates and `release-gate` issues are exempt from the slot**, though not from the purge rule above:
+their bodies are seeded with mandated structure that already serves the purpose. An **epic is not
+exempt** — it is read by the same tooling its children are.
+
+#### Reopening an accepted gate
 
 Gates get reopened. New information lands, a constraint turns out to be an artifact of an
 assumption, an implementation reveals the design was solving the wrong problem. Redoing a gate is
@@ -906,13 +990,6 @@ thinking happens.** What replaces it is a placeholder and nothing else:
 > withdrawn and this body intentionally holds no design content. Do not plan against anything
 > here. The live discussion is in the comments.
 ```
-
-**Why this is a hard rule and not a nicety.** A superseded design in the body does not read as
-superseded — it reads as **the accepted design**, because that is what a body *is*. Everything
-downstream trusts it: the next planning pass, an agent picking the issue up cold, a reviewer
-checking whether the implementation matches. The correction is invariably in a comment, and
-top-down readers never reach it. The failure is silent and it compounds: a plan written against a
-withdrawn design looks exactly like a plan written against the live one.
 
 Stashing the old body to a scratch file while you work is fine and often useful. **Delete the
 stash when the new gate is accepted and the new body is written** — a lingering copy of a
@@ -939,6 +1016,51 @@ This is deliberately expensive. It is worth it: the cost of a reconciliation pas
 paid once, while the cost of planning against a stale claim is unbounded and discovered late.
 
 ---
+
+### 9.8 Parallel agents — what they must be given, and what they may conclude
+
+Point several agents at several issues at once and each reads only its own. It then confidently
+proposes something that breaks, duplicates, or contradicts what a sibling issue already decided.
+That is not a discipline failure. §1 bans a third decomposition axis and epics give hierarchy only,
+so there is nowhere in the model to record that two issues constrain each other — **the agent is not
+failing to look; there is nothing to look at.**
+
+**Context is pushed, never fetched.** A rule telling agents to read their siblings first fails under
+exactly the conditions that motivate it: an agent optimising its own narrow task skips a
+discretionary read. So the fan-out step assembles the neighbourhood and puts it in the brief. An
+agent is *given* its context.
+
+**The neighbourhood is derived, never recorded.** From explicit `#N` references in either direction,
+the epic parent and its other children, a shared surface, and a shared milestone. Nothing about a
+relation is stored anywhere, so nothing can drift — the same argument §8 makes for the board. A
+`related-to` label would be a third axis in disguise, needing its own invariant to stay honest and
+decaying exactly like the `Priority`/`Size` fields §1 exists to ban.
+
+**Breadth is complete; depth is rationed.** The neighbourhood arrives as two layers:
+
+- **A roster naming every neighbour, never truncated.** This is the property that cannot be traded
+  for size. An agent that does not know a neighbour exists is the failure being fixed, so anything
+  not expanded is still listed, with an explicit count and the command that expands it.
+- **Depth for the closest ring only**, composed of each neighbour's own §9.6 summary rather than its
+  raw body. An excerpt says what a neighbour *contains*; a summary says what it is. Closed issues
+  are roster-only — closed work is reference, not context.
+
+**What a parallel agent may conclude.** An agent that can see the edge of its neighbourhood but not
+all of it may produce **gate 1 material**: a design that states what it would disturb across that
+neighbourhood. It may **not** jump to implementation across a neighbourhood it cannot fully see.
+Two agents proposing conflicting designs for genuinely coupled issues is the expected outcome, and
+declaring blast radius is what surfaces the conflict for a human — it does not resolve it, and it is
+not meant to.
+
+**The code map is written onto the issue at gate 2.** Entry points, call paths, files that must
+change — each cited by path, and carrying the commit it was derived at. The next agent reads the map
+instead of rediscovering it. A map is a **claim** about ground truth (§1) and therefore rots, so
+§9.7's before-gate verify pass re-checks it. A stale map that reads as current is the §9.6 failure
+in a new location.
+
+**Relations neither issue's own summary can carry** — "these two must ship together" — belong on the
+**epic**. That is the model's existing home for a relation between issues, with one owner and a body
+rather than an append-only log.
 
 ## 10. Documentation discipline
 
@@ -1105,4 +1227,8 @@ Standing rules that keep Issues the single, always-current source of truth:
   against a single registry and only one cycle can be in flight; a version in the branch name also
   encodes the schedule a second time, competing with the milestone (§5.3). One integration branch,
   version-agnostic, gated by `scope-check`.
+- **Back-merging trunk into the integration branch** → every release leaves a content-free merge
+  commit behind, until `trunk..integration` lists commits that changed nothing and stops answering
+  "what is unreleased?". Sync that direction by rebase (§5.4 rule 3); the merge commit belongs to
+  the other direction, where it records what shipped.
 - **Roadmap over-promising** → `WHAT_IT_IS.md` states limits and cedes authority to the code.

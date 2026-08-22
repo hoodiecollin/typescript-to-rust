@@ -244,7 +244,7 @@ That is not hypothetical. It is what a settings/prose/history disagreement looks
 
 Three sources, three answers, and each contributor followed whichever they met first.
 
-Two rules make the choice legible once it is made:
+Three rules make the choice legible once it is made:
 
 1. **Write it in `CONTRIBUTING.md`**, with the exact command if work merges locally. When the
    choice is merge commits, say that `--no-ff` is required: a branch that is merely ahead
@@ -255,6 +255,32 @@ Two rules make the choice legible once it is made:
    branch therefore leaves its issue **open** however the body is written, and it must be closed
    by hand. Teams adopting an integration branch discover this by finding a milestone full of
    merged work that still reads as unfinished.
+3. **Name the mechanics for *each direction* of the trunk↔integration sync, because they are not
+   symmetric.** Integration → trunk **is** the release, and it is a merge commit: that boundary is
+   the record of what shipped together, which is rule 1. Trunk → integration is only a **sync**,
+   and it should be a **rebase**.
+
+   A back-merge in that direction adds a commit whose entire payload is already on trunk. Do it
+   every release and the integration branch fills with content-free `Merge trunk into integration`
+   commits — noise that buries the real work, and worse, makes `trunk..integration` a liar: it
+   lists commits that changed nothing, so the one query that should answer "what is unreleased?"
+   stops meaning that.
+
+   Two operational notes, both of which surprise people the first time:
+
+   - Rebasing a *pushed* integration branch rewinds the ref, so it needs `--force-with-lease`.
+     **Check the branch protections before adopting this**: if the integration branch is protected
+     against non-fast-forward pushes, the rule cannot be applied there without a bypass — resolve
+     that deliberately rather than discovering it mid-release. (Protecting only the default branch
+     is the common setup, and leaves the integration branch free.)
+   - `git rebase` drops merge commits by default. If the integration branch's only commits since
+     the last release *are* prior back-merges, it collapses to exactly trunk — the correct outcome,
+     though it looks alarming. Confirm `git diff trunk integration` is empty before force-pushing,
+     so you know what was dropped carried nothing.
+
+   This does not contradict rule 1. Rule 1 governs how a **branch of work lands**; this governs a
+   **sync between two long-lived branches**. A repo can, and usually should, disable rebase merging
+   for pull requests while still rebasing the integration branch onto trunk locally.
 
 ### 5.5 Enforcement points — a rule needs a place where it can fail
 
@@ -394,11 +420,23 @@ folded into the cycle in flight.
 **One hotfix, one milestone.** A patch milestone that accumulates "while we're in there" work has
 lost the boundedness that made it cheap, which is why this is an invariant (PM015) and not a habit.
 
+**"Nothing else" means no other *work*.** A `release-gate` may — and for the ledger below, must —
+sit on a patch milestone. It is a release obligation, not something anyone could defer, which is
+the whole reason §5.2 gave it its own label. PM015 exempts it for the same reason PM010 and PM013
+do.
+
 Two things this does *not* waive:
 
-- **The §5.2 asset ledger applies.** A patch publishes artifacts, so the stale-source-behind-a-
-  correct-version failure is exactly as live as it is for a minor.
+- **The §5.2 asset ledger applies, and it lives in the same place it always does** — a `release-gate`
+  issue on the patch milestone. §5.2 describes the ledger being created "when the milestone opens",
+  which for a patch is the moment the warrant is accepted and the milestone is cut, not some earlier
+  planning step. A one-row table still gets the issue: the ledger's value is the **"no change"** rows
+  that prove an asset was considered, and a patch is where the temptation to skip that is strongest
+  because exactly one thing usually moved.
 - **`release-check` is unchanged.** A patch milestone is an ordinary core milestone for gating.
+
+> Do not improvise the ledger into the fix gate's body. It works once and teaches the next person to
+> improvise somewhere else, and it puts the ledger where no query can find it.
 
 And note the interaction with §5.3: a patch milestone sorts *below* the cycle in flight, which is
 why the cycle is derived as "the lowest open core milestone **on an unreleased line**". Without
