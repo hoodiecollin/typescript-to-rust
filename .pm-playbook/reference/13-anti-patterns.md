@@ -50,4 +50,8 @@
   against a single registry and only one cycle can be in flight; a version in the branch name also
   encodes the schedule a second time, competing with the milestone (§5.3). One integration branch,
   version-agnostic, gated by `scope-check`.
+- **Back-merging trunk into the integration branch** → every release leaves a content-free merge
+  commit behind, until `trunk..integration` lists commits that changed nothing and stops answering
+  "what is unreleased?". Sync that direction by rebase (§5.4 rule 3); the merge commit belongs to
+  the other direction, where it records what shipped.
 - **Roadmap over-promising** → `WHAT_IT_IS.md` states limits and cedes authority to the code.

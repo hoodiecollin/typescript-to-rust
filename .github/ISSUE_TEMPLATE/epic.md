@@ -10,8 +10,10 @@ labels: epic
 >      stale discussion further down. Each decision gets a ✅ and a one-line rationale. -->
 > - **Decision:** … — ✅ rationale.
 
-## Summary
-<!-- What this epic delivers. Mark **release-blocking** here if it gates a release. -->
+### In plain English
+<!-- What this epic delivers, for a reader who has never seen it. Mark **release-blocking**
+     here if it gates a release. Same heading every issue uses — an epic is read by the same
+     tooling its children are (PLAYBOOK §9.6). -->
 
 ## Current state (ground truth)
 <!-- Where the CODE actually is right now — not intentions. Update this as reality moves.

@@ -1,22 +1,22 @@
 {
   "package": "@hoodiecollin/pm-playbook",
-  "version": "2.1.0",
+  "version": "2.3.0",
   "migratedThrough": "2.1.0",
   "files": {
     "AGENT.md": "ce79df856480ae8ace8bb8efcaeb0e9964d97f5b02e6b0147aa3c25933ce9bc1",
-    "PLAYBOOK.md": "39a9656a6d0f15e2d9efe91a29cd6e19e57c5978aea22933875ae5f0579bdfbf",
+    "PLAYBOOK.md": "a49828efdd002bd716e59fae481aeb4aed7aa597bfa7ab69c65847c7972dbd9f",
     "reference/01-two-axis-core.md": "bd2bb4e753be8c7951e676d300fe5b68e1c2310ac9aad29102135fba68aa0b80",
     "reference/02-commitment-ladder.md": "841209aec92aa9ba8fa6dacc010f985b16bd0e8331641d8e8e5217dc02466cc5",
-    "reference/03-labels.md": "4375a31195516c29f3cffd2d9f265f4166b51e4918737ff588ac58a94ecdcc0b",
+    "reference/03-labels.md": "ada8f263d249c0e45b5d1afd503f43b151df6a33ec1176d9896674f521999678",
     "reference/04-experiments.md": "0e713adfc694cea0c533f591b0105187edc8eda4cafa76f9c97c1d8071088e9c",
-    "reference/05-release-spine.md": "08d72e29202edbaa23f8781400abc40be57473d64dc2903ad851a6619d148d59",
+    "reference/05-release-spine.md": "05fd95ab7be27b7c2cfb6dad473e5f5e033175a172a64665971d8596ce634393",
     "reference/06-surfaces.md": "cd46918f11b251f92301aa81347d1bcdaa341c3f9629fd0eaf03ada6a5f8decc",
     "reference/07-epics-and-roadmap.md": "75e1e2335c93a72f18215a843d6bde11596786dae8726b639a2d9aeb9d48fdb0",
     "reference/08-board-is-a-view.md": "c5746a21beb944575d104567bc7c3394053a8416b530b912d1773c9052eb2969",
-    "reference/09-gates.md": "0f87b2e25f3316f19acb9b24793458a80422889d54ffa7908c4a783638506c2c",
+    "reference/09-gates.md": "5feda10a1146242ffda15f0b247de3b5aa8c853ac39284fa08959325b2a0a116",
     "reference/10-documentation.md": "3bd7ebdf4ff457b8c7dd1a5c53eabafe5e4590e08a5ce5f67aef640201c78f25",
     "reference/11-operating-disciplines.md": "603a35500868f318b21e39ddff3a7461358b0a7063d21b16b6d3cff0340f8839",
     "reference/12-adopting.md": "13291076fc075451f1b1deaeffdc6d19f3f506486d0ad3fdf4795bd1c7246a4e",
-    "reference/13-anti-patterns.md": "d6407cd4841babf94dc2e15cbb64ceb193ea465f35205fa8fcc75b2fba8bc009"
+    "reference/13-anti-patterns.md": "19fbbb3e563f91538094bbf70234ab5848c48a2bc566e1c59522524ed6ab8c1e"
   }
 }

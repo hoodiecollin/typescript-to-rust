@@ -14,6 +14,10 @@ labels: bugfix
   expressible as one regression test that fails before and passes after.
 -->
 
+### In plain English
+<!-- Two or three sentences: what this is about, for a reader who has never seen it.
+     This is the FIRST section, always, and it is what other tooling reads (PLAYBOOK §9.6). -->
+
 ### What happens?
 
 ### What should happen instead?

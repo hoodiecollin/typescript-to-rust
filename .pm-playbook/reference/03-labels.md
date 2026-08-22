@@ -61,7 +61,10 @@ These keep the two axes clean and the derived views trivial. **Enforce them on e
 `pm-playbook check` does, and each rule id below is what it reports.
 
 - **Exactly one type label per work item** (PM010). Not zero, not two. An epic is a container
-  rather than work, and a gate takes its type from its own label, so neither needs one.
+  rather than work, a gate takes its type from its own label, and a `release-gate` is a release
+  *obligation* rather than work with a design→plan→impl arc, so none of the three needs one. A
+  `release-gate` may carry a type anyway; it is simply not required to, and PM013 never asks one
+  for a gate set it could not fill.
 - **`experiment` ⊕ milestone** (PM003). A spike feeds the spine; it never rides it (§4).
 - **`release-gate` ⇒ milestone** (PM004), and **`release-gate` ⊕ `experiment`** (PM005). A gate
   blocks a *specific* tag, so it is meaningless without the milestone it blocks — and it is
@@ -70,7 +73,9 @@ These keep the two axes clean and the derived views trivial. **Enforce them on e
   (§5.2).
 - **`hotfix` ⇒ `bugfix` + a milestone, and `hotfix` ⊕ {`experiment`, `epic`}** (PM014). A hotfix is
   a *form* of bugfix, not a fourth type (§5.6).
-- **A patch milestone holds one hotfix and its gates, nothing else** (PM015).
+- **A patch milestone holds one hotfix, its gates, and any `release-gate` — no other work** (PM015).
+  A `release-gate` is a release obligation rather than work, so it was never what "nothing else"
+  excluded; §5.6 says where a patch's asset ledger lives.
 
 The structural rules live with the structures they govern: gate parentage and completeness in §9,
 epic decomposition in §7.1.

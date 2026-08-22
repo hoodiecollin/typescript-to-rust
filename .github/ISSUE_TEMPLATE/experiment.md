@@ -18,6 +18,10 @@ labels: experiment
   leave it until you actually pick it up.
 -->
 
+### In plain English
+<!-- Two or three sentences: what this is about, for a reader who has never seen it.
+     This is the FIRST section, always, and it is what other tooling reads (PLAYBOOK §9.6). -->
+
 ### What do we not know?
 <!-- The uncertainty in plain English. The rigorous form of the question, the method and the
      scope bound belong in gate 1 (the charter), not here. -->
